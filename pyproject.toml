@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "davinci-resolve-mcp-free"
 version = "0.1.0"
-description = "Claude MCP server for DaVinci Resolve — works in the Free edition (no Studio license required). FCPXML export + Lua console snippets + macOS UI automation."
+description = "Claude MCP server that runs inside DaVinci Resolve Free — the no-cost edition that doesn't have the Studio Python scripting API. FCPXML export + Lua console snippets + macOS UI automation."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

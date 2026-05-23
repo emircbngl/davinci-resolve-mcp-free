@@ -1,8 +1,8 @@
-# DaVinci Resolve MCP — Free Edition Compatible
+# DaVinci Resolve MCP — Works in DaVinci Resolve Free
 
-**Claude-driven video editing for DaVinci Resolve that works in the FREE edition.** No Studio license required. No API key required.
+**Claude-driven video editing that runs in [DaVinci Resolve Free](https://www.blackmagicdesign.com/products/davinciresolve) — the no-cost edition that Blackmagic ships at $0.** No Studio license required, no API key required.
 
-Every other DaVinci MCP server out there ([samuelgursky/davinci-resolve-mcp](https://github.com/samuelgursky/davinci-resolve-mcp), barckley75, apvlv, Tooflex) **requires Resolve Studio** because Blackmagic gates the Python scripting API behind the paywall. This project routes around that paywall by combining three channels that all work in the Free edition:
+> ℹ️ **What "free" means here:** DaVinci Resolve ships in two editions — **Free** (no cost) and **Studio** (~$295 one-time license). Studio exposes a Python scripting API for automation; Free does not. Every existing DaVinci MCP server out there ([samuelgursky/davinci-resolve-mcp](https://github.com/samuelgursky/davinci-resolve-mcp), barckley75, apvlv, Tooflex) **requires Resolve Studio** for that reason. This project gets Claude-driven editing working in **Resolve Free too**, by routing around the missing Python API through three channels:
 
 | Channel | What it does | Free | Studio |
 |---|---|:---:|:---:|
@@ -11,7 +11,7 @@ Every other DaVinci MCP server out there ([samuelgursky/davinci-resolve-mcp](htt
 | **UI automation** (macOS) | Drive Magic Mask, Smart Reframe, Voice Isolation, page switching via Accessibility API | ✅ | ✅ |
 | Python scripting API | Direct DaVinciResolveScript control | ❌ | ✅ (planned) |
 
-If you've been turned away by other MCP servers because you don't have a Studio license, this is for you.
+If you've been turned away by other DaVinci MCP servers because you only have the free Blackmagic download — this is for you.
 
 ## Installation
 
