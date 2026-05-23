@@ -21,6 +21,8 @@ class Clip:
     """A source-anchored clip in the rough cut.
 
     All times are in seconds; the exporter converts to FCPXML rational time.
+    `transition_out_seconds` adds a Cross Dissolve into the *next* clip; ignored
+    on the last clip. Overrides `TimelineSpec.default_transition_seconds`.
     """
     source_path: str
     in_seconds: float
@@ -28,6 +30,7 @@ class Clip:
     name: str | None = None
     lane: int = 0
     notes: str | None = None
+    transition_out_seconds: float = 0.0
 
 
 @dataclass
@@ -37,6 +40,13 @@ class TimelineSpec:
     width: int = 1920
     height: int = 1080
     clips: list[Clip] = field(default_factory=list)
+    # If > 0, emit a Cross Dissolve of this duration at every cut that does not
+    # have a per-clip override via `Clip.transition_out_seconds`.
+    default_transition_seconds: float = 0.0
+    # Fade up from black at the start / down to black at the end. Implemented as
+    # a black <gap> + Cross Dissolve at the boundary.
+    fade_in_seconds: float = 0.0
+    fade_out_seconds: float = 0.0
 
 
 # NTSC fractional broadcast rates — FCPXML readers expect these specific
@@ -78,13 +88,42 @@ def _frame_duration(fps: float) -> str:
     return f"{den}/{num_per_sec}s"
 
 
+def _transition_duration_for(clip: Clip, default: float) -> float:
+    """Per-clip transition override > timeline default. 0 means none."""
+    return clip.transition_out_seconds if clip.transition_out_seconds > 0 else max(0.0, default)
+
+
+def _gap_element(offset_sec: float, duration_sec: float, fps: float) -> str:
+    return (
+        f'<gap name="Gap" '
+        f'offset="{_rational(offset_sec, fps)}" '
+        f'duration="{_rational(duration_sec, fps)}" '
+        f'start="0/1s"/>'
+    )
+
+
+def _transition_element(offset_sec: float, duration_sec: float, fps: float) -> str:
+    return (
+        f'<transition name="Cross Dissolve" '
+        f'offset="{_rational(offset_sec, fps)}" '
+        f'duration="{_rational(duration_sec, fps)}"/>'
+    )
+
+
 def build_fcpxml(spec: TimelineSpec) -> str:
-    """Return a complete FCPXML 1.10 string ready to write to disk."""
+    """Return a complete FCPXML 1.10 string ready to write to disk.
+
+    Transition / fade model: Cross Dissolves are emitted as FCP-X-style centered
+    overlaps — the transition's duration is split half-into-A, half-into-B, so
+    spine total length is unaffected by internal transitions. Fades prepend /
+    append a black `<gap>` whose duration *does* add to the spine.
+    """
     fmt_id = "r1"
     frame_dur = _frame_duration(spec.fps)
-    total_duration = _rational(
-        sum(c.duration_seconds for c in spec.clips), spec.fps
-    )
+
+    clips_duration = sum(c.duration_seconds for c in spec.clips)
+    total_duration_sec = spec.fade_in_seconds + clips_duration + spec.fade_out_seconds
+    total_duration = _rational(total_duration_sec, spec.fps)
 
     asset_lines: list[str] = []
     asset_ids: dict[str, str] = {}
@@ -101,21 +140,47 @@ def build_fcpxml(spec: TimelineSpec) -> str:
             f'src="{uri}" hasVideo="1" hasAudio="1" format="{fmt_id}"/>'
         )
 
-    spine_clips: list[str] = []
+    spine_elements: list[str] = []
     offset = 0.0
-    for clip in spec.clips:
+
+    if spec.fade_in_seconds > 0:
+        spine_elements.append(_gap_element(0.0, spec.fade_in_seconds, spec.fps))
+        # Centered transition at the gap → clip 1 boundary
+        spine_elements.append(_transition_element(
+            spec.fade_in_seconds - spec.fade_in_seconds / 2,
+            spec.fade_in_seconds, spec.fps,
+        ))
+        offset = spec.fade_in_seconds
+
+    last_index = len(spec.clips) - 1
+    for i, clip in enumerate(spec.clips):
         asset_id = asset_ids[str(Path(clip.source_path).expanduser().resolve())]
         clip_name = clip.name or Path(clip.source_path).stem
-        spine_clips.append(
-            f'        <asset-clip name="{html.escape(clip_name)}" '
+        spine_elements.append(
+            f'<asset-clip name="{html.escape(clip_name)}" '
             f'ref="{asset_id}" '
             f'offset="{_rational(offset, spec.fps)}" '
             f'start="{_rational(clip.in_seconds, spec.fps)}" '
             f'duration="{_rational(clip.duration_seconds, spec.fps)}" '
             f'lane="{clip.lane}"/>'
         )
+        if i < last_index:
+            trans = _transition_duration_for(clip, spec.default_transition_seconds)
+            if trans > 0:
+                # Centered overlap at the clip-to-clip boundary
+                spine_elements.append(_transition_element(
+                    offset + clip.duration_seconds - trans / 2, trans, spec.fps,
+                ))
         offset += clip.duration_seconds
 
+    if spec.fade_out_seconds > 0:
+        spine_elements.append(_transition_element(
+            offset - spec.fade_out_seconds / 2,
+            spec.fade_out_seconds, spec.fps,
+        ))
+        spine_elements.append(_gap_element(offset, spec.fade_out_seconds, spec.fps))
+
+    spine_body = "\n".join("        " + e for e in spine_elements)
     xml = f'''<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
 <fcpxml version="1.10">
@@ -130,7 +195,7 @@ def build_fcpxml(spec: TimelineSpec) -> str:
         <sequence format="{fmt_id}" duration="{total_duration}"
                   tcStart="0/1s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
           <spine>
-{chr(10).join(spine_clips)}
+{spine_body}
           </spine>
         </sequence>
       </project>

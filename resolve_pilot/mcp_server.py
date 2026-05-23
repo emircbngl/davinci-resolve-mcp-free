@@ -164,6 +164,30 @@ def plan_roughcut_from_scenes(
 # ────────────────────────────────────────────────────────────────────────────
 
 @mcp.tool()
+def apply_default_transitions(
+    plan_json: str,
+    transition_seconds: float = 0.5,
+    fade_in_seconds: float = 0.0,
+    fade_out_seconds: float = 0.0,
+) -> dict:
+    """Add cross-dissolve transitions and/or fades to a rough-cut plan.
+
+    transition_seconds: Cross Dissolve duration applied at every cut between
+        adjacent clips. Set to 0 to leave cuts hard. Per-clip overrides set via
+        `clip.transition_out_seconds` always win.
+    fade_in_seconds:  Fade up from black at the start (0 disables).
+    fade_out_seconds: Fade to black at the end (0 disables).
+
+    Returns the modified plan ready to hand to export_fcpxml.
+    """
+    plan = RoughCutPlan.from_dict(json.loads(plan_json))
+    plan.default_transition_seconds = max(0.0, float(transition_seconds))
+    plan.fade_in_seconds = max(0.0, float(fade_in_seconds))
+    plan.fade_out_seconds = max(0.0, float(fade_out_seconds))
+    return plan.to_dict()
+
+
+@mcp.tool()
 def export_fcpxml(plan_json: str, out_path: str) -> dict:
     """Write a RoughCutPlan to disk as FCPXML 1.10.
 
@@ -282,6 +306,22 @@ def send_keystroke_tool(key: str, modifiers: str = "") -> dict:
     from resolve_pilot.ui_automation import send_keystroke
     send_keystroke(key, modifiers)
     return {"ok": True}
+
+
+@mcp.tool()
+def apply_video_transition_tool() -> dict:
+    """Apply Resolve's default video transition (Cmd+T) to the selected edits.
+
+    The Edit page must be open with one or more cuts selected (clips, edits, or
+    a range covering them). Resolve adds the default transition — Cross
+    Dissolve by default — to every selected edit. macOS only; works in both
+    Free and Studio editions.
+    """
+    if platform.system() != "Darwin":
+        return {"ok": False, "error": "UI automation is macOS-only"}
+    from resolve_pilot.ui_automation import send_keystroke
+    send_keystroke("t", "command")
+    return {"ok": True, "action": "Cmd+T → Apply Video Transition"}
 
 
 @mcp.tool()

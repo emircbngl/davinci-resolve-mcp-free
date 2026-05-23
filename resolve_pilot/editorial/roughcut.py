@@ -21,12 +21,16 @@ from resolve_pilot.transcribe import Segment
 
 @dataclass
 class RoughCutClip:
-    """One clip in the rough cut, sourced from a single file."""
+    """One clip in the rough cut, sourced from a single file.
+
+    `transition_out_seconds` adds a cross-dissolve into the next clip.
+    """
     source_path: str
     in_seconds: float
     duration_seconds: float
     rationale: str = ""  # why this clip was picked — useful for review
     name: str | None = None
+    transition_out_seconds: float = 0.0
 
 
 @dataclass
@@ -38,6 +42,11 @@ class RoughCutPlan:
     height: int = 1080
     clips: list[RoughCutClip] = field(default_factory=list)
     notes: str = ""
+    # Cross-dissolve duration applied to every cut without a per-clip override.
+    default_transition_seconds: float = 0.0
+    # Fade up from / down to black at the start and end of the timeline.
+    fade_in_seconds: float = 0.0
+    fade_out_seconds: float = 0.0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -52,6 +61,9 @@ class RoughCutPlan:
             height=int(data.get("height", 1080)),
             clips=clips,
             notes=data.get("notes", ""),
+            default_transition_seconds=float(data.get("default_transition_seconds", 0.0)),
+            fade_in_seconds=float(data.get("fade_in_seconds", 0.0)),
+            fade_out_seconds=float(data.get("fade_out_seconds", 0.0)),
         )
 
 
@@ -140,7 +152,11 @@ def plan_to_timeline_spec(plan: RoughCutPlan) -> TimelineSpec:
                 duration_seconds=c.duration_seconds,
                 name=c.name,
                 notes=c.rationale,
+                transition_out_seconds=c.transition_out_seconds,
             )
             for c in plan.clips
         ],
+        default_transition_seconds=plan.default_transition_seconds,
+        fade_in_seconds=plan.fade_in_seconds,
+        fade_out_seconds=plan.fade_out_seconds,
     )
