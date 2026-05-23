@@ -1,0 +1,10 @@
+{
+  "_comment": "Drop this into ~/Library/Application Support/Claude/claude_desktop_config.json, merging with any servers you already have. Replace the absolute path with yours.",
+  "mcpServers": {
+    "resolve-pilot": {
+      "command": "/ABSOLUTE/PATH/TO/video editing/.venv/bin/resolve-pilot",
+      "args": [],
+      "env": {}
+    }
+  }
+}

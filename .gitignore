@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+build/
+dist/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Project artefacts
+*.fcpxml
+*.srt
+assets/*.mp4
+!assets/placeholder_missing.mp4
+
+# Local example data with machine-specific paths
+examples/*.local.json
+examples/_*.json

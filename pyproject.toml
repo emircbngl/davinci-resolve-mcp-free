@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "davinci-resolve-mcp-free"
+version = "0.1.0"
+description = "Claude MCP server for DaVinci Resolve — works in the Free edition (no Studio license required). FCPXML export + Lua console snippets + macOS UI automation."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "resolve-pilot" }]
+dependencies = [
+    "mcp>=1.27.0",
+    "pydantic>=2.6",
+    "anyio>=4.4",
+    "httpx>=0.27",
+    "ffmpeg-python>=0.2.0",
+    "opentimelineio>=0.17",
+]
+
+[project.optional-dependencies]
+transcribe = [
+    "mlx-whisper>=0.4.0",
+    "numpy>=1.26",
+]
+ui = [
+    "pyobjc-framework-Cocoa>=10.3 ; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=10.3 ; sys_platform == 'darwin'",
+    "pyobjc-framework-ApplicationServices>=10.3 ; sys_platform == 'darwin'",
+]
+dev = [
+    "pytest>=8",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+resolve-pilot = "resolve_pilot.mcp_server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["resolve_pilot"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
