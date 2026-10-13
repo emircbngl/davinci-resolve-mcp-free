@@ -10,8 +10,9 @@ Tool groups:
 - plan:     plan_from_transcript, plan_from_scenes, create_plan, get_plan, edit_plan
 - export:   export_fcpxml, export_srt
 - resolve:  get_resolve_state, import_timeline, add_markers, add_quality_markers,
-            set_clip_color, apply_lut, queue_render, open_page, run_lua,
+            set_clip_color, apply_lut, queue_render, render_status, open_page, run_lua,
             list_lua_snippets, render_lua_snippet
+- timeline: import_media, append_clips, remove_clips (live building, no FCPXML)
 - macOS UI: send_keystroke, menu_pick, open_ai_feature
 
 Run as:
@@ -69,9 +70,9 @@ it once per session; setup_bridge installs it into Workspace > Scripts.
 - manual: nothing live. Resolve actions return `lua_code` + `instructions`; relay them to the \
 user verbatim and ask them to paste it into Workspace > Console. Offer setup_bridge if they \
 want hands-free control.
-Resolve actions (get_resolve_state, import_timeline, add_markers, add_quality_markers, \
-set_clip_color, apply_lut, queue_render, open_page) choose the channel automatically and report \
-it in `channel`.
+Resolve actions (get_resolve_state, import_timeline, import_media, append_clips, remove_clips, \
+add_markers, add_quality_markers, set_clip_color, apply_lut, queue_render, open_page) choose the \
+channel automatically and report it in `channel`.
 
 Seeing: grab_frames (frames at given times), scene_frames (one frame per scene) and read_video \
 (speech next to the matching frames) return images you can look at; layout="grid" packs them \
@@ -90,7 +91,11 @@ resending the plan. Every plan response lists `errors` and `warnings`; resolve t
 4. export_fcpxml(plan_id), then import_timeline(path) when live, or tell the user \
 File > Import > Timeline.
 5. Verify with get_resolve_state(include_clips=true) and timeline_frames (look at the result), \
-and iterate. After queue_render(start=true), render_status(wait_seconds=...) says when it is done.
+and iterate. When live, change the open timeline directly instead of re-importing (each import \
+makes a new timeline): append_clips adds source ranges (source seconds; a B-roll shot on track 2 \
+at record_seconds; new_timeline creates one), import_media fills bins, remove_clips deletes by \
+index from get_resolve_state (pass names; ask first). Read their `warnings`.
+6. After queue_render(start=true), render_status(wait_seconds=...) says when it is done.
 
 Conventions: times are seconds unless a parameter says frames. Marker positions can be given \
 in seconds; Resolve converts them with the timeline's real frame rate. Paths must be absolute \

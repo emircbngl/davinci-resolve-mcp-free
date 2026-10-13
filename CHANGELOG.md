@@ -29,6 +29,12 @@ Verified live on Resolve 20.3 (Free, macOS): screenshot_resolve, grab_frames, sc
 - `timeline_frames`: see the edit as Resolve renders it — grades, LUTs, titles, transitions — on any OS. Exports stills of the current timeline at given seconds or frames (drop-frame aware), returns them like `grab_frames` (separate or as a contact sheet), and puts the playhead and page back. Verified live on Resolve 20.3 Free.
 - `render_status`: every render job's status, percent and time left, and whether Resolve is rendering; `wait_seconds` polls until it is done.
 
+- **Live timeline building**, without an FCPXML round trip (which always creates a new timeline), through the same Studio API → bridge → paste-Lua routing:
+  - `import_media(paths, bin)`: files into the media pool, into a bin (`"B-roll/Day 1"`, created when missing). Files already in that bin are reused, not imported twice. Returns each item's name, `media_pool_id` and `already_in_pool`.
+  - `append_clips(clips, timeline | new_timeline, new_timeline_fps)`: source ranges in source seconds (converted with the clip's own fps) onto the current, a named or a new empty timeline (a name clash is refused), on any track (missing tracks are added), video, audio or both, optionally at a record position. Files not in the pool are imported on the fly. Returns the timeline items that landed, with `warnings` where the length, position or track differ from the request.
+  - `remove_clips(indices, track, names, ripple)`: destructive; deletes by the indices `get_resolve_state` lists, refusing when the `names` read beforehand no longer match.
+  - Based on API behaviour measured with Python on Resolve 21.0.4 Free (plain path strings for ImportMedia, exclusive endFrame, DeleteClips only on the Edit page); not yet verified from Lua on a real install.
+
 ### Resolve 21.1+ Free
 - The bridge no longer needs `io`, `os.execute`, `package` or `debug`, which Resolve 21.1+ Free removed from its Lua. When `io` is missing it reads and writes its files through LuaJIT's `ffi` (a global in Resolve), takes the path separator from the MCP server, and the server creates the bridge folder. `rp.file_access` says which one is in use. Tests run the bridge in an emulated 21.1 sandbox. Not yet tried on a real 21.1 install.
 - `setup_bridge(install)` returns `console_command`, a one-line `dofile(...)` to paste into the Console when the Scripts menu entry does nothing, and lists older resolve-pilot bridge scripts left in the same menu.
