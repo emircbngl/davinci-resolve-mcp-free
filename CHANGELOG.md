@@ -26,6 +26,7 @@ Verified live on Resolve 20.3 (Free, macOS): screenshot_resolve, grab_frames, sc
 - Frames, contact sheets, scene sampling, read_video pairing and quality detectors against real ffmpeg on generated media; marker replacement through the live bridge; images over a real MCP client session.
 
 ### Fixed (found in the live run)
+- `run_lua`: request code could not see the `rp` helpers and its `print()` output was lost, because Resolve runs the bridge script in its own environment while `loadstring` compiles against the real globals. Requests now get an environment with both; globals they set still persist between requests. Tests now run the bridge in a separate script environment like Resolve does.
 - `analyze_quality` flagged sub-dB wobble on a steady tone as "loud": loud/quiet now also need a 6 dB departure from the local level.
 - Runs of the same kind were split when a span of another kind sat between them; merging is now per kind.
 - Freeze spans inside black and quiet spans inside silence are dropped (they repeat the stronger finding).

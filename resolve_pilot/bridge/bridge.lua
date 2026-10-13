@@ -179,6 +179,25 @@ end
 
 -- Request handling ---------------------------------------------------------
 
+-- Resolve runs this script in its own environment, but loadstring compiles request
+-- code against the real globals, where neither `rp` nor our print capture is visible
+-- (measured on Resolve 20.3). Each request therefore gets an environment that reads
+-- through to this script's environment and the globals, and writes to the globals so
+-- values set by one request are still there for the next.
+local SCRIPT_ENV = getfenv and getfenv(1) or _G
+local GLOBALS = getfenv and getfenv(0) or _G
+
+local function request_env(capture)
+  return setmetatable({ print = capture, rp = rp }, {
+    __index = function(_, k)
+      local v = SCRIPT_ENV[k]
+      if v == nil then v = GLOBALS[k] end
+      return v
+    end,
+    __newindex = GLOBALS,
+  })
+end
+
 local function handle(id, raw)
   -- Compile without the header line so error line numbers match the caller's code.
   local code = raw:match("^%-%- rp%-id: [%w%-_]+\r?\n(.*)$") or raw
@@ -194,15 +213,19 @@ local function handle(id, raw)
       kept = kept + #line + 1
     end
   end
-  local fn, perr = (loadstring or load)(code, "=request")
+  local env = request_env(capture)
+  local fn, perr
+  if setfenv then
+    fn, perr = loadstring(code, "=request")
+    if fn then setfenv(fn, env) end
+  else
+    fn, perr = load(code, "=request", "t", env)
+  end
   if not fn then
     resp.ok = false
     resp.error = "Lua syntax error: " .. tostring(perr)
   else
-    local real_print = print
-    print = capture
     local ok, value = xpcall(fn, debug.traceback)
-    print = real_print
     resp.ok = ok
     if ok then resp.result = value else resp.error = tostring(value) end
   end

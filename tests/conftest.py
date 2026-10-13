@@ -39,7 +39,12 @@ def start_bridge(workdir: Path, idle_minutes: int = 1) -> subprocess.Popen:
     script.write_text(bridge.render_script(idle_minutes=idle_minutes), encoding="utf-8")
     runner = workdir / "runner.lua"
     runner.write_text(
-        f"dofile({lua_string(str(MOCK_RESOLVE))})\ndofile({lua_string(str(script))})\n",
+        # Like Resolve/Fusion: the script runs in its own environment that falls back to
+        # the globals, while chunks it compiles with loadstring get the real globals.
+        f"dofile({lua_string(str(MOCK_RESOLVE))})\n"
+        f"local chunk = assert(loadfile({lua_string(str(script))}))\n"
+        "setfenv(chunk, setmetatable({}, {__index = _G}))\n"
+        "chunk()\n",
         encoding="utf-8",
     )
     proc = subprocess.Popen([LUAJIT, str(runner)], stdout=subprocess.PIPE,

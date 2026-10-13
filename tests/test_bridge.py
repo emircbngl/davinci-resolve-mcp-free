@@ -158,7 +158,7 @@ _LUA_BUILTINS = {
     "assert", "collectgarbage", "debug", "dofile", "error", "getmetatable", "io", "ipairs",
     "load", "loadstring", "math", "next", "os", "package", "pairs", "pcall", "print", "rawget",
     "rawset", "require", "select", "setmetatable", "string", "table", "tonumber", "tostring",
-    "type", "unpack", "xpcall", "_G",
+    "type", "unpack", "xpcall", "_G", "getfenv", "setfenv",
 }
 _RESOLVE_GLOBALS = {"resolve", "Resolve", "fusion", "bmd", "app", "rp"}
 
@@ -329,3 +329,11 @@ def test_windows_non_ascii_profile_falls_back_to_ascii_folder(monkeypatch, tmp_p
     monkeypatch.setenv("PUBLIC", str(tmp_path / "Public"))
     d = client.bridge_dir()
     assert str(d).isascii() and d == tmp_path / "Public" / "resolve-pilot" / "bridge"
+
+
+@needs_luajit
+def test_requests_see_rp_and_have_print_captured_in_a_script_environment(live_bridge):
+    # Resolve runs the bridge script in its own environment; request chunks must still
+    # see the rp helpers and have print() captured (measured on Resolve 20.3).
+    r = bridge.exec_lua('print("hi")\nreturn rp.timeline():GetName()')
+    assert r.result == "Main" and r.output == "hi"
