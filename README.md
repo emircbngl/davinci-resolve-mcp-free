@@ -104,6 +104,11 @@ Designed for agents:
 - **Claude can look at footage.** Frames come back as images (one per timestamp, or a single contact sheet to save tokens), so shot choices are made on what is actually in the picture.
 - **Errors explain themselves** — what failed and what to do next.
 - **Workflow guides** (rough cut, subtitles, music video, color grade, markers, live control + a Resolve Lua API cheat sheet) are served over MCP, as a tool and as prompts.
+- **Known traps, written down.** Every Resolve quirk we hit (subtitles landing at the playhead, `SetLUT` refusing LUTs outside Resolve's folder, transitions listed as clips, a modal dialog blocking the API, ...) is in one ledger with what resolve-pilot does about it, and results point at the trap when it applies.
+
+### Resources
+
+Read-only context a client can load without a tool call: `resolve://traps` (the known-traps ledger), `resolve://capabilities` (which tool works on which channel — studio, bridge, paste-Lua, macOS UI — plus Free / Studio / Resolve 21.1+ and permission notes), `resolve://state` (the open project and timeline when live, else how to connect; answers within seconds) and `resolve://guide/{name}` (the workflow guides).
 
 ## Architecture
 
