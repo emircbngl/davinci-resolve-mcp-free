@@ -1252,6 +1252,98 @@ def set_tracks(
                            lambda: _studio().set_tracks(**args), channel)
 
 
+def _export_candidates(path: Path) -> list[Path]:
+    """Where an export can land: the path itself, or a bundle folder next to it (Resolve
+    has been reported to write FCPXML 1.10 as a .fcpxmld bundle)."""
+    out = [path]
+    if path.suffix.lower() == ".fcpxml":
+        out += [path.with_suffix(".fcpxmld"), Path(str(path) + "d")]
+    return list(dict.fromkeys(out))
+
+
+def _snapshot(path: Path) -> tuple[int, int] | None:
+    try:
+        if path.is_dir():
+            files = [f for f in path.rglob("*") if f.is_file()]
+            return sum(f.stat().st_size for f in files), max((f.stat().st_mtime_ns for f in files), default=0)
+        st = path.stat()
+        return st.st_size, st.st_mtime_ns
+    except OSError:
+        return None
+
+
+def _verify_export(path: Path, before: dict[Path, tuple[int, int] | None]) -> dict[str, Any]:
+    """Check on disk that Resolve really wrote the export (non-empty, new or rewritten)."""
+    for cand in _export_candidates(path):
+        snap = _snapshot(cand)
+        if snap is None:
+            continue
+        size, _ = snap
+        out: dict[str, Any] = {"path": str(cand), "size_bytes": size, "is_bundle": cand.is_dir()}
+        if cand.is_dir():
+            out["bundle_files"] = sorted(str(f.relative_to(cand)) for f in cand.rglob("*") if f.is_file())[:20]
+        if size == 0:
+            out.update(verified=False, error=f"Resolve wrote {cand}, but it is empty.")
+        elif before.get(cand) == snap:
+            out.update(verified=False, error=f"{cand} already existed and was not rewritten.")
+        else:
+            out["verified"] = True
+        return out
+    return {"verified": False, "error": f"Nothing was written at {path}."}
+
+
+@tool(WRITE_FILES, title="Export timeline")
+def export_timeline(
+    format: Annotated[Literal[tuple(lua_lib.EXPORT_FORMATS)], Field(description=(  # type: ignore[valid-type]
+        "fcpxml (= 1.10, Final Cut / Premiere via FCPXML), fcpxml_1_9, fcpxml_1_8, fcp7_xml, "
+        "edl (+ edl_cdl, edl_sdl, edl_missing_clips), aaf (new) / aaf_existing (Pro Tools, Avid), "
+        "otio (OpenTimelineIO), drt (Resolve's own timeline file, the best backup), "
+        "csv / tab (edit list as text), ale / ale_cdl."))] = "fcpxml",
+    out_path: Annotated[str | None, Field(description=(
+        "Defaults to <timeline name>_<date-time>.<ext> in resolve-pilot's exports folder. "
+        "An explicit path is overwritten."))] = None,
+    timeline: Annotated[str | None, Field(description="Timeline name; defaults to the current one.")] = None,
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """Export a Resolve timeline as FCPXML, EDL, AAF, OTIO, DRT, CSV and more.
+
+    Use it to hand a cut to another NLE or a sound editor, to read back the real cut, or to
+    back up a timeline (drt) before large edits; import_timeline loads it back. The file is
+    checked on disk afterwards: `ok` needs a non-empty file (or bundle folder) that Resolve
+    actually wrote, and `size_bytes` says how big it is.
+    """
+    import time
+    export_type, subtype, _ext = lua_lib.EXPORT_FORMATS[format]
+    if out_path:
+        target: Path | None = Path(out_path).expanduser().resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        args = dict(out_path=str(target), export_type=export_type, export_subtype=subtype,
+                    timeline_name=timeline)
+    else:
+        target = None
+        args = dict(export_type=export_type, export_subtype=subtype, timeline_name=timeline,
+                    out_dir=str(state_dir("exports")), stamp=time.strftime("%Y%m%d-%H%M%S"))
+    before = {c: _snapshot(c) for c in _export_candidates(target)} if target else {}
+    out = control.perform(lua_lib.snippet_export_timeline(**args),
+                          lambda: _studio().export_timeline(**args), channel, timeout=180.0)
+    out["format"] = format
+    if out.get("channel") == "manual" or not out.get("path"):
+        return out
+    check = _verify_export(Path(out["path"]), before)
+    resolve_said, resolve_error = bool(out.get("ok")), out.pop("error", None)
+    out.update(check)
+    out["ok"] = bool(check["verified"])
+    if out["ok"] and not resolve_said:
+        out["note"] = "Resolve reported failure, but a fresh non-empty file is there."
+    elif not out["ok"] and resolve_said:
+        out["error"] = "Resolve reported success, but: " + check["error"]
+    elif not out["ok"]:
+        out["error"] = resolve_error or check["error"]
+    if out["ok"]:
+        out["next_step"] = f"import_timeline(path={out['path']!r}) loads it back into Resolve."
+    return out
+
+
 @tool(DESTRUCTIVE, title="Apply LUT")
 def apply_lut(
     lut_path: Annotated[str, Field(description="Absolute path of a .cube / .dat LUT.")],

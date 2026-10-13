@@ -260,3 +260,130 @@ def test_set_tracks_studio_twin(monkeypatch):
     assert ch["actual"] == {"name": "Titles", "enabled": True} and ch["mismatched"] == ["enabled"]
     assert ch["contradicted"] == [] and out["ok"] is False
     assert out["track_counts"] == {"video": 2, "audio": 1, "subtitle": 0}
+
+
+# ── Timeline export ──────────────────────────────────────────────────────────
+
+
+@needs_luajit
+def test_export_variants_read_no_undefined_globals(tmp_path):
+    from tests.test_bridge import _LUA_BUILTINS, _RESOLVE_GLOBALS, _globals, _listing
+    code = lua.snippet_export_timeline(out_dir="/x", stamp="s", timeline_name="Main",
+                                       export_type="EDL", export_subtype="CDL")
+    reads, writes = _globals(_listing(tmp_path, "export_named", code))
+    assert reads - _LUA_BUILTINS - _RESOLVE_GLOBALS == set() and writes == set()
+
+
+def test_every_export_format_maps_to_a_known_type():
+    for fmt, (kind, sub, ext) in lua.EXPORT_FORMATS.items():
+        code = lua.snippet_export_timeline(f"/x{ext}", kind, sub)
+        assert f"resolve.EXPORT_{kind}" in code, fmt
+        assert (sub is None) == (kind not in ("AAF", "EDL")), fmt
+    with pytest.raises(ValueError, match="out_dir"):
+        lua.snippet_export_timeline()
+
+
+@needs_luajit
+@pytest.mark.parametrize("live_bridge", [None, "21.1"], indirect=True)
+def test_export_timeline_tool_writes_and_verifies(live_bridge, no_studio, isolated_home):
+    from resolve_pilot import mcp_server
+    out = mcp_server.export_timeline("edl_cdl")
+    assert out["channel"] == "bridge" and out["ok"] is True and out["verified"] is True
+    path = out["path"]
+    assert path.startswith(str(isolated_home / "exports")) and path.endswith(".edl")
+    assert "Main_" in path and out["size_bytes"] > 0 and out["timeline"] == "Main"
+    with open(path) as f:
+        assert f.read() == "timeline Main kind 3 sub 23\n"  # EXPORT_EDL + EXPORT_CDL
+    assert "import_timeline(" in out["next_step"]
+
+
+@needs_luajit
+def test_export_timeline_explicit_path_other_timeline_and_errors(live_bridge, no_studio, tmp_path):
+    from resolve_pilot import mcp_server
+    fcpxml = tmp_path / "cut.fcpxml"
+    fcpxml.write_text("<fcpxml/>")
+    bridge.exec_lua(lua.snippet_import_timeline(str(fcpxml), "Second"))  # becomes current
+    bridge.exec_lua("mock.project:SetCurrentTimeline(mock.project.timelines[1]) "
+                    "mock.export_needs_current = true")
+    target = tmp_path / "sub dir" / "second.otio"
+    out = mcp_server.export_timeline("otio", out_path=str(target), timeline="Second")
+    assert out["ok"] is True and out["path"] == str(target) and out["switched_timeline"] is True
+    assert bridge.exec_lua("return mock.project:GetCurrentTimeline():GetName()").result == "Main"
+    missing = mcp_server.export_timeline("drt", timeline="Nope")
+    assert missing["ok"] is False and missing["timelines"] == ["Main", "Second"]
+    bridge.exec_lua("resolve.EXPORT_ALE_CDL = nil")
+    gone = mcp_server.export_timeline("ale_cdl", out_path=str(tmp_path / "x.ale"))
+    assert gone["ok"] is False and "ALE_CDL" in gone["error"]
+
+
+@needs_luajit
+def test_export_that_reports_success_without_a_file_is_not_ok(live_bridge, no_studio, tmp_path):
+    from resolve_pilot import mcp_server
+    bridge.exec_lua("mock.export_lies = true")
+    out = mcp_server.export_timeline("aaf", out_path=str(tmp_path / "cut.aaf"))
+    assert out["ok"] is False and out["verified"] is False
+    assert out["error"].startswith("Resolve reported success, but") and "Nothing was written" in out["error"]
+    stale = tmp_path / "old.aaf"
+    stale.write_text("from yesterday")
+    out = mcp_server.export_timeline("aaf", out_path=str(stale))
+    assert out["ok"] is False and "not rewritten" in out["error"]
+
+
+def test_export_verification_finds_fcpxml_bundles_and_empty_files(tmp_path):
+    from resolve_pilot import mcp_server
+    target = tmp_path / "cut.fcpxml"
+    bundle = tmp_path / "cut.fcpxmld"
+    bundle.mkdir()
+    (bundle / "Info.fcpxml").write_text("<fcpxml/>")
+    check = mcp_server._verify_export(target, {})
+    assert check["verified"] and check["is_bundle"] and check["path"] == str(bundle)
+    assert check["bundle_files"] == ["Info.fcpxml"]
+    empty = tmp_path / "e.edl"
+    empty.write_text("")
+    assert "empty" in mcp_server._verify_export(empty, {})["error"]
+
+
+def test_export_manual_channel_returns_lua(no_studio):
+    from resolve_pilot import mcp_server
+    out = mcp_server.export_timeline("fcpxml_1_9")
+    assert out["channel"] == "manual" and "resolve.EXPORT_FCPXML_1_9)" in out["lua_code"]
+
+
+def test_export_studio_twin(monkeypatch, tmp_path):
+    calls = []
+
+    class TL:
+        def __init__(self, name):
+            self.name = name
+
+        def GetName(self):
+            return self.name
+
+        def Export(self, *args):
+            calls.append(args)
+            return True
+
+    main = TL("My Cut!")
+
+    class Project:
+        def GetCurrentTimeline(self):
+            return main
+
+        def GetTimelineCount(self):
+            return 1
+
+        def GetTimelineByIndex(self, i):
+            return main
+
+    class R:
+        EXPORT_EDL, EXPORT_NONE, EXPORT_OTIO = 3, 20, 10
+
+    monkeypatch.setattr(actions, "get_resolve", lambda: R())
+    monkeypatch.setattr(actions, "_current_project", lambda: Project())
+    out = actions.export_timeline(export_type="EDL", out_dir=str(tmp_path), stamp="s")
+    assert out == {"ok": True, "path": str(tmp_path / "My_Cut_s.edl"), "timeline": "My Cut!",
+                   "export_type": "EDL", "export_subtype": "NONE", "switched_timeline": False}
+    assert calls[-1] == (str(tmp_path / "My_Cut_s.edl"), 3, 20)
+    out = actions.export_timeline(str(tmp_path / "a.otio"), "OTIO")
+    assert calls[-1] == (str(tmp_path / "a.otio"), 10) and out["export_subtype"] is None
+    assert actions.export_timeline("/x", "ALE")["ok"] is False

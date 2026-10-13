@@ -499,18 +499,45 @@ return {{ok = true, timeline = tl:GetName(), video_clip_count = n,
 
 EXPORT_SUBTYPES = ("NONE", "AAF_NEW", "AAF_EXISTING", "CDL", "SDL", "MISSING_CLIPS")
 
+# export_timeline formats -> (resolve.EXPORT_<type>, resolve.EXPORT_<subtype> or None, extension).
+# Types and subtypes from Resolve's scripting README; AAF and EDL require a subtype.
+EXPORT_FORMATS: dict[str, tuple[str, str | None, str]] = {
+    "fcpxml": ("FCPXML_1_10", None, ".fcpxml"),
+    "fcpxml_1_10": ("FCPXML_1_10", None, ".fcpxml"),
+    "fcpxml_1_9": ("FCPXML_1_9", None, ".fcpxml"),
+    "fcpxml_1_8": ("FCPXML_1_8", None, ".fcpxml"),
+    "fcp7_xml": ("FCP_7_XML", None, ".xml"),
+    "edl": ("EDL", "NONE", ".edl"),
+    "edl_cdl": ("EDL", "CDL", ".edl"),
+    "edl_sdl": ("EDL", "SDL", ".edl"),
+    "edl_missing_clips": ("EDL", "MISSING_CLIPS", ".edl"),
+    "aaf": ("AAF", "AAF_NEW", ".aaf"),
+    "aaf_existing": ("AAF", "AAF_EXISTING", ".aaf"),
+    "otio": ("OTIO", None, ".otio"),
+    "drt": ("DRT", None, ".drt"),
+    "csv": ("TEXT_CSV", None, ".csv"),
+    "tab": ("TEXT_TAB", None, ".txt"),
+    "ale": ("ALE", None, ".ale"),
+    "ale_cdl": ("ALE_CDL", None, ".ale"),
+}
+
 
 @_snippet
 def snippet_export_timeline(
-    out_path: str,
+    out_path: str | None = None,
     export_type: str = "FCPXML_1_10",
     export_subtype: str | None = None,
+    timeline_name: str | None = None,
+    out_dir: str | None = None,
+    stamp: str | None = None,
 ) -> str:
-    """Export the current timeline (FCPXML_1_10, FCPXML_1_9, AAF, EDL, OTIO, DRT, ...).
+    """Export a timeline (FCPXML_1_10, FCPXML_1_9, AAF, EDL, OTIO, DRT, TEXT_CSV, ...).
 
     export_type is the suffix of Resolve's `resolve.EXPORT_*` constant. AAF and EDL
     also need export_subtype (AAF: AAF_NEW / AAF_EXISTING; EDL: NONE / CDL / SDL /
     MISSING_CLIPS); it defaults to AAF_NEW and NONE.
+    timeline_name: export that timeline instead of the current one.
+    Without out_path the file goes to out_dir as <timeline name>_<stamp><extension>.
     """
     if not re.fullmatch(r"[A-Z0-9_]+", export_type):
         raise ValueError(f"export_type must look like FCPXML_1_10, got {export_type!r}")
@@ -518,16 +545,59 @@ def snippet_export_timeline(
         export_subtype = {"AAF": "AAF_NEW", "EDL": "NONE"}.get(export_type)
     if export_subtype is not None and export_subtype not in EXPORT_SUBTYPES:
         raise ValueError(f"export_subtype must be one of {', '.join(EXPORT_SUBTYPES)}")
-    out_path = os.path.expanduser(out_path)
+    if out_path is None and out_dir is None:
+        raise ValueError("Pass out_path, or out_dir for an automatic file name.")
+    ext = next((e for t, _, e in EXPORT_FORMATS.values() if t == export_type), ".txt")
+    out_path = os.path.expanduser(out_path) if out_path else None
+    out_dir = os.path.expanduser(out_dir) if out_dir else None
     sub = f", resolve.EXPORT_{export_subtype}" if export_subtype else ""
+    sub_check = (f'\nif resolve.EXPORT_{export_subtype} == nil then\n  return {{ok = false, error = '
+                 f'"This Resolve has no resolve.EXPORT_{export_subtype}"}}\nend' if export_subtype else "")
     return f"""-- resolve-pilot: export_timeline
-{_TIMELINE_PREAMBLE}if resolve.EXPORT_{export_type} == nil then
+{_PROJECT_PREAMBLE}if resolve.EXPORT_{export_type} == nil then
   return {{ok = false, error = "Unknown export_type {export_type} in this Resolve version"}}
+end{sub_check}
+local wanted, out = {to_lua(timeline_name)}, {to_lua(out_path)}
+local current = project:GetCurrentTimeline()
+local timeline = current
+if wanted then
+  timeline = nil
+  local names = {{}}
+  for i = 1, (project:GetTimelineCount() or 0) do
+    local t = project:GetTimelineByIndex(i)
+    if t and t:GetName() == wanted then timeline = t end
+    if t then names[#names + 1] = t:GetName() end
+  end
+  if not timeline then
+    return {{ok = false, error = "No timeline named '" .. wanted .. "'.", timelines = names}}
+  end
 end
-local out = {to_lua(out_path)}
-local ok = timeline:Export(out, resolve.EXPORT_{export_type}{sub})
-print(string.format("[resolve-pilot] Export %s -> %s", tostring(ok), out))
-return {{ok = ok and true or false, path = out}}
+if not timeline then
+  return {{ok = false, error = "No active timeline. Open a timeline on the Edit page first."}}
+end
+local name = timeline:GetName()
+if not out then
+  local slug = name:gsub("[^%w%-]+", "_"):gsub("^_+", ""):gsub("_+$", "")
+  if slug == "" then slug = "timeline" end
+  out = {to_lua(out_dir)} .. {to_lua(os.sep)} .. slug .. "_" .. {to_lua(stamp or "export")} .. {to_lua(ext)}
+end
+local function export() return timeline:Export(out, resolve.EXPORT_{export_type}{sub}) end
+local done, ok = pcall(export)
+local switched = false
+-- Export may only work on the current timeline; retry with it current, then switch back.
+if not (done and ok) and current and name ~= current:GetName() then
+  switched = project:SetCurrentTimeline(timeline) and true or false
+  if switched then
+    done, ok = pcall(export)
+    project:SetCurrentTimeline(current)
+  end
+end
+print(string.format("[resolve-pilot] Export %s -> %s", tostring(done and ok), out))
+local result = {{ok = (done and ok) and true or false, path = out, timeline = name,
+  export_type = {to_lua(export_type)}, export_subtype = {to_lua(export_subtype)}, switched_timeline = switched}}
+if not done then result.error = tostring(ok)
+elseif not ok then result.error = "Resolve's Timeline:Export returned " .. tostring(ok) end
+return result
 """
 
 

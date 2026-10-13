@@ -558,3 +558,58 @@ def set_tracks(changes: list[dict] | None = None, add: list[dict] | None = None)
     if not all_ok:
         out["error"] = "Some track changes did not stick (see added[].error and changes[].mismatched)."
     return out
+
+
+def export_timeline(out_path: str | None = None, export_type: str = "FCPXML_1_10",
+                    export_subtype: str | None = None, timeline_name: str | None = None,
+                    out_dir: str | None = None, stamp: str | None = None) -> dict[str, Any]:
+    """Studio twin of snippet_export_timeline (same result shape)."""
+    import re
+
+    from resolve_pilot.lua_snippets.library import EXPORT_FORMATS
+
+    if export_subtype is None:
+        export_subtype = {"AAF": "AAF_NEW", "EDL": "NONE"}.get(export_type)
+    resolve = get_resolve()
+    kind = getattr(resolve, f"EXPORT_{export_type}", None)
+    if kind is None:
+        return {"ok": False, "error": f"Unknown export_type {export_type} in this Resolve version"}
+    sub = getattr(resolve, f"EXPORT_{export_subtype}", None) if export_subtype else None
+    if export_subtype and sub is None:
+        return {"ok": False, "error": f"This Resolve has no resolve.EXPORT_{export_subtype}"}
+    project = _current_project()
+    current = project.GetCurrentTimeline()
+    timeline = current
+    if timeline_name:
+        timelines = [project.GetTimelineByIndex(i) for i in range(1, int(project.GetTimelineCount() or 0) + 1)]
+        names = [t.GetName() for t in timelines if t]
+        timeline = next((t for t in timelines if t and t.GetName() == timeline_name), None)
+        if timeline is None:
+            return {"ok": False, "error": f"No timeline named '{timeline_name}'.", "timelines": names}
+    if timeline is None:
+        return {"ok": False, "error": "No active timeline. Open a timeline on the Edit page first."}
+    name = timeline.GetName()
+    if out_path:
+        out = os.path.expanduser(out_path)
+    else:
+        ext = next((e for t, _, e in EXPORT_FORMATS.values() if t == export_type), ".txt")
+        slug = re.sub(r"[^A-Za-z0-9\-]+", "_", name).strip("_") or "timeline"
+        out = os.path.join(os.path.expanduser(out_dir or "."), f"{slug}_{stamp or 'export'}{ext}")
+    args = (out, kind, sub) if export_subtype else (out, kind)
+    done, ok = _call(timeline, "Export", *args)
+    switched = False
+    if not (done and ok) and current and name != current.GetName():
+        switched = bool(project.SetCurrentTimeline(timeline))
+        if switched:
+            try:
+                done, ok = _call(timeline, "Export", *args)
+            finally:
+                project.SetCurrentTimeline(current)
+    result: dict[str, Any] = {"ok": bool(done and ok), "path": out, "timeline": name,
+                              "export_type": export_type, "export_subtype": export_subtype,
+                              "switched_timeline": switched}
+    if not done:
+        result["error"] = str(ok)
+    elif not ok:
+        result["error"] = f"Resolve's Timeline:Export returned {ok}"
+    return result

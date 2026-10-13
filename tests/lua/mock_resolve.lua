@@ -146,7 +146,21 @@ function Timeline:DeleteMarkerByCustomData(data)
   return false
 end
 function Timeline:GetStartTimecode() return "01:00:00:00" end
-function Timeline:Export(path, kind) return true end
+-- Writes a small file naming the format. AAF and EDL need a subtype, as in Resolve.
+-- mock.export_lies: return true and write nothing; mock.export_needs_current: only the
+-- current timeline exports.
+function Timeline:Export(path, kind, sub)
+  if type(kind) ~= "number" then return false end
+  if (kind == resolve.EXPORT_AAF or kind == resolve.EXPORT_EDL) and sub == nil then return false end
+  if mock.export_lies then return true end
+  if mock.export_needs_current and mock.project:GetCurrentTimeline() ~= self then return false end
+  local f = io.open(path, "wb")
+  if not f then return false end
+  f:write("timeline ", self.name, " kind ", tostring(kind), " sub ", tostring(sub), "\n")
+  f:close()
+  self.exported = (self.exported or 0) + 1
+  return true
+end
 function Timeline:GetCurrentVideoItem() return self.tracks.video[1][1] end
 function Timeline:GetCurrentTimecode() return self.playhead or "01:00:00:00" end
 function Timeline:SetCurrentTimecode(tc) self.playhead = tc; return true end
@@ -235,6 +249,11 @@ resolve = {
   COMPOSITE_NORMAL = 100, COMPOSITE_SCREEN = 105, COMPOSITE_MULTIPLY = 104,
   DYNAMIC_ZOOM_EASE_LINEAR = 200, DYNAMIC_ZOOM_EASE_IN_AND_OUT = 203,
   RETIME_USE_PROJECT = 300, RETIME_NEAREST = 301, RETIME_FRAME_BLEND = 302, RETIME_OPTICAL_FLOW = 303,
+  EXPORT_AAF = 1, EXPORT_DRT = 2, EXPORT_EDL = 3, EXPORT_FCP_7_XML = 4, EXPORT_FCPXML_1_8 = 5,
+  EXPORT_FCPXML_1_9 = 6, EXPORT_FCPXML_1_10 = 7, EXPORT_TEXT_CSV = 8, EXPORT_TEXT_TAB = 9,
+  EXPORT_OTIO = 10, EXPORT_ALE = 11, EXPORT_ALE_CDL = 12,
+  EXPORT_NONE = 20, EXPORT_AAF_NEW = 21, EXPORT_AAF_EXISTING = 22, EXPORT_CDL = 23, EXPORT_SDL = 24,
+  EXPORT_MISSING_CLIPS = 25,
   MOTION_EST_USE_PROJECT = 400, RESIZE_FILTER_USE_PROJECT = 600, RESIZE_FILTER_LANCZOS = 610,
   GetProjectManager = function() return pm end,
   GetProductName = function() return "DaVinci Resolve" end,
