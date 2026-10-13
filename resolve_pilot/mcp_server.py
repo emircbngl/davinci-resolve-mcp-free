@@ -97,6 +97,9 @@ at record_seconds; new_timeline creates one), import_media fills bins, remove_cl
 index from get_resolve_state (pass names; ask first). Read their `warnings`.
 6. After queue_render(start=true), render_status(wait_seconds=...) says when it is done.
 
+Subtitles: transcribe_audio, then add_subtitles(transcript_id=...) puts them on the timeline's \
+subtitle track (or export_srt for a file). Never append .srt files with append_clips.
+
 Conventions: times are seconds unless a parameter says frames. Marker positions can be given \
 in seconds; Resolve converts them with the timeline's real frame rate. Paths must be absolute \
 paths on the machine running this server (~ is expanded).

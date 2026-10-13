@@ -121,6 +121,7 @@ _SNIPPET_SAMPLES = {
     "grade_from_drx": {"drx_path": "/x.drx"},
     "open_page": {"page": "edit"},
     "export_timeline_stills": {"positions": [{"seconds": 1}, {"frame": 3}], "out_dir": "/x"},
+    "add_subtitles": {"srt_path": "/x.srt"},
     "import_media": {"paths": ["/x.mov"], "bin": "B-roll/Day 1"},
     "append_clips": {"clips": [{"path": "/x.mov", "duration_seconds": 2, "track": 2, "record_seconds": 1},
                                {"media_pool_id": "id", "media": "audio"}],
@@ -414,3 +415,42 @@ def test_failures_explain_a_bridge_started_without_a_project(live_bridge):
     assert not r.ok and "started while no project was open" in r.error
     bridge.exec_lua("resolve.GetProjectManager = mock_saved")
     assert bridge.exec_lua(lua.snippet_get_state()).ok
+
+
+_SRT = ("1\n00:00:00,500 --> 00:00:02,000\nMerhaba dünya\n\n"
+        "2\n00:00:02,500 --> 00:00:04,000\nİkinci satır\n\n")
+
+
+@needs_luajit
+@pytest.mark.parametrize("live_bridge", [None, "21.1"], indirect=True)
+def test_add_subtitles_lands_captions_at_srt_times(live_bridge, tmp_path):
+    from resolve_pilot import mcp_server
+    srt = tmp_path / "konuşma.srt"
+    srt.write_text(_SRT, encoding="utf-8")
+    out = mcp_server.add_subtitles(srt_path=str(srt))
+    assert out["ok"] and out["channel"] == "bridge" and out["imported"] is True
+    assert out["cue_count"] == 2 and out["warnings"] == []
+    assert out["first"] == {"start_seconds": 0.5, "end_seconds": 2.0, "text": "Merhaba dünya"}
+    # Track 1 now has captions: a second run is refused unless replace=true, and the same
+    # file is reused from the media pool instead of being imported again.
+    refused = mcp_server.add_subtitles(srt_path=str(srt))
+    assert refused["ok"] is False and "already has 2 captions" in refused["error"]
+    again = mcp_server.add_subtitles(srt_path=str(srt), replace=True)
+    assert again["removed"] == 2 and again["cue_count"] == 2 and again["imported"] is False
+
+
+@needs_luajit
+def test_mock_crashes_like_resolve_on_ranged_subtitle_append(live_bridge, tmp_path):
+    # Guards the guard: the mock reproduces the crash, so a snippet that passes a range
+    # for a subtitle item fails the tests instead of crashing a user's Resolve.
+    srt = tmp_path / "a.srt"
+    srt.write_text(_SRT, encoding="utf-8")
+    r = bridge.exec_lua(f"local mp = rp.media_pool(); rp.timeline():AddTrack('subtitle'); "
+                        f"local it = mp:ImportMedia({{{lua.lua_string(str(srt))}}})[1]; "
+                        f"return mp:AppendToTimeline({{{{mediaPoolItem = it, startFrame = 0, endFrame = 10}}}})")
+    assert not r.ok and "would crash" in r.error
+
+
+def test_append_clips_refuses_subtitle_files_before_reaching_resolve():
+    with pytest.raises(ValueError, match="use add_subtitles"):
+        lua.snippet_append_clips([{"path": "/x/captions.SRT", "in_seconds": 0, "duration_seconds": 2}])

@@ -7,6 +7,7 @@ Focus: the agent can *look* — at footage, and at Resolve itself — and find p
 Verified live on Resolve 20.3 (Free, macOS): screenshot_resolve, grab_frames, scene_frames, read_video, analyze_quality and add_quality_markers (including re-runs replacing only their own markers).
 
 ### Added
+- `add_subtitles`: put an SRT (or a transcript, written as SRT first) on the timeline's subtitle track at the file's own times, reusing it from the media pool, refusing to stack on existing captions unless `replace=true`, and reading the captions back. Verified live on Resolve 20.3 Free, timelines starting at 0 and at 01:00:00:00.
 - **Seeing footage** — results are images the model looks at, on mcp 1.x and 2.x:
   - `grab_frames`: frames at given times, separately or as one contact sheet (`layout="grid"`).
   - `scene_frames`: one representative frame per detected scene (spread evenly over long videos).
@@ -44,6 +45,7 @@ Verified live on Resolve 20.3 (Free, macOS): screenshot_resolve, grab_frames, sc
 - Accessibility and Screen Recording hints now name the app macOS actually checks. Claude Desktop starts MCP servers through a helper that makes the Python interpreter (Python.app) responsible, so "allow Claude" never worked for `screenshot_resolve`.
 
 ### Fixed (found in the live run)
+- Resolve 20.3 crashes when a subtitle item is appended with a frame range or media type (reproduced twice). `add_subtitles` never does that, `append_clips` refuses subtitle files, and the test mock now fails the same way so a regression cannot reach a user's Resolve.
 - Running the test suite replaced the user's installed bridge in Resolve's Scripts menu with one pointing at a pytest folder (a test patched the wrong module), so the menu entry silently did nothing. `RESOLVE_PILOT_SCRIPTS_DIR` / `RESOLVE_PILOT_LUT_DIR` now redirect those folders, and every test sets them, so tests can no longer write into a real Resolve install.
 - `run_lua`: request code could not see the `rp` helpers and its `print()` output was lost, because Resolve runs the bridge script in its own environment while `loadstring` compiles against the real globals. Requests now get an environment with both; globals they set still persist between requests. Tests now run the bridge in a separate script environment like Resolve does.
 - `analyze_quality` flagged sub-dB wobble on a steady tone as "loud": loud/quiet now also need a 6 dB departure from the local level.

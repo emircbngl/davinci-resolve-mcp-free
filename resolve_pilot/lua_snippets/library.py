@@ -352,11 +352,12 @@ if #existing > 0 then
     return {{ok = false, error = "Subtitle track 1 already has " .. #existing .. " captions. Pass " ..
       "replace=true to swap them for this file."}}
   end
+  local before = #existing
   local page = resolve:GetCurrentPage()
   if page ~= "edit" then resolve:OpenPage("edit") end
   timeline:DeleteClips(existing, false)
   if page and page ~= "edit" then resolve:OpenPage(page) end
-  removed = #existing - #(timeline:GetItemListInTrack("subtitle", 1) or {{}})
+  removed = before - #(timeline:GetItemListInTrack("subtitle", 1) or {{}})
 end
 -- Only mediaPoolItem: adding startFrame/endFrame/mediaType for a subtitle item crashes
 -- Resolve 20.3 (measured twice). Captions land at the SRT's own times from the start.
@@ -889,6 +890,9 @@ def normalize_clips(clips: list[dict]) -> list[dict]:
         row: dict[str, Any] = {"index": i, "media": _pick(c.get("media") or "both", MEDIA_KINDS, "media")}
         if path:
             row["path"] = os.path.expanduser(str(path))
+            if row["path"].lower().endswith((".srt", ".vtt", ".scc", ".stl", ".ttml")):
+                raise ValueError(f"clip #{i} is a subtitle file; use add_subtitles for captions "
+                                 "(appending subtitles with a range can crash Resolve)")
         else:
             row["media_pool_id"] = str(mid)
         start = float(c.get("in_seconds") or 0.0)
@@ -1057,6 +1061,10 @@ for _, c in ipairs(clips) do
   if mpi then
     local src = describe_mpi(mpi)
     row.source = src
+    if mpi:GetClipProperty("Type") == "Subtitle" then
+      -- A subtitle item with a frame range crashes Resolve 20.3 (measured twice).
+      e = "this is a subtitle file; use add_subtitles for captions (appending it here can crash Resolve)"
+    end
     local sfps = src.fps
     if not sfps or sfps <= 0 then
       sfps = fps

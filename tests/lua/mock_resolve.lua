@@ -17,14 +17,31 @@ local next_id = 0
 function Mpi.new(path)
   next_id = next_id + 1
   local info = (mock and mock.media_info or {})[path] or {}
-  return setmetatable({ id = string.format("mpi-%04d", next_id), path = path, name = (path:match("([^/\\]+)$") or path),
+  local m = setmetatable({ id = string.format("mpi-%04d", next_id), path = path, name = (path:match("([^/\\]+)$") or path),
     fps = info.fps or 25, frames = info.frames or 250, audio = info.audio ~= false,
     video = info.video ~= false }, Mpi)
+  if path:lower():match("%.srt$") then
+    -- Subtitle items: the cues come from the file, like Resolve reads them.
+    m.subtitle, m.audio, m.video, m.cues = true, false, false, {}
+    local f = io.open(path, "rb")
+    local text = f and f:read("*a") or ""
+    if f then f:close() end
+    local function sec(h, mi, s, ms) return h * 3600 + mi * 60 + s + ms / 1000 end
+    for a1, a2, a3, a4, b1, b2, b3, b4, body in text:gmatch(
+        "(%d+):(%d+):(%d+),(%d+)%s*%-%->%s*(%d+):(%d+):(%d+),(%d+)\r?\n(.-)\r?\n\r?\n") do
+      m.cues[#m.cues + 1] = { sec(a1, a2, a3, a4), sec(b1, b2, b3, b4), body }
+    end
+  end
+  return m
 end
 function Mpi:GetName() return self.name end
 function Mpi:GetUniqueId() return self.id end
 function Mpi:GetClipProperty(key)
   if key == "File Path" then return self.path end
+  if key == "Type" then
+    return self.subtitle and "Subtitle" or (self.video and self.audio and "Video + Audio")
+      or (self.video and "Video" or "Audio")
+  end
   if key == "FPS" then return self.video and tostring(self.fps) or nil end
   if key == "Frames" then return tostring(self.frames) end
   if key == nil then return { ["File Path"] = self.path, FPS = tostring(self.fps), Frames = tostring(self.frames) } end
@@ -85,7 +102,7 @@ function Timeline:GetName() return self.name end
 function Timeline:GetStartFrame() return self.start end
 function Timeline:GetEndFrame()
   local last = self.start
-  for _, kind in ipairs({ "video", "audio" }) do
+  for _, kind in ipairs({ "video", "audio", "subtitle" }) do
     for _, track in ipairs(self.tracks[kind]) do
       for _, it in ipairs(track) do last = math.max(last, it:GetEnd()) end
     end
@@ -109,7 +126,7 @@ function Timeline:DeleteClips(items, ripple)
   if resolve.page ~= "edit" then return false end -- Edit page only (measured on 21.0.4)
   local doomed = {}
   for _, it in ipairs(items or {}) do doomed[it] = true end
-  for _, kind in ipairs({ "video", "audio" }) do
+  for _, kind in ipairs({ "video", "audio", "subtitle" }) do
     for _, track in ipairs(self.tracks[kind]) do
       local i = 1
       while i <= #track do
@@ -214,6 +231,22 @@ function MediaPool:AppendToTimeline(infos)
   for _, info in ipairs(infos or {}) do
     local mpi = info.mediaPoolItem
     if type(mpi) ~= "table" or getmetatable(mpi) ~= Mpi then return {} end
+    if mpi.subtitle then
+      -- Resolve 20.3 crashes when a subtitle item comes with a frame range or media type.
+      if info.startFrame or info.endFrame or info.mediaType or info.recordFrame then
+        error("MOCK: Resolve would crash here (subtitle item with a range)")
+      end
+      local track = tl.tracks.subtitle[1]
+      if not track then return {} end -- no subtitle track: nothing is added
+      for _, cue in ipairs(mpi.cues) do
+        local it = Item.new(cue[3], tl.start + math.floor(cue[1] * fps + 0.5),
+          math.floor((cue[2] - cue[1]) * fps + 0.5), mpi.path, mpi)
+        it.track_type, it.track_index = "subtitle", 1
+        table.insert(track, it)
+      end
+      out[#out + 1] = mpi
+      goto continue
+    end
     local s, e = info.startFrame or 0, info.endFrame or mpi.frames
     if s < 0 or e > mpi.frames or e <= s then return {} end
     local dur = math.floor((e - s) / mpi.fps * fps + 0.5)
@@ -235,6 +268,7 @@ function MediaPool:AppendToTimeline(infos)
       table.sort(track, function(a, b) return a.start < b.start end)
       out[#out + 1] = it
     end
+    ::continue::
   end
   return out
 end
