@@ -418,3 +418,313 @@ def render_jobs_status() -> dict[str, Any]:
                      "seconds_left": (status.get("EstimatedTimeRemainingInMs") or 0) / 1000 or None,
                      "error": status.get("Error") or None})
     return {"ok": True, "rendering": bool(project.IsRenderingInProgress()), "jobs": jobs}
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Live timeline building (twins of snippet_import_media / append_clips / remove_clips)
+# ────────────────────────────────────────────────────────────────────────────
+
+def _call(obj, method: str, *args):
+    fn = getattr(obj, method, None) if obj is not None else None
+    if not callable(fn):
+        return None
+    try:
+        return fn(*args)
+    except Exception:
+        return None
+
+
+def _numeric(value) -> float | None:
+    """'23.976' / '25' / 25 -> float; a leading number in strings like '29.97 DF'."""
+    import re
+    if isinstance(value, (int, float)):
+        return float(value)
+    m = re.search(r"[\d.]+", value) if isinstance(value, str) else None
+    try:
+        return float(m.group(0)) if m else None
+    except ValueError:
+        return None
+
+
+def _clip_path(mpi):
+    return _call(mpi, "GetClipProperty", "File Path")
+
+
+def _same_path(a, b) -> bool:
+    if not isinstance(a, str) or not isinstance(b, str) or not a:
+        return False
+    return a == b or a.replace("\\", "/") == b.replace("\\", "/")
+
+
+def _find_item(folder, pred, recursive: bool):
+    for mpi in _call(folder, "GetClipList") or []:
+        if pred(mpi):
+            return mpi
+    if recursive:
+        for sub in _call(folder, "GetSubFolderList") or []:
+            hit = _find_item(sub, pred, True)
+            if hit is not None:
+                return hit
+    return None
+
+
+def _open_bin(mp, path: str):
+    folder, created = mp.GetRootFolder(), []
+    for name in [p for p in path.split("/") if p]:
+        nxt = next((s for s in _call(folder, "GetSubFolderList") or [] if _call(s, "GetName") == name), None)
+        if nxt is None:
+            nxt = mp.AddSubFolder(folder, name)
+            if not nxt:
+                return None, f"Resolve could not create the bin '{name}'", created
+            created.append(name)
+        folder = nxt
+    return folder, None, created
+
+
+def _describe_mpi(mpi) -> dict[str, Any]:
+    return {"name": _call(mpi, "GetName"), "media_pool_id": _call(mpi, "GetUniqueId"),
+            "path": _clip_path(mpi), "fps": _numeric(_call(mpi, "GetClipProperty", "FPS")),
+            "frames": _numeric(_call(mpi, "GetClipProperty", "Frames"))}
+
+
+def _import_into(mp, path: str, folder):
+    hit = _find_item(folder, lambda m: _same_path(_clip_path(m), path), False)
+    if hit is not None:
+        return hit, True, None
+    if folder is not None:
+        mp.SetCurrentFolder(folder)
+    got = mp.ImportMedia([path])
+    if not got:
+        return None, False, f"Resolve imported nothing from {path} (unsupported or unreadable file?)"
+    return got[0], False, None
+
+
+def _strip_none(d: dict[str, Any]) -> dict[str, Any]:
+    """Lua tables drop nil values; drop None so both channels return the same keys."""
+    return {k: v for k, v in d.items() if v is not None}
+
+
+def import_media(paths: list[str], bin: str | None = None) -> dict[str, Any]:
+    """Twin of snippet_import_media."""
+    mp = _current_project().GetMediaPool()
+    before = mp.GetCurrentFolder()
+    folder, created = before, []
+    if bin:
+        folder, err, created = _open_bin(mp, bin)
+        if folder is None:
+            return {"ok": False, "error": err, "bins_created": created}
+    items, imported, reused, failed = [], 0, 0, 0
+    for i, path in enumerate(paths):
+        mpi, already, err = _import_into(mp, path, folder)
+        row: dict[str, Any] = {"index": i, "path": path, "ok": mpi is not None}
+        if mpi is not None:
+            row.update(_strip_none(_describe_mpi(mpi)))
+            row["path"] = path
+            row["pool_path"] = _clip_path(mpi)
+            row["already_in_pool"] = already
+            row["in_bin"] = _find_item(
+                folder, lambda m: _call(m, "GetUniqueId") == row.get("media_pool_id")
+                and _same_path(_clip_path(m), row["pool_path"]), False) is not None
+            if already:
+                reused += 1
+            else:
+                imported += 1
+        else:
+            row["error"] = err
+            failed += 1
+        items.append(_strip_none(row))
+    if before is not None and folder is not before:
+        mp.SetCurrentFolder(before)
+    return _strip_none({"ok": failed == 0, "bin": _call(folder, "GetName"), "bins_created": created,
+                        "imported": imported, "reused": reused, "failed": failed, "items": items})
+
+
+def _describe_item(it, start: int, fps: float) -> dict[str, Any]:
+    s, e = it.GetStart(), it.GetEnd()
+    out = {"name": _call(it, "GetName"), "start_frame": s, "end_frame": e, "duration_frames": e - s,
+           "start_seconds": (s - start) / fps, "end_seconds": (e - start) / fps,
+           "duration_seconds": (e - s) / fps, "source_in_frame": _call(it, "GetLeftOffset")}
+    tt = _call(it, "GetTrackTypeAndIndex")
+    if isinstance(tt, (list, tuple)) and tt and tt[0]:
+        out.update(track_type=tt[0], track_index=tt[1], track=f"{tt[0]} {tt[1]}")
+    return _strip_none(out)
+
+
+def append_clips(clips: list[dict], timeline: str | None = None, new_timeline: str | None = None,
+                 new_timeline_fps: float | None = None) -> dict[str, Any]:
+    """Twin of snippet_append_clips (clips already normalized by normalize_clips)."""
+    project = _current_project()
+    mp = project.GetMediaPool()
+
+    def find_timeline(name):
+        for i in range(1, int(project.GetTimelineCount() or 0) + 1):
+            t = project.GetTimelineByIndex(i)
+            if t and t.GetName() == name:
+                return t
+        return None
+
+    created, fps_applied = False, None
+    if new_timeline:
+        if find_timeline(new_timeline):
+            return {"ok": False, "error": f"A timeline named '{new_timeline}' already exists. Pick another "
+                    f"name, or append to it with timeline='{new_timeline}'."}
+        tl = mp.CreateEmptyTimeline(new_timeline)
+        if not tl:
+            return {"ok": False, "error": f"Resolve did not create the timeline '{new_timeline}' "
+                    "(CreateEmptyTimeline returned nil)."}
+        created = True
+        if new_timeline_fps:
+            _call(tl, "SetSetting", "useCustomSettings", "1")
+            fps_applied = bool(_call(tl, "SetSetting", "timelineFrameRate", str(new_timeline_fps)))
+    elif timeline:
+        tl = find_timeline(timeline)
+        if tl is None:
+            return {"ok": False, "error": f"No timeline named '{timeline}' in this project."}
+    else:
+        tl = project.GetCurrentTimeline()
+        if tl is None:
+            return {"ok": False, "error": "No active timeline. Pass timeline or new_timeline."}
+    project.SetCurrentTimeline(tl)
+    cur = project.GetCurrentTimeline()
+    if cur is None or cur.GetName() != tl.GetName():
+        return {"ok": False, "error": f"Resolve did not switch to timeline '{tl.GetName()}'; nothing was appended."}
+    fps = _timeline_fps(project, tl)
+    start = tl.GetStartFrame()
+    root = mp.GetRootFolder()
+    results, appended, failed, tracks_added = [], 0, 0, []
+
+    def ensure_track(kind: str, index: int) -> bool:
+        n = int(tl.GetTrackCount(kind) or 0)
+        while n < index:
+            if not tl.AddTrack(kind):
+                return False
+            m = int(tl.GetTrackCount(kind) or 0)
+            if m <= n:
+                return False
+            n = m
+            tracks_added.append(f"{kind} {n}")
+        return True
+
+    for c in clips:
+        row: dict[str, Any] = {"index": c["index"], "ok": False}
+        warnings: list[str] = []
+        err = None
+        if c.get("media_pool_id"):
+            mpi = _find_item(root, lambda m: _call(m, "GetUniqueId") == c["media_pool_id"], True)
+            if mpi is None:
+                err = f"No media pool item with id {c['media_pool_id']}"
+        else:
+            mpi = _find_item(root, lambda m: _same_path(_clip_path(m), c["path"]), True)
+            if mpi is None:
+                mpi, already, err = _import_into(mp, c["path"], mp.GetCurrentFolder())
+                row["imported"] = mpi is not None and not already
+        if mpi is not None:
+            src = _strip_none(_describe_mpi(mpi))
+            row["source"] = src
+            sfps = src.get("fps")
+            if not sfps or sfps <= 0:
+                sfps = fps
+                warnings.append(f"Resolve reported no FPS for the source; used the timeline fps {fps}")
+            s = int(c["in_seconds"] * sfps + 0.5)
+            frames = src.get("frames")
+            en = int(c["out_seconds"] * sfps + 0.5) if c.get("out_seconds") is not None else frames
+            if en is None:
+                err = "Resolve did not report the clip length; give out_seconds or duration_seconds"
+            elif frames and en > frames:
+                warnings.append(f"out point {int(en)} is past the end of the source ({int(frames)} frames); used the end")
+                en = frames
+            if err is None and en <= s:
+                err = f"empty range: source frames {s}-{int(en)}"
+            kinds = {"video": ["video"], "audio": ["audio"]}.get(c["media"], ["video", "audio"])
+            if err is None and c.get("track"):
+                for k in kinds:
+                    if not ensure_track(k, c["track"]):
+                        err = f"Resolve could not add {k} track {c['track']}"
+            if err is None:
+                en = int(en)
+                info: dict[str, Any] = {"mediaPoolItem": mpi, "startFrame": s, "endFrame": en}
+                if c["media"] == "video":
+                    info["mediaType"] = 1
+                elif c["media"] == "audio":
+                    info["mediaType"] = 2
+                if c.get("track"):
+                    info["trackIndex"] = c["track"]
+                if c.get("record_seconds") is not None:
+                    info["recordFrame"] = start + int(c["record_seconds"] * fps + 0.5)
+                expected = int((en - s) / sfps * fps + 0.5)
+                row["requested"] = _strip_none({
+                    "source_start_frame": s, "source_end_frame": en, "source_fps": sfps,
+                    "track": c.get("track"), "media": c["media"], "record_frame": info.get("recordFrame"),
+                    "expected_duration_frames": expected})
+                got = mp.AppendToTimeline([info])
+                if not got:
+                    err = f"Resolve appended nothing (AppendToTimeline returned {got!r})"
+                else:
+                    row["items"] = []
+                    for it in got:
+                        d = _describe_item(it, start, fps)
+                        row["items"].append(d)
+                        where = d.get("track", "item")
+                        if d["duration_frames"] != expected:
+                            warnings.append(f"{where} landed with {d['duration_frames']} frames, expected {expected}")
+                        if "recordFrame" in info and d["start_frame"] != info["recordFrame"]:
+                            warnings.append(f"{where} starts at frame {d['start_frame']}, asked for {info['recordFrame']}")
+                        if c.get("track") and d.get("track_index") and d["track_index"] != c["track"]:
+                            warnings.append(f"{where} landed on track {d['track_index']}, asked for {c['track']}")
+                    row["ok"] = True
+        if err:
+            row["error"] = err
+        if warnings:
+            row["warnings"] = warnings
+        appended += row["ok"]
+        failed += not row["ok"]
+        results.append(row)
+    end = tl.GetEndFrame()
+    info_tl: dict[str, Any] = {"name": tl.GetName(), "created": created, "fps": fps, "start_frame": start,
+                               "end_frame": end, "duration_seconds": (end - start) / fps,
+                               "video_tracks": tl.GetTrackCount("video"), "audio_tracks": tl.GetTrackCount("audio")}
+    if new_timeline_fps:
+        info_tl.update(requested_fps=new_timeline_fps, fps_applied=fps_applied)
+    return {"ok": failed == 0, "timeline": info_tl, "appended": appended, "failed": failed,
+            "tracks_added": tracks_added, "clips": results}
+
+
+def remove_clips(indices: list[int], track_type: str = "video", track_index: int = 1,
+                 names: list[str] | None = None, ripple: bool = False) -> dict[str, Any]:
+    """Twin of snippet_remove_clips."""
+    resolve = get_resolve()
+    project = _current_project()
+    tl = _current_timeline()
+    fps = _timeline_fps(project, tl)
+    start = tl.GetStartFrame()
+    items = clip_items(tl, track_type, track_index)
+    targets, removed = [], []
+    for n, i in enumerate(indices):
+        if i >= len(items):
+            return {"ok": False, "error": f"{track_type} {track_index} has {len(items)} clips (indices "
+                    f"0-{len(items) - 1}); index {i} does not exist. Nothing was deleted."}
+        it = items[i]
+        if names is not None and names[n] != it.GetName():
+            return {"ok": False, "error": f"clip {i} is '{it.GetName()}', not '{names[n]}'; the timeline "
+                    "changed. Read it again with get_resolve_state. Nothing was deleted."}
+        targets.append(it)
+        removed.append({"index": i, "name": it.GetName(), "start_seconds": (it.GetStart() - start) / fps,
+                        "end_seconds": (it.GetEnd() - start) / fps})
+    page = _call(resolve, "GetCurrentPage")
+    if page != "edit":
+        resolve.OpenPage("edit")
+    try:
+        ok = tl.DeleteClips(targets, bool(ripple))
+    finally:
+        if page and page != "edit":
+            resolve.OpenPage(page)
+    after = clip_items(tl, track_type, track_index)
+    deleted = len(items) - len(after)
+    out = {"ok": bool(ok) and deleted == len(targets), "deleted": deleted, "requested": len(targets),
+           "removed": removed, "ripple": bool(ripple), "track": f"{track_type} {track_index}",
+           "clips_before": len(items), "clips_after": len(after), "timeline": tl.GetName(),
+           "timeline_duration_seconds": (tl.GetEndFrame() - start) / fps}
+    if not out["ok"]:
+        out["error"] = (f"DeleteClips returned {ok} and {deleted} of {len(targets)} clips are gone. "
+                        "Check the timeline with get_resolve_state.")
+    return out

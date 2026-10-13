@@ -6,22 +6,50 @@ local function basename(path)
   return (path:match("([^/\\]+)$") or path):gsub("%.[^.]*$", "")
 end
 
+-- MediaPoolItem ----------------------------------------------------------------
+-- Clip properties come back as strings, like the real API. Files listed in
+-- mock.media_info get that fps / length; anything else is a 25 fps, 250-frame clip
+-- (deliberately not the 24 fps timeline rate, so source-vs-timeline fps mix-ups show).
+local Mpi = {}
+Mpi.__index = Mpi
+local next_id = 0
+
+function Mpi.new(path)
+  next_id = next_id + 1
+  local info = (mock and mock.media_info or {})[path] or {}
+  return setmetatable({ id = string.format("mpi-%04d", next_id), path = path, name = (path:match("([^/\\]+)$") or path),
+    fps = info.fps or 25, frames = info.frames or 250, audio = info.audio ~= false,
+    video = info.video ~= false }, Mpi)
+end
+function Mpi:GetName() return self.name end
+function Mpi:GetUniqueId() return self.id end
+function Mpi:GetClipProperty(key)
+  if key == "File Path" then return self.path end
+  if key == "FPS" then return self.video and tostring(self.fps) or nil end
+  if key == "Frames" then return tostring(self.frames) end
+  if key == nil then return { ["File Path"] = self.path, FPS = tostring(self.fps), Frames = tostring(self.frames) } end
+  return nil
+end
+
 -- TimelineItem ---------------------------------------------------------------
 local Item = {}
 Item.__index = Item
 
-function Item.new(name, start, dur, path)
-  return setmetatable({ name = name, start = start, dur = dur, path = path, color = "" }, Item)
+function Item.new(name, start, dur, path, mpi)
+  return setmetatable({ name = name, start = start, dur = dur, path = path, color = "", mpi = mpi,
+    left = 0 }, Item)
 end
 function Item:GetName() return self.name end
 function Item:GetStart() return self.start end
 function Item:GetEnd() return self.start + self.dur end
 function Item:GetDuration() return self.dur end
-function Item:GetLeftOffset() return 0 end
+function Item:GetLeftOffset() return self.left end
 function Item:GetClipColor() return self.color end
 function Item:SetClipColor(c) self.color = c; return true end
 function Item:SetLUT(node, path) self.lut = { node = node, path = path }; return true end
+function Item:GetTrackTypeAndIndex() return { self.track_type, self.track_index } end
 function Item:GetMediaPoolItem()
+  if self.mpi then return self.mpi end
   local path = self.path
   return { GetClipProperty = function(_, key) if key == "File Path" then return path end end }
 end
@@ -42,11 +70,13 @@ local Timeline = {}
 Timeline.__index = Timeline
 
 function Timeline.new(name, clips)
-  local tl = setmetatable({ name = name, start = 86400, markers = {},
+  local tl = setmetatable({ name = name, start = 86400, markers = {}, settings = {},
     tracks = { video = { {} }, audio = { {} }, subtitle = {} } }, Timeline)
   local pos = tl.start
   for _, c in ipairs(clips or {}) do
-    table.insert(tl.tracks.video[1], Item.new(c[1], pos, c[2], c[3]))
+    local it = Item.new(c[1], pos, c[2], c[3])
+    it.track_type, it.track_index = "video", 1
+    table.insert(tl.tracks.video[1], it)
     pos = pos + c[2]
   end
   return tl
@@ -55,10 +85,48 @@ function Timeline:GetName() return self.name end
 function Timeline:GetStartFrame() return self.start end
 function Timeline:GetEndFrame()
   local last = self.start
-  for _, it in ipairs(self.tracks.video[1]) do last = math.max(last, it:GetEnd()) end
+  for _, kind in ipairs({ "video", "audio" }) do
+    for _, track in ipairs(self.tracks[kind]) do
+      for _, it in ipairs(track) do last = math.max(last, it:GetEnd()) end
+    end
+  end
   return last
 end
-function Timeline:GetSetting(key) return "" end -- "" = follows the project settings
+-- "" = follows the project settings. The frame rate can only change while empty.
+function Timeline:GetSetting(key) return self.settings[key] or "" end
+function Timeline:SetSetting(key, value)
+  if key == "timelineFrameRate" and self:GetEndFrame() > self.start then return false end
+  self.settings[key] = value
+  return true
+end
+function Timeline:AddTrack(kind)
+  if not self.tracks[kind] then return false end
+  table.insert(self.tracks[kind], {})
+  return true
+end
+-- Deletes the given items; ripple pulls later items on the same track left.
+function Timeline:DeleteClips(items, ripple)
+  if resolve.page ~= "edit" then return false end -- Edit page only (measured on 21.0.4)
+  local doomed = {}
+  for _, it in ipairs(items or {}) do doomed[it] = true end
+  for _, kind in ipairs({ "video", "audio" }) do
+    for _, track in ipairs(self.tracks[kind]) do
+      local i = 1
+      while i <= #track do
+        local it = track[i]
+        if doomed[it] then
+          table.remove(track, i)
+          if ripple then
+            for j = i, #track do track[j].start = track[j].start - it.dur end
+          end
+        else
+          i = i + 1
+        end
+      end
+    end
+  end
+  return true
+end
 function Timeline:GetTrackCount(kind) return #self.tracks[kind] end
 function Timeline:GetItemListInTrack(kind, index) return (self.tracks[kind] or {})[index] or {} end
 function Timeline:AddMarker(frame, color, name, note, duration, data)
@@ -95,13 +163,90 @@ function MediaPool:ImportTimelineFromFile(path, opts)
   return tl
 end
 
+-- Folders ------------------------------------------------------------------------
+local Folder = {}
+Folder.__index = Folder
+function Folder.new(name) return setmetatable({ name = name, clips = {}, subs = {} }, Folder) end
+function Folder:GetName() return self.name end
+function Folder:GetClipList() local out = {} for i, c in ipairs(self.clips) do out[i] = c end return out end
+function Folder:GetSubFolderList() local out = {} for i, f in ipairs(self.subs) do out[i] = f end return out end
+
+function MediaPool:GetRootFolder() return self.root end
+function MediaPool:GetCurrentFolder() return self.current end
+function MediaPool:SetCurrentFolder(f) if not f then return false end self.current = f; return true end
+function MediaPool:AddSubFolder(parent, name)
+  local f = Folder.new(name)
+  table.insert(parent.subs, f)
+  return f
+end
+-- Plain path strings only: a {FilePath = ...} table imports nothing (measured on 21.0.4).
+-- Missing files are skipped. Always imports into the current folder.
+function MediaPool:ImportMedia(list)
+  local out = {}
+  for _, path in ipairs(list or {}) do
+    if type(path) == "string" then
+      local f = io.open(path, "rb")
+      if f then
+        f:close()
+        local mpi = Mpi.new(path)
+        table.insert(self.current.clips, mpi)
+        out[#out + 1] = mpi
+      end
+    end
+  end
+  self.project.imports = (self.project.imports or 0) + #out
+  return out
+end
+function MediaPool:CreateEmptyTimeline(name)
+  for _, t in ipairs(self.project.timelines) do if t.name == name then return nil end end
+  local tl = Timeline.new(name)
+  table.insert(self.project.timelines, tl)
+  return tl -- does not make it current: callers must not rely on that
+end
+-- clipInfo: startFrame / endFrame are source frames, endFrame EXCLUSIVE (measured on
+-- 21.0.4); recordFrame is an absolute timeline frame; omitted = after the track's last
+-- item. Items land at the timeline fps, keeping their real-time length.
+function MediaPool:AppendToTimeline(infos)
+  local tl = self.project.current
+  if not tl then return {} end
+  local fps = tonumber(tl:GetSetting("timelineFrameRate")) or tonumber(self.project.settings.timelineFrameRate)
+  local out = {}
+  for _, info in ipairs(infos or {}) do
+    local mpi = info.mediaPoolItem
+    if type(mpi) ~= "table" or getmetatable(mpi) ~= Mpi then return {} end
+    local s, e = info.startFrame or 0, info.endFrame or mpi.frames
+    if s < 0 or e > mpi.frames or e <= s then return {} end
+    local dur = math.floor((e - s) / mpi.fps * fps + 0.5)
+    local kinds = {}
+    if info.mediaType ~= 2 and mpi.video then kinds[#kinds + 1] = "video" end
+    if info.mediaType ~= 1 and mpi.audio then kinds[#kinds + 1] = "audio" end
+    local index = info.trackIndex or 1
+    for _, kind in ipairs(kinds) do
+      local track = tl.tracks[kind][index]
+      if not track then return out end
+      local rec = info.recordFrame
+      if not rec then
+        rec = tl.start
+        for _, it in ipairs(track) do rec = math.max(rec, it:GetEnd()) end
+      end
+      local it = Item.new(mpi.name, rec, dur, mpi.path, mpi)
+      it.left, it.track_type, it.track_index = s, kind, index
+      table.insert(track, it)
+      table.sort(track, function(a, b) return a.start < b.start end)
+      out[#out + 1] = it
+    end
+  end
+  return out
+end
+
 function Project.new(name)
   local p = setmetatable({ name = name, page = "edit", render_jobs = {},
     settings = { timelineFrameRate = "24", timelineResolutionWidth = "1920",
       timelineResolutionHeight = "1080" } }, Project)
   p.timelines = { Timeline.new("Main", { { "A", 48, "/media/a.mov" }, { "B", 72, "/media/b.mov" } }) }
   p.current = p.timelines[1]
-  p.pool = setmetatable({ project = p }, MediaPool)
+  p.pool = setmetatable({ project = p, root = Folder.new("Master") }, MediaPool)
+  p.pool.current = p.pool.root
   return p
 end
 function Project:GetName() return self.name end
@@ -169,6 +314,7 @@ resolve = {
 -- Test hook: lets tests reach the mock's internals through the bridge.
 mock = {
   project = project,
+  media_info = {}, -- [path] = {fps = 30, frames = 90, audio = false, video = false}
   -- Put a dissolve across the cut between the first two clips of the current timeline.
   add_transition = function()
     local tl = project:GetCurrentTimeline()
