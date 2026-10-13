@@ -1,63 +1,67 @@
 ---
 name: resolve-rough-cut
-description: Build a rough cut from raw footage. Transcribes audio, detects scenes, drafts a timeline, and exports an FCPXML that DaVinci Resolve (Free & Studio) imports cleanly. Use when the user has source video and wants Claude to make editorial decisions before opening Resolve.
+description: Build a rough cut from raw footage — transcribe, pick the best segments or scenes, refine a stored plan, export FCPXML and (when live) import it into DaVinci Resolve Free or Studio. Use for "first cut", "rough cut", "highlight reel", "make a 4-minute version" requests.
 ---
 
 # resolve-rough-cut
 
-Builds a first-pass timeline from raw footage, deciding what to keep based on transcript content and scene structure, then writes FCPXML for `File > Import > Timeline` in Resolve.
+Builds a first-pass timeline from raw footage, deciding what to keep from the transcript and the scene structure, and delivers it to Resolve as a timeline.
 
 ## When to use
 
-- User has raw footage and asks for a "first cut" / "rough cut" / "draft edit"
-- User wants Claude to make editorial decisions (not just process clips)
-- User wants to save manual scrubbing time
-
-## Prerequisites
-
-1. `resolve-pilot` MCP server connected to Claude (see project README).
-2. `mlx-whisper` installed if transcription is needed: `pip install 'resolve-pilot[transcribe]'`.
-3. Source media path is accessible from the MCP server host.
+- The user has raw footage and asks for a "first cut" / "rough cut" / "draft edit" / "highlights"
+- The user wants you to make editorial decisions, not just process clips
 
 ## Workflow
 
-1. **Call `probe_media_tool(path)`** — learn fps, resolution, duration. Use this to set the timeline format.
-2. **Call `detect_scenes_tool(path, threshold=10.0)`** — get scene boundaries. Lower threshold → more cuts.
-3. **If the footage has dialogue, call `transcribe_audio(path)`** — get spoken segments.
-4. **Decide editorially.** Look at transcript + scenes together:
-   - Drop dead air, redundant lines, weak takes.
-   - Tighten by trimming 0.1–0.3 s off each clip head/tail.
-   - For interview/talking-head: prefer transcript-segment cuts.
-   - For B-roll/montage: prefer scene cuts.
-   - Pacing rule of thumb: aim for ~3–5 s clips for energetic edits, 8–15 s for documentary.
-5. **Build a `RoughCutPlan` JSON** with `clips: [{source_path, in_seconds, duration_seconds, rationale, name}]`. The `rationale` field is for the user to review what you chose.
-6. **Call `export_fcpxml(plan_json, out_path)`** — writes FCPXML to disk.
-7. **Tell the user:** "Open Resolve → File → Import → Timeline → pick `{out_path}`."
+1. **`resolve_pilot_status`** once per session. Note `channel` (studio / bridge / manual).
+2. **`probe_media(path)`** — fps, resolution, duration, whether there is audio.
+3. **Pick the backbone**
+   - Talking head, interview, talk → `transcribe_audio(path, language=...)`. If it returns `status: "running"`, call again with the same arguments. When `next_offset` is present, page with `offset` (cached calls are instant).
+   - B-roll, montage → `plan_from_scenes(path)` (it detects scenes itself), or `detect_scenes` first if you want to inspect scores.
+4. **Decide editorially.** Read the numbered transcript (`[i] start-end text`):
+   - keep complete thoughts and the strongest delivery; drop false starts, repeats, filler, dead air
+   - pacing: 3–5 s clips for energetic edits, 8–15 s for documentary
+   - keep a running total against the target length
+5. **Draft** with `plan_from_transcript(transcript_id, segment_indices=[12, 3, 4, 40], title=...)` — indices in playback order. Consecutive segments join seamlessly; no words are repeated.
+6. **Refine with `edit_plan`** — never rebuild the plan for small changes:
+   ```json
+   [{"op": "trim", "index": 2, "head_seconds": 0.15},
+    {"op": "move", "index": 5, "to": 0},
+    {"op": "update", "index": 3, "rationale": "best answer to 'why now'"},
+    {"op": "set", "fade_in_seconds": 0.5, "fade_out_seconds": 1.0}]
+   ```
+   Fix everything in `errors`; read every `warnings` entry (clip past the end of its source, dissolve without handles, reused footage).
+7. **`export_fcpxml(plan_id)`** → `path`.
+8. **Deliver**
+   - studio / bridge: `import_timeline(path, timeline_name="...")`, then `get_resolve_state(include_clips=true)` and check clip count and duration against the plan.
+   - manual: "In Resolve: File › Import › Timeline… and pick `<path>`."
+9. **Reply** with a short table — #, source in–out, duration, rationale — and the total length.
 
-## Important conventions
+## Conventions
 
-- Always include `rationale` on every clip — this is how the user audits your choices.
-- Use `pad_seconds=0.2` on transcript cuts to keep natural breath/sync.
-- If duration > 30 min, ask the user before transcribing (large model takes time).
-- Match the timeline `fps` to source fps unless the user requested otherwise.
-- For vertical/social formats, set `width=1080, height=1920` and warn the user that reframing happens in Resolve (Smart Reframe or manual).
+- Always fill `rationale`; it is how the user audits your choices.
+- `pad_seconds=0.2` keeps natural breaths; use 0.05 for punchy social cuts.
+- The timeline fps follows the source unless the user asks otherwise.
+- Vertical / social: `edit_plan` with `{"op": "set", "width": 1080, "height": 1920}` and tell the user the reframing happens in Resolve (Smart Reframe in Studio, or manual).
+- Ask before transcribing anything over an hour and quote the expected time (turbo runs many times faster than real time on Apple Silicon, slower on CPU).
+- Multi-camera or several files: `create_plan` takes clips from any number of sources.
 
 ## Example
 
-User: *"I have a 25-min interview at `~/Footage/jane.mp4`. Give me a 4-minute highlight cut focused on her best lines."*
+User: *"I have a 25-min interview at `~/Footage/jane.mp4`. Give me a 4-minute highlight cut of her best lines."*
 
-You:
-1. Probe → 1080p30 H.264, 25:13 duration.
-2. Transcribe (large-v3-turbo, ~1 min on M-series).
-3. Read the 200+ segments. Pick the 15 strongest (most quotable, complete thoughts, no false starts).
-4. Total target: 240 s. Adjust by trimming pad if over budget.
-5. Build plan with rationale per clip ("ans to 'what surprised you' — strong delivery").
-6. Export to `~/Footage/jane_4min_roughcut.fcpxml`.
-7. Reply with: 15-clip summary table + import instruction.
+1. `probe_media` → 1080p30, 25:13, AAC audio.
+2. `transcribe_audio` → `status: running`; call again → 212 segments (`transcript_id: t-…`).
+3. Read the segments, choose 15 (≈240 s total).
+4. `plan_from_transcript(transcript_id, segment_indices=[…], title="Jane — 4 min")`.
+5. `edit_plan`: trims on two clips, `set` fades. Warnings: none.
+6. `export_fcpxml` → `~/Footage/Jane_4_min.fcpxml`; `import_timeline` (bridge) → 15 clips, 4:02.
+7. Reply with the table and the timeline name.
 
-## Failure modes to avoid
+## Failure modes
 
-- Don't call `transcribe_audio` on files > 1 hr without warning — quote the user the expected time.
-- Don't pick clips that overlap (sort by `in_seconds` and check).
-- Don't set durations that exceed the source file's length.
-- If `probe_media` returns `fps=None`, default to 24 and tell the user.
+- Warning "reuse … of the same footage": two clips overlap in the source. Intentional? Otherwise trim.
+- `probe_media` shows `fps: null` (audio-only or unusual container): pass `fps` explicitly and tell the user.
+- `import_timeline` returns `ok: false`: a timeline with that name probably exists; pass another `timeline_name`.
+- Media offline after import: the FCPXML points at absolute paths; files moved since export need relinking (`relink_media` snippet).

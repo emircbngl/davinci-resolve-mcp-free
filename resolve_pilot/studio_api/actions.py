@@ -139,3 +139,166 @@ def project_summary() -> dict[str, Any]:
         "current_timeline_video_tracks": tl.GetTrackCount("video") if tl else None,
         "current_timeline_audio_tracks": tl.GetTrackCount("audio") if tl else None,
     }
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Dict-returning actions mirroring the Lua snippets, so every channel reports
+# results in the same shape (see resolve_pilot.control).
+# ────────────────────────────────────────────────────────────────────────────
+
+def _try(fn, *args):
+    try:
+        return fn(*args)
+    except Exception:
+        return None
+
+
+def _num(value) -> float | None:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+def _timeline_fps(project, timeline) -> float:
+    return (
+        _num(_try(timeline.GetSetting, "timelineFrameRate"))
+        or _num(project.GetSetting("timelineFrameRate"))
+        or 24.0
+    )
+
+
+def resolve_state(
+    include_clips: bool = False,
+    track_type: str = "video",
+    track_index: int = 1,
+    include_markers: bool = False,
+    max_clips: int = 200,
+) -> dict[str, Any]:
+    """Project / timeline snapshot in the same shape as the `get_state` snippet."""
+    r = get_resolve()
+    state: dict[str, Any] = {
+        "ok": True,
+        "product": _try(r.GetProductName),
+        "version": _try(r.GetVersionString),
+        "page": _try(r.GetCurrentPage),
+    }
+    p = r.GetProjectManager().GetCurrentProject()
+    if p is None:
+        state["project"] = "(none)"
+        return state
+    state["project"] = p.GetName()
+    state["project_fps"] = _num(p.GetSetting("timelineFrameRate"))
+    state["resolution"] = [
+        _num(p.GetSetting("timelineResolutionWidth")),
+        _num(p.GetSetting("timelineResolutionHeight")),
+    ]
+    timelines = [p.GetTimelineByIndex(i) for i in range(1, int(p.GetTimelineCount() or 0) + 1)]
+    state["timelines"] = [t.GetName() for t in timelines if t]
+    tl = p.GetCurrentTimeline()
+    if tl is None:
+        return state
+    fps = _timeline_fps(p, tl)
+    start = tl.GetStartFrame()
+    markers = _try(tl.GetMarkers) or {}
+    cur: dict[str, Any] = {
+        "name": tl.GetName(),
+        "fps": fps,
+        "start_frame": start,
+        "end_frame": tl.GetEndFrame(),
+        "duration_seconds": (tl.GetEndFrame() - start) / fps,
+        "start_timecode": _try(tl.GetStartTimecode),
+        "playhead_timecode": _try(tl.GetCurrentTimecode),
+        "video_tracks": tl.GetTrackCount("video"),
+        "audio_tracks": tl.GetTrackCount("audio"),
+        "subtitle_tracks": _try(tl.GetTrackCount, "subtitle"),
+        "marker_count": len(markers),
+    }
+    if include_markers:
+        cur["markers"] = [
+            {"frame": f, "seconds": f / fps, "color": m.get("color"), "name": m.get("name"),
+             "note": m.get("note"), "duration": m.get("duration")}
+            for f, m in sorted(markers.items())
+        ]
+    if include_clips:
+        items = tl.GetItemListInTrack(track_type, int(track_index)) or []
+        clips = []
+        for i, it in enumerate(items[:max_clips]):
+            mpi = _try(it.GetMediaPoolItem)
+            clips.append({
+                "index": i,
+                "name": it.GetName(),
+                "start_seconds": (it.GetStart() - start) / fps,
+                "duration_seconds": it.GetDuration() / fps,
+                "start_frame": it.GetStart(),
+                "end_frame": it.GetEnd(),
+                "source_in_frame": _try(it.GetLeftOffset),
+                "clip_color": _try(it.GetClipColor),
+                "source_path": _try(mpi.GetClipProperty, "File Path") if mpi else None,
+            })
+        cur["track"] = f"{track_type} {track_index}"
+        cur["clip_count"] = len(items)
+        cur["clips"] = clips
+    state["current_timeline"] = cur
+    return state
+
+
+def add_markers_batch(markers: list[dict]) -> dict[str, Any]:
+    """Add normalized markers ({frame|seconds, color, name, note, duration})."""
+    p = _current_project()
+    tl = _current_timeline()
+    fps = _timeline_fps(p, tl)
+    added, skipped = 0, []
+    for m in markers:
+        frame = int(m["frame"]) if m.get("frame") is not None else int(float(m["seconds"]) * fps + 0.5)
+        if tl.AddMarker(frame, m["color"], m["name"], m["note"], int(m["duration"]), ""):
+            added += 1
+        else:
+            skipped.append(frame)
+    return {"ok": True, "added": added, "requested": len(markers), "skipped_frames": skipped,
+            "timeline": tl.GetName(), "timeline_fps": fps}
+
+
+def import_timeline(path: str, timeline_name: str | None = None,
+                    import_source_clips: bool = True) -> dict[str, Any]:
+    """Import FCPXML/EDL/AAF/DRT/OTIO as a new timeline and make it current."""
+    import os
+    p = _current_project()
+    opts: dict[str, Any] = {"importSourceClips": bool(import_source_clips)}
+    if timeline_name:
+        opts["timelineName"] = timeline_name
+    full = os.path.expanduser(path)
+    tl = p.GetMediaPool().ImportTimelineFromFile(full, opts)
+    if not tl:
+        return {"ok": False, "error": f"Resolve could not import {full}. Check the file exists, "
+                "is valid, and that no timeline with the same name already exists."}
+    p.SetCurrentTimeline(tl)
+    n = sum(len(tl.GetItemListInTrack("video", t) or [])
+            for t in range(1, int(tl.GetTrackCount("video") or 0) + 1))
+    return {"ok": True, "timeline": tl.GetName(), "video_clip_count": n,
+            "start_frame": tl.GetStartFrame(), "end_frame": tl.GetEndFrame()}
+
+
+def render_current_timeline(preset: str = "H.264 Master", target_dir: str = "~/Desktop/Renders",
+                            custom_name: str | None = None, start: bool = False) -> dict[str, Any]:
+    import os
+    p = _current_project()
+    tl = _current_timeline()
+    if not p.LoadRenderPreset(preset):
+        return {"ok": False, "error": f"Unknown render preset: {preset}",
+                "available_presets": list(p.GetRenderPresetList() or [])}
+    settings: dict[str, Any] = {"TargetDir": os.path.expanduser(target_dir)}
+    if custom_name:
+        settings["CustomName"] = custom_name
+    p.SetRenderSettings(settings)
+    job = p.AddRenderJob()
+    if not job:
+        return {"ok": False, "error": "AddRenderJob failed. Check the Deliver page."}
+    if start:
+        p.StartRendering(job)
+    return {"ok": True, "job_id": job, "timeline": tl.GetName(), "preset": preset, "rendering": start}
+
+
+def open_page(page: str) -> dict[str, Any]:
+    return {"ok": bool(get_resolve().OpenPage(page)), "page": page}

@@ -1,15 +1,19 @@
 from resolve_pilot.editorial.roughcut import (
-    RoughCutPlan,
+    RoughCutAudioBed,
     RoughCutClip,
-    plan_from_transcript,
+    RoughCutPlan,
     plan_from_scenes,
+    plan_from_transcript,
     plan_to_timeline_spec,
+    validate_plan,
 )
 
 __all__ = [
-    "RoughCutPlan",
+    "RoughCutAudioBed",
     "RoughCutClip",
-    "plan_from_transcript",
+    "RoughCutPlan",
     "plan_from_scenes",
+    "plan_from_transcript",
     "plan_to_timeline_spec",
+    "validate_plan",
 ]

@@ -177,3 +177,76 @@ def test_roughcut_plan_roundtrips_transition_fields():
     again = RoughCutPlan.from_dict(plan.to_dict())
     assert again.default_transition_seconds == 0.25
     assert again.clips[0].transition_out_seconds == 0.5
+
+
+# ── Audio bed, asset URIs, frame-exact boundaries, SRT wrapping ─────────────
+
+import xml.etree.ElementTree as ET  # noqa: E402
+
+from resolve_pilot.exporters.fcpxml import AudioBed  # noqa: E402
+from resolve_pilot.exporters.srt import wrap_cues  # noqa: E402
+
+
+def _spine(xml: str) -> list[ET.Element]:
+    return list(ET.fromstring(xml.encode()).find(".//spine"))
+
+
+def test_audio_bed_is_a_connected_clip_on_the_first_spine_item():
+    spec = _two_clip_spec(audio_bed=AudioBed(source_path="/tmp/song.wav", in_seconds=1.0))
+    spec.clips[0].in_seconds = 2.0
+    spine = _spine(build_fcpxml(spec))
+    bed = spine[0].find("asset-clip")
+    assert bed is not None and bed.get("lane") == "-1"
+    # Offset is in the parent's source time: parent start (2 s) + timeline position (0).
+    assert bed.get("offset") == "48/24s"
+    assert bed.get("start") == "24/24s"
+    assert bed.get("duration") == "96/24s"  # runs to the end of the 4 s timeline
+
+
+def test_audio_bed_with_fade_in_hangs_off_the_gap():
+    spec = _two_clip_spec(fade_in_seconds=1.0,
+                          audio_bed=AudioBed(source_path="/tmp/song.wav", offset_seconds=0.5))
+    spine = _spine(build_fcpxml(spec))
+    assert spine[0].tag == "gap"
+    bed = spine[0].find("asset-clip")
+    assert bed.get("offset") == "12/24s" and bed.get("duration") == "108/24s"
+
+
+def test_asset_src_is_a_proper_file_uri():
+    spec = TimelineSpec(name="t", fps=24.0, clips=[
+        Clip(source_path="/tmp/My Clips/şehir #1.mov", in_seconds=0, duration_seconds=1)])
+    asset = ET.fromstring(build_fcpxml(spec).encode()).find(".//asset")
+    assert asset.get("src") == "file:///tmp/My%20Clips/%C5%9Fehir%20%231.mov"
+
+
+def test_clip_boundaries_are_frame_exact_without_gaps():
+    # 10 clips of 0.43 s at 24 fps: each is 10.32 frames, so per-clip rounding drifts.
+    spec = TimelineSpec(name="t", fps=24.0, clips=[
+        Clip(source_path="/tmp/a.mp4", in_seconds=0, duration_seconds=0.43) for _ in range(10)])
+    spine = _spine(build_fcpxml(spec))
+
+    def frames(v: str) -> int:
+        return int(v.split("/")[0])
+
+    pos = 0
+    for el in spine:
+        assert frames(el.get("offset")) == pos
+        pos += frames(el.get("duration"))
+    assert pos == round(4.3 * 24)
+
+
+def test_wrap_cues_wraps_and_splits_proportionally():
+    text = "one two three four five six seven eight nine ten eleven twelve"
+    cues = wrap_cues([SrtCue(0.0, 6.0, text)], max_chars_per_line=20, max_lines=2)
+    assert len(cues) == 2
+    assert all(len(line) <= 20 for c in cues for line in c.text.split("\n"))
+    assert cues[0].start == 0.0 and cues[-1].end == 6.0
+    assert cues[0].end == cues[1].start
+    assert " ".join(c.text.replace("\n", " ") for c in cues) == text
+
+
+def test_wrap_cues_short_text_and_disabled():
+    cue = SrtCue(1.0, 2.0, "short line")
+    assert wrap_cues([cue])[0].text == "short line"
+    long = SrtCue(0.0, 1.0, "x " * 50)
+    assert wrap_cues([long], max_chars_per_line=0) == [long]

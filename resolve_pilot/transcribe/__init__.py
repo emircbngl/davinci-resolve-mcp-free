@@ -1,3 +1,8 @@
-from resolve_pilot.transcribe.whisper import transcribe, Segment, TranscriptionResult
+from resolve_pilot.transcribe.whisper import (
+    Segment,
+    TranscriptionResult,
+    available_engines,
+    transcribe,
+)
 
-__all__ = ["transcribe", "Segment", "TranscriptionResult"]
+__all__ = ["Segment", "TranscriptionResult", "available_engines", "transcribe"]

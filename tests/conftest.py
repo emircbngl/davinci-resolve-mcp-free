@@ -1,0 +1,102 @@
+"""Shared fixtures: an isolated state dir, generated media, and a live bridge.
+
+The live bridge fixture runs the real ``bridge.lua`` under LuaJIT (the Lua that
+DaVinci Resolve embeds) against ``tests/lua/mock_resolve.lua``, so the whole
+request → Lua → JSON → Python path is exercised without Resolve installed.
+"""
+from __future__ import annotations
+
+import shutil
+import subprocess
+import time
+from pathlib import Path
+
+import pytest
+
+LUAJIT = shutil.which("luajit")
+FFMPEG = shutil.which("ffmpeg")
+MOCK_RESOLVE = Path(__file__).parent / "lua" / "mock_resolve.lua"
+
+needs_luajit = pytest.mark.skipif(not LUAJIT, reason="luajit not installed")
+needs_ffmpeg = pytest.mark.skipif(not (FFMPEG and shutil.which("ffprobe")), reason="ffmpeg not installed")
+
+
+@pytest.fixture(autouse=True)
+def isolated_home(tmp_path, monkeypatch):
+    """Keep plans, transcripts and bridge files out of the real ~/.resolve-pilot."""
+    home = tmp_path / "rp-home"
+    monkeypatch.setenv("RESOLVE_PILOT_HOME", str(home))
+    monkeypatch.delenv("RESOLVE_PILOT_BRIDGE_DIR", raising=False)
+    return home
+
+
+def start_bridge(workdir: Path, idle_minutes: int = 1) -> subprocess.Popen:
+    """Render the bridge for the current RESOLVE_PILOT_HOME and run it under LuaJIT."""
+    from resolve_pilot import bridge
+    from resolve_pilot.lua_snippets.library import lua_string
+
+    script = workdir / "bridge.lua"
+    script.write_text(bridge.render_script(idle_minutes=idle_minutes), encoding="utf-8")
+    runner = workdir / "runner.lua"
+    runner.write_text(
+        f"dofile({lua_string(str(MOCK_RESOLVE))})\ndofile({lua_string(str(script))})\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.Popen([LUAJIT, str(runner)], stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if bridge.status().running:
+            return proc
+        if proc.poll() is not None:
+            raise RuntimeError("bridge exited early:\n" + proc.stdout.read())
+        time.sleep(0.05)
+    proc.kill()
+    raise RuntimeError("bridge did not start")
+
+
+def stop_bridge(proc: subprocess.Popen) -> str:
+    from resolve_pilot import bridge
+
+    bridge.stop()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    return proc.stdout.read() if proc.stdout else ""
+
+
+@pytest.fixture
+def live_bridge(tmp_path):
+    if not LUAJIT:
+        pytest.skip("luajit not installed")
+    proc = start_bridge(tmp_path)
+    yield proc
+    if proc.poll() is None:
+        stop_bridge(proc)
+
+
+@pytest.fixture(scope="session")
+def media(tmp_path_factory):
+    """A 6 s, 24 fps clip with a hard cut at 3 s, and a 6 s click track at 120 BPM."""
+    if not (FFMPEG and shutil.which("ffprobe")):
+        pytest.skip("ffmpeg not installed")
+    d = tmp_path_factory.mktemp("media")
+    clip = d / "two scenes.mp4"
+    subprocess.run([
+        FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i", "testsrc=size=320x240:rate=24:duration=3",
+        "-f", "lavfi", "-i", "color=c=red:size=320x240:rate=24:duration=3",
+        "-f", "lavfi", "-i", "sine=frequency=440:duration=6",
+        "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]",
+        "-map", "[v]", "-map", "2:a", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-shortest", str(clip),
+    ], check=True)
+    song = d / "song.wav"
+    subprocess.run([
+        FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+        "aevalsrc='if(lt(mod(t,0.5),0.04),sin(2*PI*1000*t),0)':d=6:s=22050",
+        str(song),
+    ], check=True)
+    return {"clip": clip, "song": song}

@@ -6,9 +6,12 @@ numpy. For higher precision, plug in librosa or aubio if installed.
 """
 from __future__ import annotations
 
+import math
+import operator
 import shutil
 import subprocess
-import wave
+import sys
+from array import array
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
@@ -25,31 +28,27 @@ class Beat:
 def _ffmpeg() -> str:
     p = shutil.which("ffmpeg")
     if not p:
-        raise RuntimeError("ffmpeg not found")
+        raise RuntimeError("ffmpeg not found on PATH. Install with: brew install ffmpeg")
     return p
 
 
-def _decode_mono(path: str | Path, sr: int = 22050) -> tuple[list[float], int]:
-    """Decode a file to a mono float32 list at the given sample rate."""
-    import struct
+def _decode_mono(path: str | Path, sr: int = 22050) -> tuple[array, int]:
+    """Decode a file to mono signed 16-bit samples at the given sample rate.
+
+    Raw PCM rather than WAV: piped WAV output has no valid size header (ffmpeg
+    cannot seek back to fill it in), which broke the `wave` module reader.
+    """
     cmd = [
         _ffmpeg(), "-hide_banner", "-loglevel", "error",
-        "-i", str(path),
-        "-ac", "1", "-ar", str(sr), "-f", "wav", "-",
+        "-i", str(path), "-vn",
+        "-ac", "1", "-ar", str(sr), "-f", "s16le", "-acodec", "pcm_s16le", "-",
     ]
-    proc = subprocess.run(cmd, capture_output=True, check=True)
-    # The output is a WAV stream; read with wave from BytesIO.
-    import io
-    with wave.open(io.BytesIO(proc.stdout)) as w:
-        n = w.getnframes()
-        sw = w.getsampwidth()
-        raw = w.readframes(n)
-        if sw == 2:
-            samples = list(struct.unpack(f"<{n}h", raw))
-            scale = 1.0 / 32768.0
-            return [s * scale for s in samples], sr
-        else:
-            raise RuntimeError(f"Unexpected sample width: {sw}")
+    raw = subprocess.run(cmd, capture_output=True, check=True).stdout
+    samples = array("h")
+    samples.frombytes(raw[: len(raw) // 2 * 2])
+    if sys.byteorder == "big":
+        samples.byteswap()
+    return samples, sr
 
 
 def detect_beats(
@@ -64,29 +63,19 @@ def detect_beats(
     so the package stays small.
     """
     samples, sr = _decode_mono(path)
-    if not samples:
-        return []
-
-    # Frame the signal, compute RMS per frame, then locate peaks.
-    win = int(sr * 0.025)            # 25 ms windows
     hop = int(sr * 0.010)            # 10 ms hop
-    rms: list[float] = []
-    times: list[float] = []
-    import math
-    for start in range(0, max(0, len(samples) - win), hop):
-        frame = samples[start:start + win]
-        m = sum(x * x for x in frame) / win
-        rms.append(math.sqrt(m) if m > 0 else 1e-12)
-        times.append(start / sr)
-
-    if not rms:
+    if len(samples) < 3 * hop:
         return []
+
+    # Energy per 10 ms block, then RMS over a 30 ms window (3 blocks).
+    block = [sum(map(operator.mul, seg, seg))
+             for seg in (samples[i:i + hop] for i in range(0, len(samples) - hop + 1, hop))]
+    scale = 1.0 / (3 * hop * 32768.0 * 32768.0)
+    rms = [math.sqrt(sum(block[i:i + 3]) * scale) or 1e-12 for i in range(len(block) - 2)]
+    times = [i * hop / sr for i in range(len(rms))]
 
     # Onset envelope: half-wave rectified diff
-    env = [0.0]
-    for i in range(1, len(rms)):
-        d = max(0.0, rms[i] - rms[i - 1])
-        env.append(d)
+    env = [0.0] + [max(0.0, rms[i] - rms[i - 1]) for i in range(1, len(rms))]
 
     peak_max = max(env) or 1e-12
     threshold_lin = 10 ** (energy_threshold_db / 20.0) * peak_max
@@ -106,3 +95,17 @@ def detect_beats(
         last_idx = i
         beats.append(Beat(pts_seconds=times[i], strength=v / peak_max))
     return beats
+
+
+def estimate_tempo(beats: list[Beat], min_strength: float = 0.3) -> float | None:
+    """Rough BPM from the median gap between strong onsets, folded into 70-180."""
+    times = [b.pts_seconds for b in beats if b.strength >= min_strength]
+    gaps = sorted(b - a for a, b in zip(times, times[1:]) if b > a)
+    if len(gaps) < 3:
+        return None
+    bpm = 60.0 / gaps[len(gaps) // 2]
+    while bpm < 70:
+        bpm *= 2
+    while bpm > 180:
+        bpm /= 2
+    return round(bpm, 1)

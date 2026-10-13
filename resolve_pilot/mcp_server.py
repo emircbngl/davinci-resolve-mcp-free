@@ -3,548 +3,893 @@
 Exposes the editing toolkit over Model Context Protocol so Claude Desktop /
 Claude Code can drive a video editing session end-to-end without an API key.
 
-Tools are grouped:
-- inspect:    probe_media, detect_scenes, list_lua_snippets
-- transcribe: transcribe_audio
-- plan:       plan_from_transcript, plan_from_scenes
-- export:     export_fcpxml, export_srt, render_lua_snippet
-- ui:         is_resolve_running, focus_resolve, open_page, send_keystroke, menu_pick
-- workspace:  resolve_pilot_status
+Tool groups:
+- session:  resolve_pilot_status, get_workflow_guide, setup_bridge
+- analyze:  probe_media, detect_scenes, detect_beats, transcribe_audio
+- plan:     plan_from_transcript, plan_from_scenes, create_plan, get_plan, edit_plan
+- export:   export_fcpxml, export_srt
+- resolve:  get_resolve_state, import_timeline, add_markers, set_clip_color, apply_lut,
+            queue_render, open_page, run_lua, list_lua_snippets, render_lua_snippet
+- macOS UI: send_keystroke, menu_pick, open_ai_feature
 
 Run as:
     python -m resolve_pilot.mcp_server
 or via Claude Desktop config (see README).
 """
-from __future__ import annotations
-
-import json
+# No `from __future__ import annotations`: the MCP SDK builds tool schemas
+# from these signatures, so keep the annotations as real objects.
+import functools
+import os
 import platform
+import re
 import shutil
+import subprocess
 import sys
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, Literal
 
-from mcp.server.fastmcp import FastMCP
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
-from resolve_pilot.analyzers import detect_beats, detect_scenes, probe_media
-from resolve_pilot.editorial.roughcut import (
-    RoughCutPlan,
-    plan_from_scenes,
-    plan_from_transcript,
-    plan_to_timeline_spec,
-)
-from resolve_pilot.exporters.fcpxml import write_fcpxml
-from resolve_pilot.exporters.srt import SrtCue, write_srt
+try:  # mcp >= 2.0 renamed FastMCP to MCPServer
+    from mcp.server.mcpserver import MCPServer as _Server
+    from mcp.server.mcpserver.exceptions import ToolError
+except ImportError:  # mcp 1.x
+    from mcp.server.fastmcp import FastMCP as _Server
+    from mcp.server.fastmcp.exceptions import ToolError
+from mcp.types import ToolAnnotations
+
+from resolve_pilot import __version__, analyzers, bridge, control
+from resolve_pilot._paths import state_dir
+from resolve_pilot.editorial import ops as plan_ops
+from resolve_pilot.editorial import roughcut, store
+from resolve_pilot.exporters import fcpxml as fcpxml_export
+from resolve_pilot.exporters import srt as srt_export
 from resolve_pilot.lua_snippets import library as lua_lib
-from resolve_pilot.transcribe import Segment
+from resolve_pilot.transcribe import store as transcripts
+from resolve_pilot.transcribe import Segment, available_engines
+from resolve_pilot.workflows import get_workflow, list_workflows
 
-mcp = FastMCP("resolve-pilot")
+INSTRUCTIONS = """\
+resolve-pilot edits video with DaVinci Resolve, including the FREE edition (which has no \
+external scripting API).
+
+Start of session: call resolve_pilot_status once. Its `channel` says how Resolve is reached:
+- studio: Resolve Studio's Python API, direct control.
+- bridge: the resolve-pilot Lua bridge running inside Resolve (works in Free). The user starts \
+it once per session; setup_bridge installs it into Workspace > Scripts.
+- manual: nothing live. Resolve actions return `lua_code` + `instructions`; relay them to the \
+user verbatim and ask them to paste it into Workspace > Console. Offer setup_bridge if they \
+want hands-free control.
+Resolve actions (get_resolve_state, import_timeline, add_markers, set_clip_color, apply_lut, \
+queue_render, open_page) choose the channel automatically and report it in `channel`.
+
+Editing loop:
+1. Analyze: probe_media, then detect_scenes / detect_beats / transcribe_audio (cached; returns \
+numbered segments).
+2. Draft: plan_from_transcript (pick segment_indices), plan_from_scenes, or create_plan (any \
+sources, optional music bed). Plans are stored server-side; you get a plan_id.
+3. Refine with edit_plan operations (keep/remove/move/trim/update/insert/set) instead of \
+resending the plan. Every plan response lists `errors` and `warnings`; resolve them.
+4. export_fcpxml(plan_id), then import_timeline(path) when live, or tell the user \
+File > Import > Timeline.
+5. Verify with get_resolve_state(include_clips=true) and iterate.
+
+Conventions: times are seconds unless a parameter says frames. Marker positions can be given \
+in seconds; Resolve converts them with the timeline's real frame rate. Paths must be absolute \
+paths on the machine running this server (~ is expanded).
+Safety: run_lua executes code inside the user's Resolve. Prefer the dedicated tools. Before \
+anything destructive (deleting clips, markers or timelines, replacing grades, rendering over \
+files) ask the user and suggest saving the project first.
+Playbooks: get_workflow_guide() lists step-by-step guides (rough cut, subtitles, music video, \
+color grade, markers, live control with a Resolve Lua API cheat sheet). Read the matching one \
+before a multi-step job.
+"""
+
+mcp = _Server("resolve-pilot", instructions=INSTRUCTIONS)
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Inspection
+# Tool registration
 # ────────────────────────────────────────────────────────────────────────────
 
-@mcp.tool()
-def probe_media_tool(path: str) -> dict:
-    """Return container, codecs, fps, resolution, duration for a video/audio file.
+def _hints(read_only: bool, destructive: bool = False, idempotent: bool = False) -> ToolAnnotations:
+    # Alias names are accepted by both mcp 1.x (camelCase fields) and 2.x (snake_case).
+    return ToolAnnotations.model_validate({
+        "readOnlyHint": read_only,
+        "destructiveHint": destructive,
+        "idempotentHint": idempotent or read_only,
+        "openWorldHint": False,
+    })
+
+
+READ = _hints(read_only=True)
+WRITE_FILES = _hints(read_only=False, idempotent=True)
+EDIT_RESOLVE = _hints(read_only=False)
+DESTRUCTIVE = _hints(read_only=False, destructive=True)
+
+
+def _explain(e: BaseException) -> str:
+    """Turn an exception into a message the agent can act on."""
+    if isinstance(e, FileNotFoundError):
+        return (f"File not found: {e.filename or e}. Use an absolute path that exists on the "
+                "machine running resolve-pilot (~ is expanded).")
+    if isinstance(e, subprocess.CalledProcessError):
+        err = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+        tail = " | ".join(err.strip().splitlines()[-3:])
+        return f"{Path(str(e.cmd[0])).name} failed (exit {e.returncode}): {tail or 'no output'}"
+    if isinstance(e, ValidationError):
+        return f"Invalid input: {e}"
+    return str(e) or type(e).__name__
+
+
+def tool(annotations: ToolAnnotations, title: str | None = None):
+    """Register a tool whose exceptions reach the agent as readable ToolErrors.
+
+    mcp 2.x hides the message of unexpected exceptions from the client, which
+    leaves the agent guessing; here every failure carries its explanation.
+    """
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except ToolError:
+                raise
+            except Exception as e:
+                raise ToolError(_explain(e)) from e
+
+        mcp.tool(title=title, annotations=annotations)(wrapper)
+        return fn
+    return decorator
+
+
+def _r(x: float | None, nd: int = 3) -> float | None:
+    return None if x is None else round(float(x), nd)
+
+
+def _platform_supports_ui() -> bool:
+    return platform.system() == "Darwin"
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Session
+# ────────────────────────────────────────────────────────────────────────────
+
+def _resolve_running() -> bool | None:
+    try:
+        sysname = platform.system()
+        if sysname == "Darwin":
+            from resolve_pilot.ui_automation import is_resolve_running
+            return is_resolve_running()
+        if sysname == "Windows":
+            out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Resolve.exe", "/NH"],
+                                 capture_output=True, text=True, timeout=5).stdout
+            return "Resolve.exe" in out
+        return subprocess.run(["pgrep", "-x", "resolve"], capture_output=True, timeout=5).returncode == 0
+    except Exception:
+        return None
+
+
+@tool(READ, title="Status and capabilities")
+def resolve_pilot_status() -> dict[str, Any]:
+    """Report what resolve-pilot can do on this machine and how it reaches Resolve.
+
+    Call once at the start of a session. `channel` is studio / bridge / manual (see the
+    server instructions); `next_steps` says what to set up for missing capabilities.
+    """
+    studio_ok, studio_detail = control.studio_status(refresh=True)
+    br = bridge.status()
+    channel = "studio" if studio_ok else ("bridge" if br.running else "manual")
+    engines = available_engines()
+    has_ffmpeg = bool(shutil.which("ffmpeg")) and bool(shutil.which("ffprobe"))
+    try:
+        sdk = version("mcp")
+    except PackageNotFoundError:
+        sdk = None
+
+    next_steps: list[str] = []
+    if not has_ffmpeg:
+        next_steps.append("Install ffmpeg (macOS: brew install ffmpeg, Windows: winget install ffmpeg, "
+                          "Linux: apt install ffmpeg); probe/scene/beat/transcribe need it.")
+    if channel == "manual":
+        next_steps.append(
+            "No live connection to Resolve. For hands-free control (works in Resolve Free): call "
+            "setup_bridge(action='install'), then ask the user to click Workspace > Scripts > "
+            "ResolvePilotBridge in Resolve. Until then Resolve actions return Lua for the user to paste."
+        )
+    else:
+        next_steps.append("Call get_resolve_state to see the open project and timeline.")
+    if not engines:
+        next_steps.append("Transcription is not installed: Apple Silicon pip install '.[transcribe]', "
+                          "otherwise pip install '.[transcribe-cpu]'.")
+
+    return {
+        "version": __version__,
+        "platform": platform.system(),
+        "arch": platform.machine(),
+        "python": sys.version.split()[0],
+        "mcp_sdk": sdk,
+        "ffmpeg": has_ffmpeg,
+        "resolve_running": _resolve_running(),
+        "channel": channel,
+        "studio_api": {"available": studio_ok, "detail": studio_detail},
+        "bridge": br.to_dict(),
+        "transcription_engines": engines,
+        "capabilities": {
+            "media_analysis": has_ffmpeg,
+            "transcription": bool(engines),
+            "fcpxml_srt_export": True,
+            "live_resolve_control": channel != "manual",
+            "lua_for_manual_paste": True,
+            "macos_ui_automation": _platform_supports_ui(),
+        },
+        "next_steps": next_steps,
+    }
+
+
+@tool(READ, title="Workflow guides")
+def get_workflow_guide(
+    name: Annotated[str | None, Field(description="Guide name; omit to list all guides.")] = None,
+) -> dict[str, Any]:
+    """Step-by-step playbooks for multi-step jobs (rough cut, subtitles, music video, ...).
+
+    Omit `name` to list them; read the matching guide before starting a bigger task.
+    """
+    if not name:
+        return {"guides": list_workflows()}
+    return {"name": name, "guide": get_workflow(name)}
+
+
+@tool(WRITE_FILES, title="Set up the live bridge")
+def setup_bridge(
+    action: Annotated[
+        Literal["install", "show_script", "status", "stop"],
+        Field(description="install: put the bridge in Resolve's Workspace > Scripts menu. "
+                          "show_script: return Lua to paste into the Console. "
+                          "status: is a bridge running. stop: ask the running bridge to exit."),
+    ] = "install",
+    idle_minutes: Annotated[int, Field(ge=1, le=24 * 60,
+                                       description="Bridge exits after this long without requests.")] = 60,
+) -> dict[str, Any]:
+    """Set up the live Lua bridge that lets you control Resolve directly — in the Free edition too.
+
+    The bridge is a small Lua loop the USER starts inside Resolve once per session; it then
+    runs your requests (get_resolve_state, import_timeline, run_lua, ...). Prefer
+    action='install' and tell the user: "In Resolve choose Workspace > Scripts >
+    ResolvePilotBridge (restart Resolve if it is not listed yet)". Then check with
+    action='status'.
+    """
+    if action == "status":
+        return bridge.status().to_dict()
+    if action == "stop":
+        return {"was_running": bridge.stop()}
+    if action == "show_script":
+        return {
+            "lua_code": bridge.render_script(idle_minutes),
+            "instructions": (
+                "In DaVinci Resolve: Workspace > Console, choose the Lua tab, paste the whole "
+                "script and press Enter. It prints '[bridge] ... ready' and keeps running in "
+                "the background. Keep Resolve open."
+            ),
+        }
+    path = bridge.install_script(idle_minutes)
+    return {
+        "installed": str(path),
+        "instructions": (
+            "In DaVinci Resolve choose Workspace > Scripts > ResolvePilotBridge (it may sit under "
+            "a 'Utility' submenu; restart Resolve if it is not listed yet). Then call "
+            "setup_bridge(action='status') to confirm it is running."
+        ),
+    }
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Media analysis
+# ────────────────────────────────────────────────────────────────────────────
+
+@tool(READ, title="Probe media")
+def probe_media(path: str) -> dict[str, Any]:
+    """Container, codecs, fps, resolution, duration and audio layout of a media file.
 
     Use this first whenever you need to know what you're working with.
     """
-    info = probe_media(path)
-    return info.to_dict()
+    return analyzers.probe_media(path).to_dict()
 
 
-@mcp.tool()
-def detect_scenes_tool(path: str, threshold: float = 10.0) -> dict:
-    """Detect scene cuts in a video file using ffmpeg's scdet filter.
-
-    threshold: 0-100. Lower → more sensitive (e.g. 8 catches lighting changes).
-    Higher (e.g. 30) only returns hard cuts.
-
-    Returns a list of {pts_seconds, score} entries.
-    """
-    cuts = detect_scenes(path, threshold=threshold)
-    return {"count": len(cuts), "cuts": [c.to_dict() for c in cuts]}
-
-
-@mcp.tool()
-def detect_beats_tool(
+@tool(READ, title="Detect scene cuts")
+def detect_scenes(
     path: str,
-    min_seconds_between: float = 0.20,
-    energy_threshold_db: float = -25.0,
-) -> dict:
-    """Detect beats / onsets in an audio or video file (energy-based).
+    threshold: Annotated[float, Field(ge=0, le=100, description=(
+        "Lower = more sensitive (8 catches lighting changes); 30+ returns only hard cuts."))] = 10.0,
+    limit: Annotated[int, Field(ge=1, description="Return at most this many cuts (the strongest).")] = 500,
+) -> dict[str, Any]:
+    """Detect scene cuts in a video with ffmpeg's scdet filter.
 
-    For music-video editing: pass the song's path, filter by strength, then
-    use the timestamps as cut points.
-
-    min_seconds_between: smallest allowed gap between beats (0.20 ≈ 300 BPM cap).
-    energy_threshold_db: relative to peak. Higher (less negative) → fewer, stronger beats.
+    Returns cut times in seconds with a 0-100 score. Decoding is roughly real-time or
+    faster, so hour-long files take a while.
     """
-    beats = detect_beats(path, min_seconds_between=min_seconds_between,
-                         energy_threshold_db=energy_threshold_db)
-    return {"count": len(beats), "beats": [b.to_dict() for b in beats]}
+    cuts = analyzers.detect_scenes(path, threshold=threshold)
+    kept = sorted(sorted(cuts, key=lambda c: -c.score)[:limit], key=lambda c: c.pts_seconds)
+    return {
+        "count": len(cuts),
+        "returned": len(kept),
+        "cuts": [{"pts_seconds": _r(c.pts_seconds), "score": _r(c.score, 2)} for c in kept],
+    }
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# Transcription
-# ────────────────────────────────────────────────────────────────────────────
+@tool(READ, title="Detect beats")
+def detect_beats(
+    path: str,
+    min_seconds_between: Annotated[float, Field(gt=0, description="Smallest gap between beats (0.2 caps at 300 BPM).")] = 0.20,
+    energy_threshold_db: Annotated[float, Field(description="Relative to the loudest onset; higher (less negative) keeps fewer, stronger beats.")] = -25.0,
+    min_strength: Annotated[float, Field(ge=0, le=1, description="Drop beats weaker than this (0-1).")] = 0.0,
+) -> dict[str, Any]:
+    """Detect beats / onsets in a song (energy based) for cutting to music.
 
-@mcp.tool()
+    `beats` is a list of [seconds, strength 0-1]. `tempo_bpm_estimate` is a rough guide only.
+    """
+    beats = analyzers.detect_beats(path, min_seconds_between=min_seconds_between,
+                                   energy_threshold_db=energy_threshold_db)
+    kept = [b for b in beats if b.strength >= min_strength]
+    return {
+        "count": len(kept),
+        "tempo_bpm_estimate": analyzers.estimate_tempo(beats),
+        "beat_format": "[seconds, strength]",
+        "beats": [[_r(b.pts_seconds), _r(b.strength, 2)] for b in kept],
+    }
+
+
+@tool(READ, title="Transcribe audio")
 def transcribe_audio(
     path: str,
-    model: str = "mlx-community/whisper-large-v3-turbo",
-    language: str | None = None,
+    language: Annotated[str | None, Field(description="ISO code like 'en' or 'tr'; omit to auto-detect.")] = None,
+    model: Annotated[str | None, Field(description="large-v3-turbo (default), large-v3, medium, small, base, tiny.")] = None,
+    engine: Literal["auto", "mlx", "faster-whisper"] = "auto",
     word_timestamps: bool = False,
-) -> dict:
-    """Transcribe a media file with local mlx-whisper (Apple Silicon).
+    offset: Annotated[int, Field(ge=0, description="First segment to return (for paging).")] = 0,
+    limit: Annotated[int, Field(ge=0, description="Segments to return; 0 = all.")] = 300,
+    wait_seconds: Annotated[float, Field(ge=0, le=600, description="How long to wait before returning status='running'.")] = 45.0,
+    refresh: bool = False,
+) -> dict[str, Any]:
+    """Transcribe speech locally with Whisper; results are cached per file/model/language.
 
-    First call downloads the model (~1.5GB for large-v3-turbo). Subsequent runs
-    are fast — turbo transcribes faster than realtime on M-series.
+    Returns `transcript_id` and numbered segments as "[i] start-end text". Long files keep
+    transcribing in the background: if `status` is "running", call again with the same
+    arguments a little later. Page through long transcripts with offset/limit (cached
+    calls are instant). Pass `transcript_id` + `segment_indices` to plan_from_transcript.
     """
-    from resolve_pilot.transcribe import transcribe
-    result = transcribe(path, model=model, language=language,
-                        word_timestamps=word_timestamps)
-    return result.to_dict()
+    res = transcripts.get_or_start(path, model=model, language=language,
+                                   word_timestamps=word_timestamps, engine=engine,
+                                   wait_seconds=wait_seconds, refresh=refresh)
+    if res["status"] != "done":
+        res["hint"] = ("Still transcribing. Call transcribe_audio again with the same arguments "
+                       "to wait for the result; it keeps running between calls.")
+        return res
+    segs = res["segments"]
+    shown = transcripts.format_segments(segs, offset, limit)
+    out = {
+        "status": "done",
+        "cached": res["cached"],
+        "transcript_id": res["transcript_id"],
+        "source_path": res["source_path"],
+        "language": res["language"],
+        "engine": res["engine"],
+        "model": res["model"],
+        "segment_count": len(segs),
+        "segments": shown,
+    }
+    nxt = offset + len(shown)
+    if nxt < len(segs):
+        out["next_offset"] = nxt
+    return out
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Roughcut planning
+# Plans
 # ────────────────────────────────────────────────────────────────────────────
 
-@mcp.tool()
-def plan_roughcut_from_transcript(
-    source_path: str,
-    segments_json: str,
+class SegmentIn(BaseModel):
+    start: float = Field(ge=0)
+    end: float = Field(gt=0)
+    text: str = ""
+
+
+def _store_and_summarize(plan: roughcut.RoughCutPlan, include_clips: bool | None = None,
+                         plan_id: str | None = None) -> dict[str, Any]:
+    pid = store.save_plan(plan, plan_id)
+    return store.plan_summary(pid, plan, include_clips=include_clips)
+
+
+@tool(WRITE_FILES, title="Plan from transcript")
+def plan_from_transcript(
+    transcript_id: Annotated[str | None, Field(description="From transcribe_audio (preferred).")] = None,
+    segment_indices: Annotated[list[int] | None, Field(description=(
+        "Segments to keep, in cut order. Omit to use every segment in source order."))] = None,
+    source_path: Annotated[str | None, Field(description="Defaults to the transcript's file.")] = None,
+    segments: Annotated[list[SegmentIn] | None, Field(description="Inline {start, end, text} segments instead of transcript_id.")] = None,
     title: str = "Transcript Roughcut",
-    pad_seconds: float = 0.2,
-    fps: float | None = None,
-) -> dict:
-    """Build a draft rough cut from transcript segments — one clip per spoken segment.
+    pad_seconds: Annotated[float, Field(ge=0, le=2, description="Breathing room around each segment.")] = 0.2,
+    fps: Annotated[float | None, Field(gt=0, description="Timeline fps; defaults to the source's.")] = None,
+) -> dict[str, Any]:
+    """Draft a rough cut from transcript segments: one clip per kept segment.
 
-    segments_json: JSON array of {start, end, text} (the output of transcribe_audio
-    can be passed straight through after json.dumps on the 'segments' field).
-
-    The returned plan is meant to be edited by you (Claude) — drop bad takes,
-    re-order, tighten — and then handed to export_fcpxml.
+    Choose the segments editorially (best takes, complete thoughts, no false starts) and
+    pass their indices in the order they should play. Neighbouring segments never
+    overlap, so no words are repeated. Returns the stored plan (plan_id, clips, warnings).
     """
-    raw = json.loads(segments_json)
-    segs = [Segment(start=float(s["start"]), end=float(s["end"]), text=str(s["text"]))
-            for s in raw]
-    plan = plan_from_transcript(source_path, segs, title=title,
-                                pad_seconds=pad_seconds, fps=fps)
-    return plan.to_dict()
+    if transcript_id:
+        data = transcripts.require_transcript(transcript_id)
+        segs = transcripts.transcript_segments(data)
+        source_path = source_path or data["source_path"]
+    elif segments:
+        segs = [Segment(s.start, s.end, s.text) for s in segments]
+    else:
+        raise ValueError("Pass transcript_id (from transcribe_audio) or segments.")
+    if not source_path:
+        raise ValueError("source_path is required when passing inline segments.")
+    plan = roughcut.plan_from_transcript(source_path, segs, title=title, pad_seconds=pad_seconds,
+                                         fps=fps, segment_indices=segment_indices)
+    return _store_and_summarize(plan)
 
 
-@mcp.tool()
-def plan_roughcut_from_scenes(
+@tool(WRITE_FILES, title="Plan from scenes")
+def plan_from_scenes(
     source_path: str,
-    cuts_json: str,
+    cuts: Annotated[list[float] | None, Field(description=(
+        "Cut times in seconds (pts_seconds from detect_scenes). Omit to detect them now."))] = None,
+    threshold: Annotated[float, Field(ge=0, le=100, description="Used only when cuts are omitted.")] = 10.0,
     title: str = "Scene Roughcut",
-    min_duration: float = 1.0,
-    fps: float | None = None,
-) -> dict:
-    """Build a draft rough cut from scene cuts — one clip per detected scene.
+    min_duration: Annotated[float, Field(ge=0, description="Skip scenes shorter than this.")] = 1.0,
+    fps: Annotated[float | None, Field(gt=0)] = None,
+) -> dict[str, Any]:
+    """Draft a rough cut with one clip per scene; refine it with edit_plan."""
+    if cuts is None:
+        scene_cuts = analyzers.detect_scenes(source_path, threshold=threshold)
+    else:
+        scene_cuts = [analyzers.SceneCut(pts_seconds=float(t), score=0.0) for t in cuts]
+    plan = roughcut.plan_from_scenes(source_path, scene_cuts, title=title,
+                                     min_duration=min_duration, fps=fps)
+    return _store_and_summarize(plan)
 
-    cuts_json: JSON array of {pts_seconds, score} (the 'cuts' field from
-    detect_scenes_tool).
+
+@tool(WRITE_FILES, title="Create plan")
+def create_plan(
+    title: str,
+    clips: Annotated[list[plan_ops.ClipSpec], Field(min_length=1, description="Clips in playback order.")],
+    fps: Annotated[float | None, Field(gt=0, description="Defaults to the first clip's source fps.")] = None,
+    width: Annotated[int | None, Field(gt=0)] = None,
+    height: Annotated[int | None, Field(gt=0)] = None,
+    default_transition_seconds: Annotated[float, Field(ge=0, description="Cross dissolve at every cut; 0 = hard cuts.")] = 0.0,
+    fade_in_seconds: Annotated[float, Field(ge=0)] = 0.0,
+    fade_out_seconds: Annotated[float, Field(ge=0)] = 0.0,
+    audio_bed: Annotated[plan_ops.AudioBedSpec | None, Field(description="Music under the whole cut (e.g. a music video's song).")] = None,
+    notes: str = "",
+) -> dict[str, Any]:
+    """Build a plan from any clips — several sources, B-roll, music videos with a music bed.
+
+    Each clip is a source range (in_seconds + duration_seconds or out_seconds). Returns the
+    stored plan with a plan_id and validation warnings.
     """
-    from resolve_pilot.analyzers import SceneCut
-    raw = json.loads(cuts_json)
-    cuts = [SceneCut(pts_seconds=float(c["pts_seconds"]),
-                     score=float(c.get("score", 0.0))) for c in raw]
-    plan = plan_from_scenes(source_path, cuts, title=title,
-                            min_duration=min_duration, fps=fps)
-    return plan.to_dict()
+    info = analyzers.probe_media_cached(clips[0].source_path)
+    plan = roughcut.RoughCutPlan(
+        title=title,
+        fps=fps or (info.fps if info and info.fps else 24.0),
+        width=width or (info.width if info and info.width else 1920),
+        height=height or (info.height if info and info.height else 1080),
+        clips=[c.to_clip() for c in clips],
+        notes=notes,
+        default_transition_seconds=default_transition_seconds,
+        fade_in_seconds=fade_in_seconds,
+        fade_out_seconds=fade_out_seconds,
+        audio_bed=audio_bed.to_bed() if audio_bed else None,
+    )
+    return _store_and_summarize(plan)
+
+
+@tool(READ, title="Get plan")
+def get_plan(plan_id: str, include_clips: bool = True) -> dict[str, Any]:
+    """Show a stored plan: clips (sources listed once in `sources`), totals, errors, warnings."""
+    return store.plan_summary(plan_id, store.load_plan(plan_id), include_clips=include_clips)
+
+
+@tool(WRITE_FILES, title="Edit plan")
+def edit_plan(
+    plan_id: str,
+    operations: Annotated[list[plan_ops.PlanOp], Field(min_length=1, description=(
+        "Applied in order; indices refer to the plan as it is at that step. All-or-nothing."))],
+    include_clips: Annotated[bool | None, Field(description=(
+        "List the clips in the reply. Default: only for plans of up to 60 clips."))] = None,
+) -> dict[str, Any]:
+    """Change a stored plan with small operations instead of re-sending it.
+
+    Operations (field `op`):
+    - keep {indices}: keep only these clips, in this order (select + reorder)
+    - remove {indices} · move {index, to}
+    - trim {index, head_seconds, tail_seconds}: positive shortens, negative extends
+    - update {index, in_seconds?, duration_seconds? | out_seconds?, name?, rationale?,
+      transition_out_seconds?, source_path?}
+    - insert {clip, index?}: index omitted = append
+    - set {title?, fps?, width?, height?, default_transition_seconds?, fade_in_seconds?,
+      fade_out_seconds?, audio_bed?, notes?}: audio_bed=null removes the music bed
+    """
+    plan, log = plan_ops.apply_ops(store.load_plan(plan_id), operations)
+    out = _store_and_summarize(plan, include_clips=include_clips, plan_id=plan_id)
+    out["changes"] = log
+    return out
 
 
 # ────────────────────────────────────────────────────────────────────────────
 # Export
 # ────────────────────────────────────────────────────────────────────────────
 
-@mcp.tool()
-def apply_default_transitions(
-    plan_json: str,
-    transition_seconds: float = 0.5,
-    fade_in_seconds: float = 0.0,
-    fade_out_seconds: float = 0.0,
-) -> dict:
-    """Add cross-dissolve transitions and/or fades to a rough-cut plan.
+def _default_output(stem_source: str | None, title: str, suffix: str) -> Path:
+    slug = re.sub(r"[^\w\-]+", "_", title).strip("_") or "resolve_pilot"
+    if stem_source:
+        d = Path(stem_source).expanduser().parent
+        if d.is_dir() and os.access(d, os.W_OK):
+            return d / f"{slug}{suffix}"
+    return state_dir("exports") / f"{slug}{suffix}"
 
-    transition_seconds: Cross Dissolve duration applied at every cut between
-        adjacent clips. Set to 0 to leave cuts hard. Per-clip overrides set via
-        `clip.transition_out_seconds` always win.
-    fade_in_seconds:  Fade up from black at the start (0 disables).
-    fade_out_seconds: Fade to black at the end (0 disables).
 
-    Returns the modified plan ready to hand to export_fcpxml.
+@tool(WRITE_FILES, title="Export FCPXML")
+def export_fcpxml(
+    plan_id: str,
+    out_path: Annotated[str | None, Field(description="Defaults to <title>.fcpxml next to the first source.")] = None,
+) -> dict[str, Any]:
+    """Write a stored plan as FCPXML 1.10 (Resolve Free & Studio: File > Import > Timeline).
+
+    Refuses plans with errors. Afterwards call import_timeline(path) to load it into Resolve
+    directly when the bridge or Studio API is available.
     """
-    plan = RoughCutPlan.from_dict(json.loads(plan_json))
-    plan.default_transition_seconds = max(0.0, float(transition_seconds))
-    plan.fade_in_seconds = max(0.0, float(fade_in_seconds))
-    plan.fade_out_seconds = max(0.0, float(fade_out_seconds))
-    return plan.to_dict()
+    plan = store.load_plan(plan_id)
+    report = roughcut.validate_plan(plan)
+    if report["errors"]:
+        raise ValueError("Fix these plan errors first (edit_plan): " + "; ".join(report["errors"]))
+    target = Path(out_path).expanduser() if out_path else _default_output(
+        plan.clips[0].source_path, plan.title, ".fcpxml")
+    final = fcpxml_export.write_fcpxml(roughcut.plan_to_timeline_spec(plan), target)
+    return {
+        "path": str(final),
+        "clip_count": len(plan.clips),
+        "total_seconds": _r(plan.total_seconds),
+        "warnings": report["warnings"],
+        "next_step": f"import_timeline(path={str(final)!r}) or, without a live channel, "
+                     "tell the user: File > Import > Timeline.",
+    }
 
 
-@mcp.tool()
-def export_fcpxml(plan_json: str, out_path: str) -> dict:
-    """Write a RoughCutPlan to disk as FCPXML 1.10.
+@tool(WRITE_FILES, title="Export SRT")
+def export_srt(
+    transcript_id: Annotated[str | None, Field(description="From transcribe_audio.")] = None,
+    segments: Annotated[list[SegmentIn] | None, Field(description="Inline cues instead, e.g. a translation you wrote.")] = None,
+    out_path: Annotated[str | None, Field(description="Defaults to <source>.<language>.srt.")] = None,
+    max_chars_per_line: Annotated[int, Field(ge=0, description="Wrap lines; 0 disables. 42 broadcast, ~32 vertical video.")] = 42,
+    max_lines: Annotated[int, Field(ge=1, le=3)] = 2,
+) -> dict[str, Any]:
+    """Write subtitles as SRT; long cues are wrapped and split into readable chunks.
 
-    plan_json: the full plan structure (as returned by plan_roughcut_*).
-    out_path: where to write. Resolve imports via File > Import > Timeline.
-
-    Works in Free and Studio editions of Resolve.
+    Import in Resolve by dragging the .srt onto the timeline or File > Import > Subtitle.
     """
-    plan = RoughCutPlan.from_dict(json.loads(plan_json))
-    spec = plan_to_timeline_spec(plan)
-    final = write_fcpxml(spec, out_path)
-    return {"path": str(final), "clip_count": len(plan.clips), "title": plan.title}
-
-
-@mcp.tool()
-def export_srt_from_transcript(transcript_json: str, out_path: str) -> dict:
-    """Write transcript segments to an SRT subtitle file.
-
-    transcript_json: the full transcribe_audio result (we use the 'segments' field).
-    """
-    data = json.loads(transcript_json)
-    cues = [SrtCue(start=float(s["start"]), end=float(s["end"]),
-                   text=str(s["text"])) for s in data["segments"]]
-    final = write_srt(cues, out_path)
-    return {"path": str(final), "cue_count": len(cues)}
+    if transcript_id:
+        data = transcripts.require_transcript(transcript_id)
+        raw = [srt_export.SrtCue(float(s["start"]), float(s["end"]), str(s["text"]))
+               for s in data["segments"]]
+        if not out_path:
+            src = Path(data["source_path"])
+            lang = f".{data['language']}" if data.get("language") else ""
+            out_path = str(src.with_name(f"{src.stem}{lang}.srt"))
+    elif segments:
+        raw = [srt_export.SrtCue(s.start, s.end, s.text) for s in segments]
+        if not out_path:
+            raise ValueError("out_path is required with inline segments.")
+    else:
+        raise ValueError("Pass transcript_id or segments.")
+    cues = srt_export.wrap_cues(raw, max_chars_per_line=max_chars_per_line, max_lines=max_lines)
+    final = srt_export.write_srt(cues, out_path)
+    durations = [c.end - c.start for c in cues] or [0.0]
+    return {
+        "path": str(final),
+        "cue_count": len(cues),
+        "average_cue_seconds": _r(sum(durations) / len(durations), 2),
+        "longest_cue_seconds": _r(max(durations), 2),
+    }
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Lua snippets for Resolve Console (works in Free!)
+# Acting on Resolve (auto-routed: Studio API → live bridge → paste-able Lua)
 # ────────────────────────────────────────────────────────────────────────────
 
-@mcp.tool()
+Channel = Annotated[
+    Literal["auto", "studio", "bridge", "manual"],
+    Field(description="auto picks Studio API, then the live bridge, else returns Lua to paste."),
+]
+
+
+def _studio():
+    from resolve_pilot.studio_api import actions
+    return actions
+
+
+@tool(READ, title="Get Resolve state")
+def get_resolve_state(
+    include_clips: bool = False,
+    track_type: Literal["video", "audio", "subtitle"] = "video",
+    track_index: Annotated[int, Field(ge=1)] = 1,
+    include_markers: bool = False,
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """What is open in Resolve: project, timelines, current timeline (fps, duration, tracks,
+    markers) and optionally the clips on one track with their timeline positions.
+
+    Use it to read the timeline fps before frame math and to verify every change you make.
+    """
+    args = dict(include_clips=include_clips, track_type=track_type, track_index=track_index,
+                include_markers=include_markers)
+    if control.choose_channel(channel) == "manual":
+        return {
+            "channel": "manual",
+            "connected": False,
+            "lua_code": lua_lib.snippet_dump_project_info(),
+            "instructions": control.PASTE_INSTRUCTIONS,
+            "note": "Not connected to Resolve. Ask the user to paste this and read you the Console "
+                    "output, or set up the live bridge with setup_bridge.",
+        }
+    return control.perform(lua_lib.snippet_get_state(**args),
+                           lambda: _studio().resolve_state(**args), channel)
+
+
+@tool(EDIT_RESOLVE, title="Import timeline")
+def import_timeline(
+    path: Annotated[str, Field(description="FCPXML (e.g. from export_fcpxml), EDL, AAF, DRT or OTIO file.")],
+    timeline_name: Annotated[str | None, Field(description="Must not clash with an existing timeline.")] = None,
+    import_source_clips: Annotated[bool, Field(description="Also add the source media to the media pool.")] = True,
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """Import a timeline file into the open project and make it the current timeline."""
+    full = str(Path(path).expanduser().resolve())
+    if not Path(full).exists():
+        raise FileNotFoundError(full)
+    return control.perform(
+        lua_lib.snippet_import_timeline(full, timeline_name, import_source_clips),
+        lambda: _studio().import_timeline(full, timeline_name, import_source_clips),
+        channel,
+        timeout=180.0,
+    )
+
+
+class MarkerSpec(BaseModel):
+    frame: int | None = Field(None, ge=0, description="Frame offset from the timeline start.")
+    seconds: float | None = Field(None, ge=0, description=(
+        "Time from the timeline start; converted with the timeline's real fps inside Resolve."))
+    color: Literal[lua_lib.MARKER_COLORS] = "Blue"  # type: ignore[valid-type]
+    name: str = ""
+    note: str = ""
+    duration: int = Field(1, ge=1, description="Length in frames.")
+
+    @field_validator("color", mode="before")
+    @classmethod
+    def _color(cls, v: Any) -> Any:
+        return lua_lib._validate_color(v) if isinstance(v, str) else v
+
+    @model_validator(mode="after")
+    def _position(self) -> "MarkerSpec":
+        if (self.frame is None) == (self.seconds is None):
+            raise ValueError("give exactly one of frame or seconds")
+        return self
+
+
+@tool(EDIT_RESOLVE, title="Add markers")
+def add_markers(
+    markers: Annotated[list[MarkerSpec], Field(min_length=1)],
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """Add markers to the current timeline (beats, scene changes, review notes, chapters).
+
+    Positions are offsets from the timeline start, in seconds or frames. A position that
+    already has a marker is reported in `skipped_frames`.
+    """
+    rows = lua_lib.normalize_markers([m.model_dump() for m in markers])
+    return control.perform(lua_lib.snippet_add_markers(rows),
+                           lambda: _studio().add_markers_batch(rows), channel)
+
+
+@tool(_hints(read_only=False, idempotent=True), title="Set clip color")
+def set_clip_color(
+    color: Literal[lua_lib.CLIP_COLORS],  # type: ignore[valid-type]
+    track: Annotated[int, Field(ge=1, description="Video track number (V1 = 1).")] = 1,
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """Color-code every clip on a video track of the current timeline."""
+    def studio():
+        return {"ok": True, "colored": _studio().set_clip_color(track=track, color=color),
+                "track": track, "color": color}
+    return control.perform(lua_lib.snippet_set_clip_color(color, track), studio, channel)
+
+
+@tool(DESTRUCTIVE, title="Apply LUT")
+def apply_lut(
+    lut_path: Annotated[str, Field(description="Absolute path of a .cube / .dat LUT.")],
+    track: Annotated[int, Field(ge=1)] = 1,
+    node_index: Annotated[int, Field(ge=1, description="Color node that receives the LUT (replaces its LUT).")] = 1,
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """Apply a LUT to every clip on a video track, at one color node."""
+    full = str(Path(lut_path).expanduser())
+
+    def studio():
+        n = _studio().apply_lut(full, track=track, node_index=node_index)
+        return {"ok": True, "applied": n, "node_index": node_index}
+    return control.perform(lua_lib.snippet_apply_lut_to_clips(full, track, node_index), studio, channel)
+
+
+@tool(EDIT_RESOLVE, title="Queue render")
+def queue_render(
+    preset: Annotated[str, Field(description="Render preset name; a wrong name returns available_presets.")] = "H.264 Master",
+    target_dir: str = "~/Desktop/Renders",
+    custom_name: Annotated[str | None, Field(description="Output file name without extension.")] = None,
+    start: Annotated[bool, Field(description="Start rendering right away.")] = False,
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """Add the current timeline to the render queue with a preset, optionally starting it."""
+    return control.perform(
+        lua_lib.snippet_render_current_timeline(preset, target_dir, custom_name, start),
+        lambda: _studio().render_current_timeline(preset, target_dir, custom_name, start),
+        channel,
+    )
+
+
+@tool(_hints(read_only=False, idempotent=True), title="Open page")
+def open_page(
+    page: Literal[lua_lib.PAGES],  # type: ignore[valid-type]
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """Switch Resolve to a page: media, cut, edit, fusion, color, fairlight, deliver.
+
+    Uses the scripting API / bridge when live, otherwise a keyboard shortcut on macOS.
+    """
+    chosen = control.choose_channel(channel)
+    if chosen == "manual" and _platform_supports_ui() and channel == "auto":
+        from resolve_pilot.ui_automation import open_page as ui_open_page
+        from resolve_pilot.ui_automation.applescript import UIAutomationError
+        try:
+            ui_open_page(page)
+        except UIAutomationError as e:
+            return {"channel": "macos_ui", "ok": False, "error": str(e)}
+        return {"channel": "macos_ui", "ok": True, "page": page}
+    return control.perform(lua_lib.snippet_open_page(page), lambda: _studio().open_page(page), chosen)
+
+
+@tool(DESTRUCTIVE, title="Run Lua in Resolve")
+def run_lua(
+    code: Annotated[str | None, Field(description=(
+        "Lua to run inside Resolve. `resolve` is available, plus helpers rp.project(), "
+        "rp.timeline(), rp.media_pool(), rp.fps(). `return` a value (tables become JSON); "
+        "print() output is captured."))] = None,
+    snippet: Annotated[str | None, Field(description="Run a library snippet instead of code (see list_lua_snippets).")] = None,
+    args: Annotated[dict[str, Any] | None, Field(description="Arguments for the snippet.")] = None,
+    timeout_seconds: Annotated[float, Field(gt=0, le=600)] = 30.0,
+) -> dict[str, Any]:
+    """Execute Lua inside the running Resolve through the live bridge (Free or Studio).
+
+    The escape hatch for anything the dedicated tools don't cover. It can change or delete
+    anything in the project, so read state first, keep scripts small, and confirm
+    destructive steps with the user. See get_workflow_guide('live-control') for the API.
+    """
+    if (code is None) == (snippet is None):
+        raise ValueError("Pass exactly one of code or snippet.")
+    lua = code if code is not None else lua_lib.render_snippet(snippet, args or {})
+    return bridge.exec_lua(lua, timeout=timeout_seconds).to_dict()
+
+
+@tool(READ, title="List Lua snippets")
 def list_lua_snippets() -> list[dict]:
-    """List every Lua snippet ready to paste into Resolve's Console.
+    """Ready-made Lua snippets (name, description, params) for Resolve's Console.
 
-    These work in DaVinci Resolve Free (where external scripting is disabled)
-    because the Console is built into the app. User opens Workspace > Console,
-    pastes, runs.
+    Run one live with run_lua(snippet=..., args=...), or render it for the user to paste.
     """
     return lua_lib.list_snippets()
 
 
-@mcp.tool()
+@tool(READ, title="Render Lua snippet")
 def render_lua_snippet(
     snippet: str,
-    args_json: str = "{}",
-) -> dict:
-    """Render a parameterized Lua snippet ready for paste into Resolve Console.
-
-    snippet: one of the names from list_lua_snippets.
-    args_json: JSON object with snippet-specific parameters.
-
-    Returns {snippet, code} — the user pastes 'code' into Workspace > Console
-    inside DaVinci Resolve.
-    """
-    args: dict[str, Any] = json.loads(args_json) if args_json else {}
-    name = snippet.strip()
-    fn_name = f"snippet_{name}"
-    fn = getattr(lua_lib, fn_name, None)
-    if not fn or not callable(fn):
-        raise ValueError(
-            f"Unknown snippet '{snippet}'. Available: "
-            f"{', '.join(s['name'] for s in lua_lib.list_snippets())}"
-        )
-    code = fn(**args)
-    return {"snippet": name, "code": code}
+    args: Annotated[dict[str, Any] | None, Field(description="Snippet parameters (see list_lua_snippets).")] = None,
+) -> dict[str, Any]:
+    """Return a snippet's Lua for the user to paste into Workspace > Console (Free & Studio)."""
+    return {"snippet": snippet, "code": lua_lib.render_snippet(snippet, args or {}),
+            "instructions": control.PASTE_INSTRUCTIONS}
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# UI automation (macOS) — covers what the scripting API can't reach
+# macOS UI automation — for what no scripting API reaches
 # ────────────────────────────────────────────────────────────────────────────
 
-@mcp.tool()
-def is_resolve_running_tool() -> dict:
-    """Check whether DaVinci Resolve is currently running. macOS only."""
-    if platform.system() != "Darwin":
-        return {"running": False, "error": "UI automation is macOS-only"}
-    from resolve_pilot.ui_automation import is_resolve_running
-    return {"running": is_resolve_running()}
+def _require_macos(what: str) -> None:
+    if not _platform_supports_ui():
+        raise RuntimeError(f"{what} uses macOS UI automation and is not available on "
+                           f"{platform.system()}. With the live bridge, use open_page or run_lua.")
 
 
-@mcp.tool()
-def focus_resolve_tool() -> dict:
-    """Bring DaVinci Resolve to the front. macOS only."""
-    if platform.system() != "Darwin":
-        return {"ok": False, "error": "UI automation is macOS-only"}
-    from resolve_pilot.ui_automation import focus_resolve
-    focus_resolve()
-    return {"ok": True}
-
-
-@mcp.tool()
-def open_page_tool(page: str) -> dict:
-    """Switch Resolve to a page: media, cut, edit, fusion, color, fairlight, deliver.
-
-    Works in the Free edition because it sends a keyboard shortcut.
-    """
-    if platform.system() != "Darwin":
-        return {"ok": False, "error": "UI automation is macOS-only"}
-    from resolve_pilot.ui_automation import open_page
-    open_page(page)  # type: ignore[arg-type]
-    return {"ok": True, "page": page}
-
-
-@mcp.tool()
-def send_keystroke_tool(key: str, modifiers: str = "") -> dict:
-    """Send a keystroke to Resolve (must be frontmost). macOS only.
-
-    Examples:
-        key='s', modifiers='command' → save
-        key='return', modifiers=''   → confirm dialog
-        key='space'                  → play/pause
-    """
-    if platform.system() != "Darwin":
-        return {"ok": False, "error": "UI automation is macOS-only"}
-    from resolve_pilot.ui_automation import send_keystroke
-    send_keystroke(key, modifiers)
-    return {"ok": True}
-
-
-@mcp.tool()
-def apply_video_transition_tool() -> dict:
-    """Apply Resolve's default video transition (Cmd+T) to the selected edits.
-
-    The Edit page must be open with one or more cuts selected (clips, edits, or
-    a range covering them). Resolve adds the default transition — Cross
-    Dissolve by default — to every selected edit. macOS only; works in both
-    Free and Studio editions.
-    """
-    if platform.system() != "Darwin":
-        return {"ok": False, "error": "UI automation is macOS-only"}
-    from resolve_pilot.ui_automation import send_keystroke
-    send_keystroke("t", "command")
-    return {"ok": True, "action": "Cmd+T → Apply Video Transition"}
-
-
-@mcp.tool()
-def menu_pick_tool(menu_path_json: str) -> dict:
-    """Click a Resolve menu item by path.
-
-    menu_path_json: JSON array, e.g. '["File", "Import", "Timeline..."]'.
-    macOS only. Requires Accessibility permission on first run.
-    """
-    if platform.system() != "Darwin":
-        return {"ok": False, "error": "UI automation is macOS-only"}
-    from resolve_pilot.ui_automation import menu_pick
-    path = json.loads(menu_path_json)
-    menu_pick(path)
-    return {"ok": True, "path": path}
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# AI features via UI automation (Magic Mask, Smart Reframe, etc.)
-# ────────────────────────────────────────────────────────────────────────────
-
-@mcp.tool()
-def trigger_magic_mask(mode: str = "person") -> dict:
-    """Open Magic Mask on the Color page for the selected clip.
-
-    mode: 'person' (default) is the recommended starting point. After opening,
-    Resolve waits for the user (or further UI clicks) to indicate the subject.
-    Returns step-by-step instructions for the click-paint phase.
-    """
-    if platform.system() != "Darwin":
-        return {"ok": False, "error": "UI automation is macOS-only"}
-    from resolve_pilot.ui_automation.ai_features import trigger_magic_mask_person
-    return trigger_magic_mask_person()
-
-
-@mcp.tool()
-def trigger_smart_reframe_tool(target_aspect: str = "9:16") -> dict:
-    """Open Smart Reframe with a target aspect.
-
-    target_aspect: '1:1', '9:16', '4:5', '16:9'. The dialog opens; the user
-    confirms in the GUI because aspect popup clicking is per-build fragile.
-    """
-    if platform.system() != "Darwin":
-        return {"ok": False, "error": "UI automation is macOS-only"}
-    from resolve_pilot.ui_automation.ai_features import trigger_smart_reframe
-    return trigger_smart_reframe(target_aspect=target_aspect)  # type: ignore[arg-type]
-
-
-@mcp.tool()
-def trigger_voice_isolation_tool(intensity: int = 60) -> dict:
-    """Open the Voice Isolation dialog. Studio-only feature."""
-    if platform.system() != "Darwin":
-        return {"ok": False, "error": "UI automation is macOS-only"}
-    from resolve_pilot.ui_automation.ai_features import trigger_voice_isolation
-    return trigger_voice_isolation(intensity=intensity)
-
-
-@mcp.tool()
-def trigger_scene_cut_detection_tool() -> dict:
-    """Open Resolve's built-in scene cut detection dialog."""
-    if platform.system() != "Darwin":
-        return {"ok": False, "error": "UI automation is macOS-only"}
-    from resolve_pilot.ui_automation.ai_features import trigger_scene_cut_detection
-    return trigger_scene_cut_detection()
-
-
-@mcp.tool()
-def trigger_auto_subtitle_tool(language: str = "en") -> dict:
-    """Open the Create Subtitles from Audio dialog (Studio-only AI engine)."""
-    if platform.system() != "Darwin":
-        return {"ok": False, "error": "UI automation is macOS-only"}
-    from resolve_pilot.ui_automation.ai_features import trigger_auto_subtitle
-    return trigger_auto_subtitle(language=language)
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# Studio Python API (Studio-only)
-# ────────────────────────────────────────────────────────────────────────────
-
-@mcp.tool()
-def studio_probe() -> dict:
-    """Check whether the Studio Python scripting bridge is reachable.
-
-    Returns {available: bool, reason: str}. Free edition always returns
-    available=False. If Studio is installed and running but the bridge fails,
-    the reason field explains why (env vars, external scripting disabled, etc.).
-    """
+def _ui_call(fn, *args) -> dict[str, Any]:
+    from resolve_pilot.ui_automation.applescript import UIAutomationError
     try:
-        from resolve_pilot.studio_api import studio_available, get_resolve
-        if not studio_available():
-            return {"available": False, "reason": "bridge load failed"}
-        r = get_resolve()
-        return {
-            "available": True,
-            "version": r.GetVersionString() if hasattr(r, "GetVersionString") else None,
-            "product": r.GetProduct() if hasattr(r, "GetProduct") else None,
-        }
-    except Exception as e:
-        return {"available": False, "reason": str(e)}
+        out = fn(*args)
+    except UIAutomationError as e:
+        # Includes Resolve Free's "Studio only" upsell and missing Accessibility permission.
+        return {"ok": False, "error": str(e),
+                "hint": "If this is a permission error, allow the MCP host app under System "
+                        "Settings > Privacy & Security > Accessibility."}
+    return out if isinstance(out, dict) else {"ok": True}
 
 
-@mcp.tool()
-def studio_project_summary() -> dict:
-    """One-call snapshot of the currently-open project — Studio only."""
-    from resolve_pilot.studio_api import project_summary
-    return project_summary()
+@tool(EDIT_RESOLVE, title="Send keystroke (macOS)")
+def send_keystroke(
+    key: Annotated[str, Field(description="One character, or return/tab/space/delete/escape/left/right/up/down/f1-f12.")],
+    modifiers: Annotated[str, Field(description="e.g. 'command', 'shift+command'.")] = "",
+) -> dict[str, Any]:
+    """Send a keyboard shortcut to Resolve (brought to the front first). macOS only.
 
-
-@mcp.tool()
-def studio_list_timelines() -> dict:
-    """List all timelines in the open project with track counts and frame extents."""
-    from resolve_pilot.studio_api import list_timelines
-    return {"timelines": list_timelines()}
-
-
-@mcp.tool()
-def studio_timeline_clips(track_type: str = "video", track_index: int = 1) -> dict:
-    """Per-clip summary on V<n> or A<n> of the active timeline. Studio only."""
-    from resolve_pilot.studio_api import timeline_clips_summary
-    return {
-        "track_type": track_type, "track_index": track_index,
-        "clips": timeline_clips_summary(track_type=track_type, track_index=track_index),
-    }
-
-
-@mcp.tool()
-def studio_add_marker(
-    frame: int, color: str = "Blue", name: str = "Marker",
-    note: str = "", duration: int = 1,
-) -> dict:
-    """Add a marker to the current timeline. Studio only (Free → use Lua snippet)."""
-    from resolve_pilot.studio_api import add_marker
-    ok = add_marker(frame, color=color, name=name, note=note, duration=duration)
-    return {"ok": ok, "frame": frame}
-
-
-@mcp.tool()
-def studio_set_clip_color(track: int = 1, color: str = "Orange") -> dict:
-    """Color-code every clip on V<track>. Studio only."""
-    from resolve_pilot.studio_api import set_clip_color
-    n = set_clip_color(track=track, color=color)
-    return {"clips_touched": n, "track": track, "color": color}
-
-
-@mcp.tool()
-def studio_apply_lut(lut_path: str, track: int = 1, node_index: int = 1) -> dict:
-    """Apply a LUT to every clip on V<track> at color node N. Studio only."""
-    from resolve_pilot.studio_api import apply_lut
-    n = apply_lut(lut_path, track=track, node_index=node_index)
-    return {"clips_touched": n, "lut": lut_path, "node": node_index}
-
-
-@mcp.tool()
-def studio_queue_render(
-    preset: str = "H.264 Master",
-    target_dir: str = "~/Desktop/Renders",
-    custom_name: str | None = None,
-) -> dict:
-    """Queue one render job for the current timeline. Studio only."""
-    from resolve_pilot.studio_api import queue_render_job
-    jid = queue_render_job(preset=preset, target_dir=target_dir, custom_name=custom_name)
-    return {"job_id": jid, "preset": preset, "target_dir": target_dir}
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# Status / capabilities probe
-# ────────────────────────────────────────────────────────────────────────────
-
-@mcp.tool()
-def resolve_pilot_status() -> dict:
-    """Report what resolve-pilot can do on this machine.
-
-    Use this when starting a session — it tells you whether Resolve is
-    installed, whether external scripting will work, what optional deps are
-    available, and which OS-specific code paths apply.
+    Examples: key='s' + 'command' saves; 'space' plays/pauses; 't' + 'command' applies the
+    default transition to selected edits on the Edit page.
     """
-    info: dict[str, Any] = {
-        "platform": platform.system(),
-        "arch": platform.machine(),
-        "python": sys.version.split()[0],
-        "ffmpeg": bool(shutil.which("ffmpeg")),
-        "ffprobe": bool(shutil.which("ffprobe")),
+    _require_macos("send_keystroke")
+    from resolve_pilot.ui_automation import send_keystroke as ui_send
+    res = _ui_call(ui_send, key, modifiers)
+    return {**res, "key": key, "modifiers": modifiers}
+
+
+@tool(EDIT_RESOLVE, title="Click menu item (macOS)")
+def menu_pick(
+    menu_path: Annotated[list[str], Field(min_length=2, description='e.g. ["File", "Import", "Timeline…"].')],
+) -> dict[str, Any]:
+    """Click a Resolve menu item by its path. macOS only; needs Accessibility permission."""
+    _require_macos("menu_pick")
+    from resolve_pilot.ui_automation import menu_pick as ui_menu_pick
+    res = _ui_call(ui_menu_pick, menu_path)
+    return {**res, "path": menu_path}
+
+
+@tool(EDIT_RESOLVE, title="Open an AI feature (macOS)")
+def open_ai_feature(
+    feature: Literal["magic_mask", "smart_reframe", "voice_isolation", "scene_cut_detection", "auto_subtitle"],
+    target_aspect: Annotated[Literal["1:1", "9:16", "4:5", "16:9"], Field(description="smart_reframe only.")] = "9:16",
+    intensity: Annotated[int, Field(ge=0, le=100, description="voice_isolation only.")] = 60,
+    language: Annotated[str, Field(description="auto_subtitle only.")] = "en",
+) -> dict[str, Any]:
+    """Open one of Resolve's AI tools for the user to finish (they need a GUI click).
+
+    Several are Studio-only or Inspector-only depending on the Resolve version; then the
+    result is ok=false with manual steps to relay. macOS only.
+    """
+    _require_macos("open_ai_feature")
+    from resolve_pilot.ui_automation import ai_features as ai
+    calls = {
+        "magic_mask": (ai.trigger_magic_mask_person,),
+        "smart_reframe": (ai.trigger_smart_reframe, target_aspect),
+        "voice_isolation": (ai.trigger_voice_isolation, intensity),
+        "scene_cut_detection": (ai.trigger_scene_cut_detection,),
+        "auto_subtitle": (ai.trigger_auto_subtitle, language),
     }
-    try:
-        import mlx_whisper  # noqa: F401
-        info["mlx_whisper"] = True
-    except ImportError:
-        info["mlx_whisper"] = False
+    fn, *args = calls[feature]
+    return {"feature": feature, **_ui_call(fn, *args)}
 
-    if platform.system() == "Darwin":
-        resolve_app = Path("/Applications/DaVinci Resolve/DaVinci Resolve.app")
-        info["resolve_installed"] = resolve_app.exists()
-        info["resolve_support_dir"] = (
-            "/Library/Application Support/Blackmagic Design/DaVinci Resolve"
-        )
-        # External scripting works only with Studio + setting enabled.
-        from resolve_pilot.ui_automation import is_resolve_running
-        try:
-            info["resolve_running"] = is_resolve_running()
-        except Exception:
-            info["resolve_running"] = None
 
-    # Probe Studio bridge cheaply
-    try:
-        from resolve_pilot.studio_api import studio_available
-        info["studio_api_available"] = studio_available()
-    except Exception as e:
-        info["studio_api_available"] = False
-        info["studio_api_error"] = str(e)
+# ────────────────────────────────────────────────────────────────────────────
+# Prompts: each workflow guide as a ready-to-use prompt
+# ────────────────────────────────────────────────────────────────────────────
 
-    info["capabilities"] = {
-        "lua_snippets": True,
-        "fcpxml_export": True,
-        "srt_export": True,
-        "ui_automation": platform.system() == "Darwin",
-        "transcription": info.get("mlx_whisper", False),
-        "scene_detection": info["ffmpeg"],
-        "beat_detection": info["ffmpeg"],
-        "ai_features_via_ui": platform.system() == "Darwin",
-        "studio_python_api": info.get("studio_api_available", False),
-    }
-    info["lua_snippet_count"] = len(lua_lib.list_snippets())
-    return info
+def _register_prompts() -> None:
+    for wf in list_workflows():
+        def make(name: str):
+            def prompt(task: str = "") -> str:
+                body = f"Follow this resolve-pilot workflow.\n\n{get_workflow(name)}"
+                return body + (f"\n\n## The task\n{task}" if task else "")
+            return prompt
+        mcp.prompt(name=wf["name"], description=wf["description"])(make(wf["name"]))
+
+
+_register_prompts()
 
 
 def main() -> None:
