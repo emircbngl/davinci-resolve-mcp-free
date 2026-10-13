@@ -29,7 +29,7 @@ apply_lut(lut_path="/abs/path/Kodak2383.cube", track=1, node_index=1)
 
 Live: `run_lua(snippet="grade_from_drx", args={"drx_path": "/abs/grade.drx", "track": 1, "mode": 0})`.
 Manual: `render_lua_snippet("grade_from_drx", {...})` and relay the code.
-`mode`: 0 no keyframes, 1 source timecode, 2 source frame, 3 target frame.
+`mode`: 0 no keyframes, 1 source timecode aligned, 2 start frames aligned.
 
 ### 3. Style match from a reference image
 

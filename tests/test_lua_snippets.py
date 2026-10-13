@@ -89,3 +89,16 @@ def test_render_snippet_validates_arguments():
 def test_home_paths_are_expanded_before_reaching_resolve():
     code = lua.snippet_render_current_timeline(target_dir="~/Renders")
     assert "~" not in code
+
+
+def test_export_timeline_passes_subtypes_for_aaf_and_edl():
+    assert "resolve.EXPORT_AAF, resolve.EXPORT_AAF_NEW)" in lua.snippet_export_timeline("/x.aaf", "AAF")
+    assert "resolve.EXPORT_EDL, resolve.EXPORT_CDL)" in lua.snippet_export_timeline("/x.edl", "EDL", "CDL")
+    assert "resolve.EXPORT_FCPXML_1_10)" in lua.snippet_export_timeline("/x.fcpxml")
+    with pytest.raises(ValueError):
+        lua.snippet_export_timeline("/x.edl", "EDL", "BOGUS")
+
+
+def test_grade_from_drx_rejects_modes_resolve_does_not_have():
+    with pytest.raises(ValueError, match="start frames aligned"):
+        lua.snippet_grade_from_drx("/g.drx", mode=3)

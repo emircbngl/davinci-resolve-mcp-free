@@ -6,6 +6,7 @@ inside Resolve.
 from resolve_pilot.bridge.client import (
     SCRIPT_NAME,
     START_HINT,
+    BridgeBusy,
     BridgeError,
     BridgeNotRunning,
     BridgeResult,
@@ -22,6 +23,7 @@ from resolve_pilot.bridge.client import (
 __all__ = [
     "SCRIPT_NAME",
     "START_HINT",
+    "BridgeBusy",
     "BridgeError",
     "BridgeNotRunning",
     "BridgeResult",

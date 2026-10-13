@@ -717,10 +717,8 @@ def apply_lut(
     """Apply a LUT to every clip on a video track, at one color node."""
     full = str(Path(lut_path).expanduser())
 
-    def studio():
-        n = _studio().apply_lut(full, track=track, node_index=node_index)
-        return {"ok": True, "applied": n, "node_index": node_index}
-    return control.perform(lua_lib.snippet_apply_lut_to_clips(full, track, node_index), studio, channel)
+    return control.perform(lua_lib.snippet_apply_lut_to_clips(full, track, node_index),
+                           lambda: _studio().apply_lut_report(full, track, node_index), channel)
 
 
 @tool(EDIT_RESOLVE, title="Queue render")

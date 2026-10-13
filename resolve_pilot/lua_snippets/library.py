@@ -341,18 +341,35 @@ return {{ok = true, timeline = tl:GetName(), video_clip_count = n,
 """
 
 
+EXPORT_SUBTYPES = ("NONE", "AAF_NEW", "AAF_EXISTING", "CDL", "SDL", "MISSING_CLIPS")
+
+
 @_snippet
-def snippet_export_timeline(out_path: str, export_type: str = "FCPXML_1_10") -> str:
+def snippet_export_timeline(
+    out_path: str,
+    export_type: str = "FCPXML_1_10",
+    export_subtype: str | None = None,
+) -> str:
     """Export the current timeline (FCPXML_1_10, FCPXML_1_9, AAF, EDL, OTIO, DRT, ...).
 
-    export_type is the suffix of Resolve's `resolve.EXPORT_*` constant.
+    export_type is the suffix of Resolve's `resolve.EXPORT_*` constant. AAF and EDL
+    also need export_subtype (AAF: AAF_NEW / AAF_EXISTING; EDL: NONE / CDL / SDL /
+    MISSING_CLIPS); it defaults to AAF_NEW and NONE.
     """
     if not re.fullmatch(r"[A-Z0-9_]+", export_type):
         raise ValueError(f"export_type must look like FCPXML_1_10, got {export_type!r}")
+    if export_subtype is None:
+        export_subtype = {"AAF": "AAF_NEW", "EDL": "NONE"}.get(export_type)
+    if export_subtype is not None and export_subtype not in EXPORT_SUBTYPES:
+        raise ValueError(f"export_subtype must be one of {', '.join(EXPORT_SUBTYPES)}")
     out_path = os.path.expanduser(out_path)
+    sub = f", resolve.EXPORT_{export_subtype}" if export_subtype else ""
     return f"""-- resolve-pilot: export_timeline
-{_TIMELINE_PREAMBLE}local out = {to_lua(out_path)}
-local ok = timeline:Export(out, resolve.EXPORT_{export_type})
+{_TIMELINE_PREAMBLE}if resolve.EXPORT_{export_type} == nil then
+  return {{ok = false, error = "Unknown export_type {export_type} in this Resolve version"}}
+end
+local out = {to_lua(out_path)}
+local ok = timeline:Export(out, resolve.EXPORT_{export_type}{sub})
 print(string.format("[resolve-pilot] Export %s -> %s", tostring(ok), out))
 return {{ok = ok and true or false, path = out}}
 """
@@ -523,8 +540,11 @@ return {{ok = true, touched = q}}
 def snippet_grade_from_drx(drx_path: str, track: int = 1, mode: int = 0) -> str:
     """Apply a saved grade (.drx) to all clips on a video track.
 
-    mode: 0 = NoKeyframes, 1 = SourceTimecode, 2 = SourceFrame, 3 = TargetFrame.
+    mode: 0 = no keyframes, 1 = source timecode aligned, 2 = start frames aligned.
     """
+    if int(mode) not in (0, 1, 2):
+        raise ValueError("mode must be 0 (no keyframes), 1 (source timecode aligned) "
+                         "or 2 (start frames aligned)")
     drx_path = os.path.expanduser(drx_path)
     return f"""-- resolve-pilot: grade_from_drx
 {_TIMELINE_PREAMBLE}local items = timeline:GetItemListInTrack("video", {int(track)})

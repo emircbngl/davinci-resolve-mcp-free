@@ -302,3 +302,11 @@ def render_current_timeline(preset: str = "H.264 Master", target_dir: str = "~/D
 
 def open_page(page: str) -> dict[str, Any]:
     return {"ok": bool(get_resolve().OpenPage(page)), "page": page}
+
+
+def apply_lut_report(lut_path: str, track: int = 1, node_index: int = 1) -> dict[str, Any]:
+    """apply_lut with the same result shape as the Lua snippet."""
+    tl = _current_timeline()
+    items = tl.GetItemListInTrack("video", int(track)) or []
+    applied = sum(1 for it in items if it.SetLUT(int(node_index), lut_path))
+    return {"ok": True, "applied": applied, "total": len(items), "node_index": int(node_index)}

@@ -147,3 +147,103 @@ def test_stop_request_ends_bridge(live_bridge):
     out = stop_bridge(live_bridge)
     assert "stopped (stop requested)" in out
     assert bridge.status().running is False
+
+
+# ── Regressions from review ────────────────────────────────────────────────
+
+
+@needs_luajit
+def test_cyclic_and_huge_results_do_not_hang_the_bridge(live_bridge):
+    r = bridge.exec_lua("local t = {} t.a = t t.b = t return t", timeout=10)
+    assert r.ok and r.result == {"a": "<cycle>", "b": "<cycle>"}
+    r = bridge.exec_lua("return _G", timeout=10)
+    assert r.ok and r.result["_G"] == "<cycle>"
+    r = bridge.exec_lua("print(_G) return 1", timeout=10)
+    assert r.ok and r.result == 1 and '"_G":"<cycle>"' in r.output
+    assert bridge.exec_lua("return 'still alive'").result == "still alive"
+
+
+@needs_luajit
+def test_unencodable_result_is_reported_not_fatal(live_bridge):
+    r = bridge.exec_lua(
+        'local k = setmetatable({}, {__tostring = function() error("bad") end}) return {[k] = 1}')
+    assert not r.ok and "could not be encoded" in r.error
+    assert bridge.exec_lua("return 2").result == 2
+
+
+@needs_luajit
+def test_error_line_numbers_match_the_callers_code(live_bridge):
+    r = bridge.exec_lua("local a = 1\nlocal b = nil\nreturn b.x")
+    assert "request:3:" in r.error
+    r = bridge.exec_lua("local a = 1\nreturn a +")
+    assert "request:2:" in r.error
+
+
+@needs_luajit
+def test_output_is_capped(live_bridge):
+    r = bridge.exec_lua('for i = 1, 30000 do print(i, "some clip name here") end return 1')
+    assert r.ok and r.result == 1 and r.output_truncated
+    assert len(r.output) <= 256 * 1024
+    assert "output_truncated" not in bridge.exec_lua("print(1)").to_dict()
+
+
+@needs_luajit
+def test_long_request_reports_busy_instead_of_not_running(live_bridge):
+    with pytest.raises(bridge.BridgeError, match="still running"):
+        bridge.exec_lua('os.execute("sleep 14") return 1', timeout=1)
+    import time
+    time.sleep(9)  # past the normal heartbeat staleness window, request still running
+    st = bridge.status()
+    assert st.running and st.busy and st.busy_seconds >= 8
+    with pytest.raises(bridge.BridgeBusy):
+        bridge.exec_lua("return 1")
+    deadline = time.monotonic() + 15
+    while bridge.status().busy and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert bridge.exec_lua("return 3").result == 3
+
+
+@needs_luajit
+def test_a_busy_older_bridge_does_not_evict_a_newer_one(tmp_path):
+    import time
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    old = start_bridge(tmp_path / "a")
+    try:
+        with pytest.raises(bridge.BridgeError):
+            bridge.exec_lua('os.execute("sleep 3") return 1', timeout=0.5)
+        new = start_bridge(tmp_path / "b")
+        old.wait(timeout=15)
+        assert "another bridge started" in old.stdout.read()
+        time.sleep(2.5)
+        assert new.poll() is None
+        assert bridge.exec_lua("return 'new'").result == "new"
+    finally:
+        if old.poll() is None:
+            old.kill()
+    stop_bridge(new)
+
+
+@needs_luajit
+def test_two_server_processes_share_one_bridge(live_bridge, tmp_path):
+    import os
+    import sys
+    worker = tmp_path / "worker.py"
+    worker.write_text(
+        "from resolve_pilot import bridge\n"
+        "ok = sum(bridge.exec_lua(f'return {i}', timeout=20).result == i for i in range(10))\n"
+        "print(ok)\n"
+    )
+    procs = [subprocess.Popen([sys.executable, str(worker)], stdout=subprocess.PIPE, text=True,
+                              env=os.environ.copy()) for _ in range(2)]
+    outs = [p.communicate(timeout=120)[0].strip() for p in procs]
+    assert outs == ["10", "10"]
+
+
+def test_windows_non_ascii_profile_falls_back_to_ascii_folder(monkeypatch, tmp_path):
+    from resolve_pilot.bridge import client
+    monkeypatch.setattr(client.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(client, "home", lambda: tmp_path / "Emirç" / ".resolve-pilot")
+    monkeypatch.setenv("PUBLIC", str(tmp_path / "Public"))
+    d = client.bridge_dir()
+    assert str(d).isascii() and d == tmp_path / "Public" / "resolve-pilot" / "bridge"
