@@ -45,12 +45,14 @@ EXPECTED_TOOLS = {
     "apply_lut", "queue_render", "render_status", "open_page", "run_lua", "list_lua_snippets", "render_lua_snippet",
     # macOS UI
     "send_keystroke", "menu_pick", "open_ai_feature",
+    # inspector / tracks
+    "set_clip_properties",
 }
 
 
 def test_server_registers_exactly_the_expected_tools():
     names = set(_annotations())
-    assert len(EXPECTED_TOOLS) == 35
+    assert len(EXPECTED_TOOLS) == 36
     assert names == EXPECTED_TOOLS, (sorted(EXPECTED_TOOLS - names), sorted(names - EXPECTED_TOOLS))
 
 

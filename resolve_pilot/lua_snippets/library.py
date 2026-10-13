@@ -546,6 +546,238 @@ return {{ok = true, colored = n, track = {int(track)}, color = {to_lua(c)}}}
 """
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# Inspector properties (TimelineItem:SetProperty) and tracks
+# ────────────────────────────────────────────────────────────────────────────
+
+# Keys TimelineItem:SetProperty accepts, from Resolve's scripting README, in the order they
+# are written (Scaling before zoom, ZoomGang before ZoomX/ZoomY). Value kinds:
+#   ("number", min, max)  min/max None = only finite; Pan/Tilt/AnchorPoint are documented
+#                         as +-4x the timeline width/height, crops as 0..width/height
+#   ("bool",)
+#   ("enum", prefix, names)  a name resolves to the resolve.<prefix><NAME> constant inside
+#                         Resolve (its integer value is not assumed); an int is passed as is
+CLIP_PROPERTIES: dict[str, tuple] = {
+    "Scaling": ("enum", "SCALE_", ("USE_PROJECT", "CROP", "FIT", "FILL", "STRETCH")),
+    "ResizeFilter": ("enum", "RESIZE_FILTER_", (
+        "USE_PROJECT", "SHARPER", "SMOOTHER", "BICUBIC", "BILINEAR", "BESSEL", "BOX",
+        "CATMULL_ROM", "CUBIC", "GAUSSIAN", "LANCZOS", "MITCHELL", "NEAREST_NEIGHBOR",
+        "QUADRATIC", "SINC", "LINEAR")),
+    "ZoomGang": ("bool",),
+    "ZoomX": ("number", 0.0, 100.0),
+    "ZoomY": ("number", 0.0, 100.0),
+    "Pan": ("number", None, None),
+    "Tilt": ("number", None, None),
+    "RotationAngle": ("number", -360.0, 360.0),
+    "AnchorPointX": ("number", None, None),
+    "AnchorPointY": ("number", None, None),
+    "Pitch": ("number", -1.5, 1.5),
+    "Yaw": ("number", -1.5, 1.5),
+    "FlipX": ("bool",),
+    "FlipY": ("bool",),
+    "CropLeft": ("number", 0.0, None),
+    "CropRight": ("number", 0.0, None),
+    "CropTop": ("number", 0.0, None),
+    "CropBottom": ("number", 0.0, None),
+    "CropSoftness": ("number", -100.0, 100.0),
+    "CropRetain": ("bool",),
+    "Distortion": ("number", -1.0, 1.0),
+    "Opacity": ("number", 0.0, 100.0),
+    "CompositeMode": ("enum", "COMPOSITE_", (
+        "NORMAL", "ADD", "SUBTRACT", "DIFF", "MULTIPLY", "SCREEN", "OVERLAY", "HARDLIGHT",
+        "SOFTLIGHT", "DARKEN", "LIGHTEN", "COLOR_DODGE", "COLOR_BURN", "EXCLUSION", "HUE",
+        "SATURATE", "COLORIZE", "LUMA_MASK", "DIVIDE", "LINEAR_DODGE", "LINEAR_BURN",
+        "LINEAR_LIGHT", "VIVID_LIGHT", "PIN_LIGHT", "HARD_MIX", "LIGHTER_COLOR",
+        "DARKER_COLOR", "FOREGROUND", "ALPHA", "INVERTED_ALPHA", "LUM", "INVERTED_LUM")),
+    "DynamicZoomEase": ("enum", "DYNAMIC_ZOOM_EASE_", ("LINEAR", "IN", "OUT", "IN_AND_OUT")),
+    "RetimeProcess": ("enum", "RETIME_", ("USE_PROJECT", "NEAREST", "FRAME_BLEND", "OPTICAL_FLOW")),
+    "MotionEstimation": ("enum", "MOTION_EST_", (
+        "USE_PROJECT", "STANDARD_FASTER", "STANDARD_BETTER", "ENHANCED_FASTER",
+        "ENHANCED_BETTER", "SPEED_WARP_BETTER", "SPEED_WARP_FASTER")),
+}
+TRACK_TYPES = ("video", "audio", "subtitle")
+# Timeline:AddTrack(trackType, subTrackType): audio channel layouts from the scripting README.
+AUDIO_TRACK_SUBTYPES = ("mono", "stereo", "5.1", "5.1film", "7.1", "7.1film",
+                        *(f"adaptive{n}" for n in range(1, 25)))
+
+
+def normalize_clip_properties(properties: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Validate Inspector properties against CLIP_PROPERTIES; shared by Lua and Studio.
+
+    Returns rows in write order: {key, kind, requested, value | const}. ``const`` is the
+    name of a resolve.* enum constant to look up inside Resolve.
+    """
+    by_lower = {k.lower(): k for k in CLIP_PROPERTIES}
+    picked: dict[str, Any] = {}
+    for raw_key, v in (properties or {}).items():
+        key = by_lower.get(str(raw_key).lower())
+        if key is None:
+            raise ValueError(f"Unknown or unsupported clip property {raw_key!r}. "
+                             f"Use one of: {', '.join(CLIP_PROPERTIES)}")
+        picked[key] = v
+    rows = []
+    for key, spec in CLIP_PROPERTIES.items():
+        if key not in picked:
+            continue
+        v = picked[key]
+        row: dict[str, Any] = {"key": key, "kind": spec[0], "requested": v}
+        if spec[0] == "bool":
+            if not isinstance(v, bool):
+                raise ValueError(f"{key} takes true or false, got {v!r}")
+            row["value"] = v
+        elif spec[0] == "number":
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                raise ValueError(f"{key} takes a number, got {v!r}")
+            lo, hi = spec[1], spec[2]
+            if (lo is not None and v < lo) or (hi is not None and v > hi):
+                raise ValueError(f"{key} must be between {lo if lo is not None else '-inf'} "
+                                 f"and {hi if hi is not None else 'inf'}, got {v!r}")
+            row["value"] = float(v)
+        else:
+            prefix, names = spec[1], spec[2]
+            if isinstance(v, int) and not isinstance(v, bool):
+                row["value"] = v
+            elif isinstance(v, str):
+                name = v.strip().upper().replace(" ", "_").replace("-", "_")
+                name = name.removeprefix(prefix)
+                if name not in names:
+                    raise ValueError(f"{key} takes one of {', '.join(n.lower() for n in names)} "
+                                     f"(or the integer value), got {v!r}")
+                row["const"] = prefix + name
+            else:
+                raise ValueError(f"{key} takes a name or an integer, got {v!r}")
+        rows.append(row)
+    return rows
+
+
+# Read-back comparison, the same rule as values_match() in Python: Resolve can report
+# booleans as 0/1 and stores numbers as floats, so allow a small relative tolerance.
+_SAME_VALUE_FN = """\
+local function same_value(kind, want, got)
+  if got == nil then return false end
+  if kind == "bool" then
+    if type(got) == "number" then got = got ~= 0 end
+    if type(got) == "string" then got = (got == "true" or got == "1") end
+    return got == want
+  end
+  local g, w = tonumber(got), tonumber(want)
+  return g ~= nil and w ~= nil and math.abs(g - w) <= 1e-3 * math.max(1, math.abs(w))
+end
+"""
+
+
+def values_match(kind: str, want: Any, got: Any) -> bool:
+    """Python twin of the Lua ``same_value`` read-back check."""
+    if got is None:
+        return False
+    if kind == "bool":
+        if isinstance(got, (int, float)) and not isinstance(got, bool):
+            got = got != 0
+        elif isinstance(got, str):
+            got = got in ("true", "1")
+        return got is want or got == want
+    try:
+        g, w = float(got), float(want)
+    except (TypeError, ValueError):
+        return False
+    return abs(g - w) <= 1e-3 * max(1.0, abs(w))
+
+
+@_snippet
+def snippet_set_clip_properties(
+    track_type: str = "video",
+    track: int = 1,
+    indices: list[int] | None = None,
+    properties: dict[str, Any] | None = None,
+    enabled: bool | None = None,
+) -> str:
+    """Set Inspector properties (zoom, pan, crop, opacity, ...) and enable/disable clips, with read-back.
+
+    indices: 0-based clip indices as get_state(include_clips=true) lists them (transitions
+    skipped); None = every clip on the track. Every write is read back with GetProperty /
+    GetClipEnabled, and `ok` comes from the read-back, not from the setter's return value.
+    """
+    track_type = _pick(track_type, ("video", "audio"), "track type")
+    rows = normalize_clip_properties(properties)
+    if not rows and enabled is None:
+        raise ValueError("Nothing to change: pass properties and/or enabled.")
+    idx = None if indices is None else [int(i) for i in indices]
+    if idx is not None and (not idx or min(idx) < 0):
+        raise ValueError("indices must be a non-empty list of 0-based clip indices (or None for all)")
+    return f"""-- resolve-pilot: set_clip_properties
+{_TIMELINE_PREAMBLE}{_CLIP_ITEMS}{_SAME_VALUE_FN}local track_type, track = {to_lua(track_type)}, {int(track)}
+local indices, enabled = {to_lua(idx)}, {to_lua(enabled)}
+local props = {to_lua(rows)}
+local resolved = {{}}
+for _, p in ipairs(props) do
+  if p.const then
+    p.value = resolve[p.const]
+    if p.value == nil then
+      return {{ok = false, error = "This Resolve has no resolve." .. p.const ..
+        " constant; pass the integer value for " .. p.key .. " instead."}}
+    end
+    resolved[p.key] = p.value
+  end
+end
+local items = clip_items(timeline, track_type, track)
+local targets, missing = {{}}, {{}}
+if indices then
+  for _, i in ipairs(indices) do
+    if items[i + 1] then targets[#targets + 1] = {{i, items[i + 1]}} else missing[#missing + 1] = i end
+  end
+else
+  for i, it in ipairs(items) do targets[#targets + 1] = {{i - 1, it}} end
+end
+local function call(it, method, ...)
+  if type(it[method]) ~= "function" then return false, method .. " is not available" end
+  return pcall(it[method], it, ...)
+end
+local clips, changed = {{}}, 0
+for _, t in ipairs(targets) do
+  local index, it = t[1], t[2]
+  local row = {{index = index, name = it:GetName(), requested = {{}}, actual = {{}}, mismatched = {{}},
+    contradicted = {{}}, ok = true}}
+  for _, p in ipairs(props) do
+    row.requested[p.key] = p.requested
+    local done, said = call(it, "SetProperty", p.key, p.value)
+    local read, got = call(it, "GetProperty", p.key)
+    if read then row.actual[p.key] = got end
+    if not (done and read and same_value(p.kind, p.value, got)) then
+      row.ok = false
+      row.mismatched[#row.mismatched + 1] = p.key
+      if not done then row.error = tostring(said)
+      elseif said == true then row.contradicted[#row.contradicted + 1] = p.key end
+    end
+  end
+  if enabled ~= nil then
+    row.requested.enabled = enabled
+    local done, said = call(it, "SetClipEnabled", enabled)
+    local read, got = call(it, "GetClipEnabled")
+    if read then row.actual.enabled = got end
+    if not (done and read and same_value("bool", enabled, got)) then
+      row.ok = false
+      row.mismatched[#row.mismatched + 1] = "enabled"
+      if not done then row.error = tostring(said)
+      elseif said == true then row.contradicted[#row.contradicted + 1] = "enabled" end
+    end
+  end
+  if row.ok then changed = changed + 1 end
+  clips[#clips + 1] = row
+end
+local out = {{ok = #targets > 0 and changed == #targets and #missing == 0, track_type = track_type,
+  track = track, clip_count = #items, changed = changed, clips = clips, missing_indices = missing,
+  resolved_values = resolved, timeline = timeline:GetName()}}
+if #targets == 0 then
+  out.error = "No clips to change on " .. track_type .. " track " .. track .. " (" .. #items .. " clips there)."
+elseif not out.ok then
+  out.error = "Some values did not stick: Resolve's read-back differs from what was requested " ..
+    "(see clips[].mismatched), or indices are missing."
+end
+print(string.format("[resolve-pilot] Changed %d / %d clips on %s %d", changed, #targets, track_type, track))
+return out
+"""
+
+
 @_snippet
 def snippet_create_compound_from_selection(name: str = "Compound") -> str:
     """Wrap the timeline's current video item into a compound clip."""

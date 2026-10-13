@@ -10,8 +10,19 @@ end
 local Item = {}
 Item.__index = Item
 
+-- Inspector defaults as a fresh clip reports them. Enum values are the resolve.*
+-- constants below, deliberately not 0..n, so a snippet that assumes ordinals fails.
+local function default_props()
+  return { Pan = 0, Tilt = 0, ZoomX = 1, ZoomY = 1, ZoomGang = true, RotationAngle = 0,
+    AnchorPointX = 0, AnchorPointY = 0, Pitch = 0, Yaw = 0, FlipX = false, FlipY = false,
+    CropLeft = 0, CropRight = 0, CropTop = 0, CropBottom = 0, CropSoftness = 0, CropRetain = false,
+    Distortion = 0, Opacity = 100, CompositeMode = 100, DynamicZoomEase = 200, RetimeProcess = 300,
+    MotionEstimation = 400, Scaling = 500, ResizeFilter = 600 }
+end
+
 function Item.new(name, start, dur, path)
-  return setmetatable({ name = name, start = start, dur = dur, path = path, color = "" }, Item)
+  return setmetatable({ name = name, start = start, dur = dur, path = path, color = "",
+    props = default_props(), enabled = true }, Item)
 end
 function Item:GetName() return self.name end
 function Item:GetStart() return self.start end
@@ -25,7 +36,30 @@ function Item:GetMediaPoolItem()
   local path = self.path
   return { GetClipProperty = function(_, key) if key == "File Path" then return path end end }
 end
-function Item:GetProperty() return { Opacity = 100, ZoomX = 1, ZoomY = 1 } end
+-- GetProperty() returns every property; GetProperty(key) one value (nil if unknown).
+function Item:GetProperty(key)
+  if key == nil then
+    local copy = {}
+    for k, v in pairs(self.props) do copy[k] = v end
+    return copy
+  end
+  return self.props[key]
+end
+-- Unknown keys and wrong value types are refused, like Resolve does (it returns false).
+-- Fractions come back slightly off, as float storage does, so read-back needs a tolerance.
+function Item:SetProperty(key, value)
+  local cur = self.props[key]
+  if cur == nil or type(cur) ~= type(value) then return false end
+  if type(value) == "number" and value ~= math.floor(value) then value = value + 1e-7 end
+  self.props[key] = value
+  return true
+end
+function Item:GetClipEnabled() return self.enabled end
+function Item:SetClipEnabled(on)
+  if type(on) ~= "boolean" then return false end
+  self.enabled = on
+  return true
+end
 
 -- Transitions come back from GetItemListInTrack too (Resolve 20.3): no media pool
 -- item and no transform properties.
@@ -159,6 +193,11 @@ local pm = { GetCurrentProject = function() return project end }
 
 resolve = {
   page = "edit",
+  SCALE_USE_PROJECT = 500, SCALE_CROP = 501, SCALE_FIT = 502, SCALE_FILL = 503, SCALE_STRETCH = 504,
+  COMPOSITE_NORMAL = 100, COMPOSITE_SCREEN = 105, COMPOSITE_MULTIPLY = 104,
+  DYNAMIC_ZOOM_EASE_LINEAR = 200, DYNAMIC_ZOOM_EASE_IN_AND_OUT = 203,
+  RETIME_USE_PROJECT = 300, RETIME_NEAREST = 301, RETIME_FRAME_BLEND = 302, RETIME_OPTICAL_FLOW = 303,
+  MOTION_EST_USE_PROJECT = 400, RESIZE_FILTER_USE_PROJECT = 600, RESIZE_FILTER_LANCZOS = 610,
   GetProjectManager = function() return pm end,
   GetProductName = function() return "DaVinci Resolve" end,
   GetVersionString = function() return "21.1.1" end,

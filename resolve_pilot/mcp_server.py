@@ -1174,6 +1174,49 @@ def set_clip_color(
     return control.perform(lua_lib.snippet_set_clip_color(color, track), studio, channel)
 
 
+_PROPERTY_HELP = (
+    "Inspector values by key. Numbers: ZoomX, ZoomY (0-100, 1 = 100%), Pan, Tilt (pixels, "
+    "documented range +-4x the timeline width/height), RotationAngle (-360..360), AnchorPointX, "
+    "AnchorPointY, Pitch, Yaw (-1.5..1.5), CropLeft, CropRight, CropTop, CropBottom (pixels, >= 0), "
+    "CropSoftness (-100..100), Distortion (-1..1), Opacity (0-100). Booleans: ZoomGang, FlipX, "
+    "FlipY, CropRetain. Names (or the integer value): Scaling (use_project, crop, fit, fill, "
+    "stretch), CompositeMode (normal, screen, multiply, add, overlay, ...), DynamicZoomEase "
+    "(linear, in, out, in_and_out), RetimeProcess (use_project, nearest, frame_blend, "
+    "optical_flow), MotionEstimation (use_project, standard_faster, ..., speed_warp_better), "
+    "ResizeFilter (use_project, sharper, smoother, lanczos, ...).")
+
+
+@tool(_hints(read_only=False, idempotent=True), title="Set clip properties")
+def set_clip_properties(
+    track_type: Literal["video", "audio"] = "video",
+    track: Annotated[int, Field(ge=1, description="Track number (V1 = 1).")] = 1,
+    indices: Annotated[list[Annotated[int, Field(ge=0)]] | None, Field(min_length=1, description=(
+        "0-based clip indices as get_resolve_state(include_clips=true) lists them "
+        "(transitions skipped). Omit for every clip on the track."))] = None,
+    properties: Annotated[dict[str, Any] | None, Field(description=_PROPERTY_HELP)] = None,
+    enabled: Annotated[bool | None, Field(description="Enable (true) or disable (false) the clips.")] = None,
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """Change Inspector properties of timeline clips (zoom, position, rotation, crop, flip,
+    opacity, composite mode, scaling, retime) and enable/disable them, with read-back.
+
+    Each clip comes back as {index, name, requested, actual, ok, mismatched}: `ok` is what
+    Resolve reports *after* the write (GetProperty / GetClipEnabled), not the setter's
+    return value, which can be true for a value that did not stick (`contradicted`).
+    9:16 reframe of 16:9 footage on a 1080x1920 timeline: properties={"Scaling": "fill"}
+    fills the frame (crops the sides); then move the subject into view with Pan, or
+    ZoomX/ZoomY above 1 to punch in. Pan's unit and sign are not verified yet: check the
+    picture with timeline_frames and adjust. See get_workflow_guide('rough-cut').
+    """
+    rows = lua_lib.normalize_clip_properties(properties)  # fail fast, before any channel
+    if not rows and enabled is None:
+        raise ValueError("Nothing to change: pass properties and/or enabled.")
+    args = dict(track_type=track_type, track=track, indices=indices, properties=properties,
+                enabled=enabled)
+    return control.perform(lua_lib.snippet_set_clip_properties(**args),
+                           lambda: _studio().set_clip_properties(**args), channel)
+
+
 @tool(DESTRUCTIVE, title="Apply LUT")
 def apply_lut(
     lut_path: Annotated[str, Field(description="Absolute path of a .cube / .dat LUT.")],

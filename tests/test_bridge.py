@@ -121,6 +121,8 @@ _SNIPPET_SAMPLES = {
     "grade_from_drx": {"drx_path": "/x.drx"},
     "open_page": {"page": "edit"},
     "export_timeline_stills": {"positions": [{"seconds": 1}, {"frame": 3}], "out_dir": "/x"},
+    "set_clip_properties": {"indices": [0], "properties": {"Scaling": "fill", "Pan": -200.0,
+                                                           "FlipX": True}, "enabled": False},
 }
 
 

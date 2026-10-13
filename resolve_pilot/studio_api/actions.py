@@ -418,3 +418,74 @@ def render_jobs_status() -> dict[str, Any]:
                      "seconds_left": (status.get("EstimatedTimeRemainingInMs") or 0) / 1000 or None,
                      "error": status.get("Error") or None})
     return {"ok": True, "rendering": bool(project.IsRenderingInProgress()), "jobs": jobs}
+
+
+def _call(obj, method: str, *args) -> tuple[bool, Any]:
+    """(succeeded, value or error text), like the Lua snippets' pcall wrapper."""
+    fn = getattr(obj, method, None)
+    if not callable(fn):
+        return False, f"{method} is not available"
+    try:
+        return True, fn(*args)
+    except Exception as e:  # the native module raises on bad keys / types
+        return False, str(e)
+
+
+def set_clip_properties(track_type: str = "video", track: int = 1, indices: list[int] | None = None,
+                        properties: dict[str, Any] | None = None,
+                        enabled: bool | None = None) -> dict[str, Any]:
+    """Studio twin of snippet_set_clip_properties (same result shape, read-back `ok`)."""
+    from resolve_pilot.lua_snippets.library import normalize_clip_properties, values_match
+
+    rows = normalize_clip_properties(properties)
+    resolve = get_resolve()
+    resolved: dict[str, Any] = {}
+    for p in rows:
+        if "const" in p:
+            value = getattr(resolve, p["const"], None)
+            if value is None:
+                return {"ok": False, "error": f"This Resolve has no resolve.{p['const']} constant; "
+                                              f"pass the integer value for {p['key']} instead."}
+            p["value"] = resolved[p["key"]] = value
+    tl = _current_timeline()
+    items = clip_items(tl, track_type, int(track))
+    if indices is None:
+        targets, missing = list(enumerate(items)), []
+    else:
+        targets = [(i, items[i]) for i in indices if 0 <= i < len(items)]
+        missing = [i for i in indices if not 0 <= i < len(items)]
+    clips, changed = [], 0
+    for index, it in targets:
+        row: dict[str, Any] = {"index": index, "name": it.GetName(), "requested": {}, "actual": {},
+                               "mismatched": [], "contradicted": [], "ok": True}
+        checks = [(p["key"], p["kind"], p["value"], p["requested"], ("SetProperty", p["key"], p["value"]),
+                   ("GetProperty", p["key"])) for p in rows]
+        if enabled is not None:
+            checks.append(("enabled", "bool", enabled, enabled, ("SetClipEnabled", enabled),
+                           ("GetClipEnabled",)))
+        for key, kind, value, requested, setter, getter in checks:
+            row["requested"][key] = requested
+            done, said = _call(it, *setter)
+            read, got = _call(it, *getter)
+            if read and got is not None:
+                row["actual"][key] = got
+            if not (done and read and values_match(kind, value, got)):
+                row["ok"] = False
+                row["mismatched"].append(key)
+                if not done:
+                    row["error"] = str(said)
+                elif said is True:
+                    row["contradicted"].append(key)
+        changed += row["ok"]
+        clips.append(row)
+    out: dict[str, Any] = {
+        "ok": bool(targets) and changed == len(targets) and not missing, "track_type": track_type,
+        "track": int(track), "clip_count": len(items), "changed": changed, "clips": clips,
+        "missing_indices": missing, "resolved_values": resolved, "timeline": tl.GetName()}
+    if not targets:
+        out["error"] = (f"No clips to change on {track_type} track {track} "
+                        f"({len(items)} clips there).")
+    elif not out["ok"]:
+        out["error"] = ("Some values did not stick: Resolve's read-back differs from what was "
+                        "requested (see clips[].mismatched), or indices are missing.")
+    return out
