@@ -105,7 +105,8 @@ index from get_resolve_state (pass names; ask first). Read their `warnings`.
 6. After queue_render(start=true), render_status(wait_seconds=...) says when it is done.
 
 Subtitles: transcribe_audio, then add_subtitles(transcript_id=...) puts them on the timeline's \
-subtitle track (or export_srt for a file). Never append .srt files with append_clips. Titles: \
+subtitle track (or export_srt for a file). Never append .srt files with append_clips. Before risky edits (removing clips, \
+big rebuilds) call checkpoint(action='save'); the API has no undo. Titles: \
 add_title overlays Text+ on a track above V1; never insert titles any other way, as Resolve's \
 own title insert splits and ripples the edit.
 
@@ -1708,6 +1709,40 @@ def add_title(
                                   tuple(position) if position else None,
                                   tuple(color) if color else None, font),
         None, channel, timeout=60.0)
+
+
+@tool(EDIT_RESOLVE, title="Checkpoints and project backup")
+def checkpoint(
+    action: Annotated[Literal["save", "list", "restore", "export_project"], Field(description=(
+        "save: copy the current timeline as a checkpoint (before risky edits). list: the "
+        "checkpoints. restore: continue on a fresh copy of a checkpoint. export_project: write "
+        "the whole project as a .drp backup file."))] = "save",
+    label: Annotated[str | None, Field(description="save: checkpoint label; default date and time.")] = None,
+    name: Annotated[str | None, Field(description="restore: the checkpoint's timeline name from list.")] = None,
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """Undo for agents: Resolve's scripting API has no undo, so checkpoint before big changes.
+
+    Checkpoints are timeline copies named "<timeline> · checkpoint <label>" in a
+    "Checkpoints" bin; your current timeline stays current. restore never overwrites:
+    it makes a "(restored)" copy of the checkpoint and switches to it.
+    """
+    import datetime as _dt
+    stamp = _dt.datetime.now()
+    backup = None
+    if action == "save" and not label:
+        label = stamp.strftime("%Y-%m-%d %H:%M:%S")
+    if action == "export_project":
+        backup = str(state_dir("backups") / f"project_{stamp.strftime('%Y%m%d-%H%M%S')}.drp")
+    out = control.perform(lua_lib.snippet_checkpoint(action, label, name, backup), None, channel,
+                          timeout=120.0)
+    if action == "export_project" and out.get("channel") != "manual":
+        f = Path(backup)
+        out["size_bytes"] = f.stat().st_size if f.is_file() else 0
+        out["ok"] = bool(out.get("ok")) and out["size_bytes"] > 0
+        if not out["ok"]:
+            out["error"] = out.get("error") or "Resolve reported success but no backup file was written."
+    return out
 
 
 class TimelinePosition(BaseModel):

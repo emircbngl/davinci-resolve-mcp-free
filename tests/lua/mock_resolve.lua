@@ -542,3 +542,37 @@ function MediaPool:MoveClips(clips, folder)
   for _, c in ipairs(clips or {}) do table.insert(folder.clips, c) end
   return true
 end
+
+-- Checkpoints ------------------------------------------------------------------------
+-- DuplicateTimeline makes the copy current (measured on 20.3).
+function Timeline:DuplicateTimeline(name)
+  local copy = Timeline.new(name)
+  copy.start, copy.settings = self.start, {}
+  for k, v in pairs(self.settings) do copy.settings[k] = v end
+  for kind, tracks in pairs(self.tracks) do
+    copy.tracks[kind] = {}
+    for i, track in ipairs(tracks) do
+      copy.tracks[kind][i] = {}
+      for j, it in ipairs(track) do
+        local c = Item.new(it.name, it.start, it.dur, it.path, it.mpi)
+        c.left, c.track_type, c.track_index = it.left, it.track_type, it.track_index
+        copy.tracks[kind][i][j] = c
+      end
+    end
+  end
+  table.insert(project.timelines, copy)
+  project.current = copy
+  return copy
+end
+function Timeline:GetMediaPoolItem()
+  self.pool_item = self.pool_item or setmetatable({ name = self.name, timeline = true }, Mpi)
+  return self.pool_item
+end
+pm.SaveProject = function() project.saved = (project.saved or 0) + 1; return true end
+pm.ExportProject = function(_, name, path, with_stills)
+  local f = io.open(path, "wb")
+  if not f then return false end
+  f:write("DRP " .. name)
+  f:close()
+  return true
+end

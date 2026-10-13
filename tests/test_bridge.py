@@ -122,6 +122,7 @@ _SNIPPET_SAMPLES = {
     "open_page": {"page": "edit"},
     "export_timeline_stills": {"positions": [{"seconds": 1}, {"frame": 3}], "out_dir": "/x"},
     "add_subtitles": {"srt_path": "/x.srt"},
+    "checkpoint": {"action": "save", "label": "before cut"},
     "add_title": {"text": "Hi", "start_seconds": 1, "duration_seconds": 7, "position": (0.5, 0.2),
                   "color": (1, 1, 0), "size": 0.1, "font": "Open Sans"},
     "import_media": {"paths": ["/x.mov"], "bin": "B-roll/Day 1"},
@@ -503,3 +504,25 @@ def test_add_title_rejects_v1_and_bad_values():
                         ({"color": (1, 1)}, "color"), ({"size": 2}, "size")):
         with pytest.raises(ValueError, match=msg):
             lua.snippet_add_title("x", 0, 1, **kwargs)
+
+
+@needs_luajit
+@pytest.mark.parametrize("live_bridge", [None, "21.1"], indirect=True)
+def test_checkpoint_save_list_restore_and_backup(live_bridge):
+    from resolve_pilot import mcp_server
+    saved = mcp_server.checkpoint("save", label="before cut")
+    assert saved["ok"] and saved["checkpoint"] == "Main · checkpoint before cut"
+    assert saved["current"] == "Main" and saved["in_bin"] == "Checkpoints"  # copy did not stay current
+    assert mcp_server.checkpoint("save", label="before cut")["ok"] is False  # no silent duplicates
+    listed = mcp_server.checkpoint("list")
+    assert listed["checkpoints"] == [{"name": "Main · checkpoint before cut", "of": "Main", "label": "before cut"}]
+    # Damage the edit, then restore: a fresh copy of the checkpoint becomes current.
+    bridge.exec_lua("table.remove(rp.timeline().tracks.video[1], 1)")
+    restored = mcp_server.checkpoint("restore", name="Main · checkpoint before cut")
+    assert restored["ok"] and restored["current"] == "Main (restored)"
+    clips = bridge.exec_lua(lua.snippet_get_state(include_clips=True)).result["current_timeline"]["clips"]
+    assert [c["name"] for c in clips] == ["A", "B"]
+    # A checkpoint of the restored copy is named after the original timeline, not nested.
+    assert mcp_server.checkpoint("save", label="v2")["checkpoint"] == "Main (restored) · checkpoint v2"
+    backup = mcp_server.checkpoint("export_project")
+    assert backup["ok"] and backup["size_bytes"] > 0 and backup["path"].endswith(".drp")

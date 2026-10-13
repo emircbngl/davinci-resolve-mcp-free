@@ -512,6 +512,82 @@ return finish({{ok = true, timeline = target:GetName(), track = track, name = pl
 """
 
 
+CHECKPOINT_MARK = " · checkpoint "
+
+
+@_snippet
+def snippet_checkpoint(action: str, label: str | None = None, name: str | None = None,
+                       backup_path: str | None = None) -> str:
+    """Timeline checkpoints (duplicate / list / restore) and .drp project backups."""
+    action = _pick(action, ("save", "list", "restore", "export_project"), "action")
+    if action == "save" and not label:
+        raise ValueError("save needs a label")
+    if action == "restore" and not name:
+        raise ValueError("restore needs the checkpoint name (see action='list')")
+    if action == "export_project" and not backup_path:
+        raise ValueError("export_project needs backup_path")
+    return f"""-- resolve-pilot: checkpoint
+{_PROJECT_PREAMBLE}local action, label, name, backup = {to_lua(action)}, {to_lua(label)}, {to_lua(name)}, {to_lua(backup_path)}
+local MARK = {to_lua(CHECKPOINT_MARK)}
+local pm, mp = resolve:GetProjectManager(), project:GetMediaPool()
+local function timelines()
+  local out = {{}}
+  for i = 1, project:GetTimelineCount() do out[#out + 1] = project:GetTimelineByIndex(i) end
+  return out
+end
+local function find(n) for _, t in ipairs(timelines()) do if t:GetName() == n then return t end end end
+local function bin()
+  local root = mp:GetRootFolder()
+  for _, f in ipairs(root:GetSubFolderList() or {{}}) do if f:GetName() == "Checkpoints" then return f end end
+  return mp:AddSubFolder(root, "Checkpoints")
+end
+if action == "export_project" then
+  pm:SaveProject()
+  local ok = pm:ExportProject(project:GetName(), backup, false)
+  return {{ok = ok and true or false, project = project:GetName(), path = backup}}
+end
+if action == "list" then
+  local list = {{}}
+  for _, t in ipairs(timelines()) do
+    local n = t:GetName()
+    local s, e = n:find(MARK, 1, true)
+    if s then list[#list + 1] = {{name = n, of = n:sub(1, s - 1), label = n:sub(e + 1)}} end
+  end
+  local cur = project:GetCurrentTimeline()
+  return {{ok = true, current = cur and cur:GetName(), checkpoints = list}}
+end
+local tl = project:GetCurrentTimeline()
+if action == "save" then
+  if not tl then return {{ok = false, error = "No active timeline to checkpoint."}} end
+  pm:SaveProject()
+  local base = tl:GetName():gsub(MARK:gsub("%p", "%%%0") .. ".*$", "")
+  local copy_name = base .. MARK .. label
+  if find(copy_name) then return {{ok = false, error = "A checkpoint named '" .. copy_name .. "' exists; use another label."}} end
+  local copy = tl:DuplicateTimeline(copy_name)
+  -- DuplicateTimeline makes the copy current (measured on 20.3): go back to the work.
+  project:SetCurrentTimeline(tl)
+  if not copy then return {{ok = false, error = "Resolve could not duplicate the timeline."}} end
+  local item = copy.GetMediaPoolItem and copy:GetMediaPoolItem()
+  local b = item and bin()
+  if b then mp:MoveClips({{item}}, b) end
+  return {{ok = true, checkpoint = copy:GetName(), current = project:GetCurrentTimeline():GetName(),
+    in_bin = b and "Checkpoints" or nil}}
+end
+-- restore: work on a fresh copy of the checkpoint so the checkpoint itself stays intact
+local cp = find(name)
+if not cp then return {{ok = false, error = "No timeline named '" .. name .. "'. See action='list'."}} end
+local s = name:find(MARK, 1, true)
+local base = s and name:sub(1, s - 1) or name
+local n, work_name = 1, base .. " (restored)"
+while find(work_name) do n = n + 1; work_name = base .. " (restored " .. n .. ")" end
+local work = cp:DuplicateTimeline(work_name)
+if not work then return {{ok = false, error = "Resolve could not copy the checkpoint."}} end
+project:SetCurrentTimeline(work)
+return {{ok = true, restored_from = name, current = project:GetCurrentTimeline():GetName(),
+  note = "The edit before the restore is still there as '" .. (tl and tl:GetName() or "?") .. "'."}}
+"""
+
+
 @_snippet
 def snippet_add_markers(markers: list[dict], replace_owned_prefix: str | None = None) -> str:
     """Add markers to the current timeline; positions in frames or seconds.
