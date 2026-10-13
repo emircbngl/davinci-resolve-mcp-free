@@ -35,14 +35,14 @@ EXPECTED_TOOLS = {
     # analyze
     "probe_media", "detect_scenes", "detect_beats", "transcribe_audio", "analyze_quality",
     # see
-    "grab_frames", "scene_frames", "read_video", "screenshot_resolve",
+    "grab_frames", "scene_frames", "read_video", "screenshot_resolve", "timeline_frames",
     # plan
     "plan_from_transcript", "plan_from_scenes", "create_plan", "get_plan", "edit_plan",
     # export
     "export_fcpxml", "export_srt",
     # resolve
     "get_resolve_state", "import_timeline", "add_markers", "add_quality_markers", "set_clip_color",
-    "apply_lut", "queue_render", "open_page", "run_lua", "list_lua_snippets", "render_lua_snippet",
+    "apply_lut", "queue_render", "render_status", "open_page", "run_lua", "list_lua_snippets", "render_lua_snippet",
     # macOS UI
     "send_keystroke", "menu_pick", "open_ai_feature",
 }
@@ -50,7 +50,7 @@ EXPECTED_TOOLS = {
 
 def test_server_registers_exactly_the_expected_tools():
     names = set(_annotations())
-    assert len(EXPECTED_TOOLS) == 33
+    assert len(EXPECTED_TOOLS) == 35
     assert names == EXPECTED_TOOLS, (sorted(EXPECTED_TOOLS - names), sorted(names - EXPECTED_TOOLS))
 
 

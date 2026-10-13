@@ -119,6 +119,7 @@ _SNIPPET_SAMPLES = {
     "relink_media": {"folder": "/x"},
     "grade_from_drx": {"drx_path": "/x.drx"},
     "open_page": {"page": "edit"},
+    "export_timeline_stills": {"positions": [{"seconds": 1}, {"frame": 3}], "out_dir": "/x"},
 }
 
 
@@ -362,3 +363,38 @@ def test_install_gives_a_console_line_and_flags_older_bridge_scripts(tmp_path, m
     assert out["installed"].endswith("ResolvePilotBridge.lua")
     assert out["console_command"].startswith("dofile(") and "ResolvePilotBridge.lua" in out["console_command"]
     assert out["other_bridge_scripts"] == ["resolve_pilot_bridge.lua"]
+
+
+@needs_luajit
+def test_timeline_frames_export_stills_and_restore_the_playhead(live_bridge, tmp_path):
+    from tests.conftest import FFMPEG
+    if not FFMPEG:
+        pytest.skip("ffmpeg not installed")
+    import json as _json
+    from resolve_pilot import mcp_server
+    png = tmp_path / "still.png"
+    subprocess.run([FFMPEG, "-loglevel", "error", "-f", "lavfi", "-i", "color=red:s=64x36",
+                    "-frames:v", "1", "-y", str(png)], check=True)
+    bridge.exec_lua(f"mock.png_path = {lua.lua_string(str(png))}; resolve.page = 'media'")
+    pos = mcp_server.TimelinePosition
+    result = mcp_server.timeline_frames([pos(seconds=1), pos(frame=30), pos(seconds=99)])
+    header = _json.loads(result.content[0].text)
+    assert header["channel"] == "bridge" and header["returned"] == 2
+    assert [d["index"] for d in header["dropped"]] == [2] and "outside" in header["dropped"][0]["reason"]
+    labels = [c.text for c in result.content[1:] if c.type == "text"]
+    assert labels[0].startswith("01:00:01:00") and labels[1].startswith("01:00:01:06")
+    assert sum(c.type == "image" for c in result.content) == 2
+    seen = bridge.exec_lua("return {mock.project.stills, mock.project.current:GetCurrentTimecode(), "
+                           "resolve.page}").result
+    assert seen == [["01:00:01:00", "01:00:01:06"], "01:00:00:00", "media"]  # restored
+
+
+@needs_luajit
+def test_render_status_reports_jobs_and_progress(live_bridge):
+    from resolve_pilot import mcp_server
+    assert mcp_server.render_status()["jobs"] == []
+    bridge.exec_lua(lua.snippet_render_current_timeline(start=True))
+    out = mcp_server.render_status()
+    assert out["rendering"] is True and out["done"] is False
+    assert out["jobs"][0]["status"] == "Rendering" and out["jobs"][0]["percent"] == 40
+    assert out["jobs"][0]["seconds_left"] == 12

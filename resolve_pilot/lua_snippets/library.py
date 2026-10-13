@@ -227,6 +227,96 @@ def normalize_markers(markers: list[dict]) -> list[dict]:
     return rows
 
 
+# Frame index -> timecode string, drop-frame aware (29.97 / 59.94 DF skip frame numbers
+# 0-1 / 0-3 at every minute except each tenth).
+_TIMECODE_FN = """\
+local function frames_to_tc(total, fps, df)
+  local base = math.floor(fps + 0.5)
+  if df then
+    local drop = math.floor(base / 15)
+    local per10, per1 = base * 600 - drop * 9, base * 60 - drop
+    local tens, rem = math.floor(total / per10), total % per10
+    total = total + drop * 9 * tens
+    if rem > drop then total = total + drop * math.floor((rem - drop) / per1) end
+  end
+  local s = math.floor(total / base)
+  return string.format("%02d:%02d:%02d%s%02d", math.floor(s / 3600), math.floor(s / 60) % 60,
+    s % 60, df and ";" or ":", total % base)
+end
+"""
+
+_PLAYHEAD_PAGES = ("cut", "edit", "color", "fairlight", "deliver")
+
+
+@_snippet
+def snippet_export_timeline_stills(positions: list[dict], out_dir: str) -> str:
+    """Export the current timeline's frames (as rendered: grades, titles, effects) as PNGs.
+
+    positions: [{"seconds": 1.5} or {"frame": 36}, ...], offsets from the timeline start.
+    Moves the playhead for each still, then puts the playhead and page back.
+    """
+    rows = []
+    for p in positions:
+        if p.get("frame") is not None:
+            rows.append({"frame": int(p["frame"])})
+        elif p.get("seconds") is not None and math.isfinite(float(p["seconds"])):
+            rows.append({"seconds": float(p["seconds"])})
+        else:
+            raise ValueError("each position needs a finite seconds or frame value")
+    out_dir = os.path.expanduser(out_dir)
+    return f"""-- resolve-pilot: export_timeline_stills
+{_TIMELINE_PREAMBLE}{_TIMELINE_FPS}{_TIMECODE_FN}local positions, out_dir, sep = {to_lua(rows)}, {to_lua(out_dir)}, {to_lua(os.sep)}
+local df = tostring(timeline:GetSetting("timelineDropFrameTimecode")) == "1"
+local start, last = timeline:GetStartFrame(), timeline:GetEndFrame() - 1
+local page = resolve:GetCurrentPage()
+local playhead_pages = {to_lua(list(_PLAYHEAD_PAGES))}
+local on_playhead_page = false
+for _, p in ipairs(playhead_pages) do if p == page then on_playhead_page = true end end
+if not on_playhead_page then resolve:OpenPage("edit") end
+local before = timeline:GetCurrentTimecode()
+local stills = {{}}
+for i, pos in ipairs(positions) do
+  local offset = pos.frame or math.floor(pos.seconds * fps + 0.5)
+  local row = {{index = i - 1, frame = offset, seconds = offset / fps}}
+  if offset < 0 or start + offset > last then
+    row.ok = false
+    row.error = "outside the timeline (0-" .. (last - start) .. " frames)"
+  else
+    row.timecode = frames_to_tc(start + offset, fps, df)
+    if not timeline:SetCurrentTimecode(row.timecode) then
+      row.ok = false
+      row.error = "Resolve refused to move the playhead to " .. row.timecode
+    else
+      row.path = out_dir .. sep .. string.format("still_%03d.png", i - 1)
+      row.ok = project:ExportCurrentFrameAsStill(row.path) and true or false
+      if not row.ok then row.error = "ExportCurrentFrameAsStill failed" end
+    end
+  end
+  stills[#stills + 1] = row
+end
+if before then timeline:SetCurrentTimecode(before) end
+if not on_playhead_page and page then resolve:OpenPage(page) end
+return {{ok = true, timeline = timeline:GetName(), fps = fps, drop_frame = df, stills = stills}}
+"""
+
+
+@_snippet
+def snippet_render_status() -> str:
+    """List render jobs with status and progress, and whether Resolve is rendering."""
+    return f"""-- resolve-pilot: render_status
+{_PROJECT_PREAMBLE}local jobs = {{}}
+for _, job in ipairs(project:GetRenderJobList() or {{}}) do
+  local st = project:GetRenderJobStatus(job.JobId) or {{}}
+  local ms = st.EstimatedTimeRemainingInMs
+  jobs[#jobs + 1] = {{job_id = job.JobId, name = job.RenderJobName, timeline = job.TimelineName,
+    output = (job.TargetDir or "") .. {to_lua(os.sep)} .. (job.OutputFilename or ""),
+    status = st.JobStatus, percent = st.CompletionPercentage,
+    seconds_left = (ms and ms > 0) and ms / 1000 or nil, error = st.Error}}
+end
+return {{ok = true, rendering = project:IsRenderingInProgress() and true or false, jobs = jobs}}
+"""
+
+
 @_snippet
 def snippet_add_markers(markers: list[dict], replace_owned_prefix: str | None = None) -> str:
     """Add markers to the current timeline; positions in frames or seconds.

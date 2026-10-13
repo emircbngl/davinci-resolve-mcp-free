@@ -76,7 +76,9 @@ it in `channel`.
 Seeing: grab_frames (frames at given times), scene_frames (one frame per scene) and read_video \
 (speech next to the matching frames) return images you can look at; layout="grid" packs them \
 into one cheaper contact sheet. analyze_quality finds silence, black, frozen and loud/quiet \
-stretches. On macOS screenshot_resolve shows Resolve's own window.
+stretches. timeline_frames shows the current timeline as Resolve renders it (grades, LUTs, \
+titles, transitions) on any OS; use it to verify edits. On macOS screenshot_resolve shows \
+Resolve's own window.
 
 Editing loop:
 1. Analyze: probe_media, then detect_scenes / detect_beats / transcribe_audio (cached; returns \
@@ -87,8 +89,8 @@ sources, optional music bed). Plans are stored server-side; you get a plan_id.
 resending the plan. Every plan response lists `errors` and `warnings`; resolve them.
 4. export_fcpxml(plan_id), then import_timeline(path) when live, or tell the user \
 File > Import > Timeline.
-5. Verify with get_resolve_state(include_clips=true) (and screenshot_resolve on macOS) and \
-iterate.
+5. Verify with get_resolve_state(include_clips=true) and timeline_frames (look at the result), \
+and iterate. After queue_render(start=true), render_status(wait_seconds=...) says when it is done.
 
 Conventions: times are seconds unless a parameter says frames. Marker positions can be given \
 in seconds; Resolve converts them with the timeline's real frame rate. Paths must be absolute \
@@ -1327,6 +1329,87 @@ def menu_pick(
 
 def _screen_error(error: str, hint: str, **extra: Any) -> CallToolResult:
     return _content({"ok": False, "error": error, "hint": hint, **extra})
+
+
+class TimelinePosition(BaseModel):
+    seconds: float | None = Field(None, ge=0, description="Offset from the timeline start.")
+    frame: int | None = Field(None, ge=0, description="Frame offset from the timeline start.")
+
+    @model_validator(mode="after")
+    def _one(self) -> "TimelinePosition":
+        if (self.seconds is None) == (self.frame is None):
+            raise ValueError("give exactly one of seconds or frame")
+        return self
+
+
+@tool(_hints(read_only=False, idempotent=True), title="Timeline frames")
+def timeline_frames(
+    positions: Annotated[list[TimelinePosition], Field(min_length=1, max_length=24, description=(
+        "Where to look, as offsets from the timeline start (seconds or frame)."))],
+    layout: Layout = "separate",
+    width: FrameWidth = 640,
+    channel: Channel = "auto",
+) -> CallToolResult:
+    """See the edit the way Resolve renders it: grades, LUTs, titles, effects, transitions.
+
+    Use it to verify what you changed (a LUT, a title, a cut point). Unlike grab_frames,
+    which reads source files, this exports frames of the current timeline from inside
+    Resolve, on any OS. The playhead and page are put back afterwards. Needs a live
+    channel (bridge or Studio).
+    """
+    rows = [p.model_dump(exclude_none=True) for p in positions]
+    with tempfile.TemporaryDirectory(prefix="stills-", dir=state_dir("stills")) as tmp:
+        folder = Path(tmp)
+        out = control.perform(lua_lib.snippet_export_timeline_stills(rows, tmp),
+                              lambda: _studio().export_timeline_stills(rows, tmp),
+                              channel, timeout=30.0 + 5.0 * len(rows))
+        if out.get("channel") == "manual":
+            out["note"] = ("timeline_frames needs a live connection to Resolve; set up the bridge "
+                           "with setup_bridge, or use grab_frames on the source files instead.")
+            out.pop("lua_code", None)
+            out["ok"] = False
+            return _content(out)
+        frames, labels, dropped = [], [], []
+        for row in out.get("stills", []):
+            png = Path(row["path"]) if row.get("path") else None
+            if not row.get("ok") or png is None or not png.is_file():
+                dropped.append({"index": row["index"], "seconds": _r(row["seconds"]),
+                                "reason": row.get("error") or "no still was written"})
+                continue
+            jpg = folder / f"frame_{row['index']:03d}.jpg"
+            proc = subprocess.run(frame_grab._frame_cmd(png, 0.0, jpg, width),
+                                  capture_output=True, text=True, timeout=60)
+            if proc.returncode != 0 or not jpg.is_file():
+                dropped.append({"index": row["index"], "seconds": _r(row["seconds"]),
+                                "reason": "could not convert the still: " + proc.stderr.strip()[:200]})
+                continue
+            frames.append(frame_grab.Frame(index=row["index"], pts_seconds=row["seconds"], path=str(jpg)))
+            labels.append(f"{row['timecode']} (t={row['seconds']:.2f}s, frame {row['frame']})")
+        header = {"ok": True, "channel": out["channel"], "timeline": out.get("timeline"),
+                  "fps": out.get("fps"), "drop_frame": out.get("drop_frame"), "layout": layout,
+                  "requested": len(rows), "dropped": dropped}
+        return _frames_result(header, frames, labels, layout, folder)
+
+
+@tool(READ, title="Render status")
+def render_status(
+    wait_seconds: Annotated[float, Field(ge=0, le=3600, description=(
+        "Keep polling until Resolve stops rendering or this many seconds pass; 0 = just look."))] = 0.0,
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """Render queue: every job's status, percent done and time left, and whether Resolve is
+    rendering. Call after queue_render(start=true) to know when the file is ready."""
+    import time
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        out = control.perform(lua_lib.snippet_render_status(),
+                              lambda: _studio().render_jobs_status(), channel)
+        if out.get("channel") == "manual" or not out.get("rendering") or time.monotonic() >= deadline:
+            break
+        time.sleep(min(2.0, max(0.1, deadline - time.monotonic())))
+    if out.get("channel") != "manual":
+        out["done"] = not out.get("rendering")
+    return out
 
 
 @tool(READ, title="Screenshot Resolve (macOS)")

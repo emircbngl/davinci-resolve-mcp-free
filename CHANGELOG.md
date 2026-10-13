@@ -25,6 +25,10 @@ Verified live on Resolve 20.3 (Free, macOS): screenshot_resolve, grab_frames, sc
 - Static check that the bridge and every snippet read no undefined Lua globals (a deleted variable still referenced) and leak none; a stale stop file must not end a freshly started bridge.
 - Frames, contact sheets, scene sampling, read_video pairing and quality detectors against real ffmpeg on generated media; marker replacement through the live bridge; images over a real MCP client session.
 
+### Added
+- `timeline_frames`: see the edit as Resolve renders it — grades, LUTs, titles, transitions — on any OS. Exports stills of the current timeline at given seconds or frames (drop-frame aware), returns them like `grab_frames` (separate or as a contact sheet), and puts the playhead and page back. Verified live on Resolve 20.3 Free.
+- `render_status`: every render job's status, percent and time left, and whether Resolve is rendering; `wait_seconds` polls until it is done.
+
 ### Resolve 21.1+ Free
 - The bridge no longer needs `io`, `os.execute`, `package` or `debug`, which Resolve 21.1+ Free removed from its Lua. When `io` is missing it reads and writes its files through LuaJIT's `ffi` (a global in Resolve), takes the path separator from the MCP server, and the server creates the bridge folder. `rp.file_access` says which one is in use. Tests run the bridge in an emulated 21.1 sandbox. Not yet tried on a real 21.1 install.
 - `setup_bridge(install)` returns `console_command`, a one-line `dofile(...)` to paste into the Console when the Scripts menu entry does nothing, and lists older resolve-pilot bridge scripts left in the same menu.

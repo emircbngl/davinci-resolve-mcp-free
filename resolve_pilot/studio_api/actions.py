@@ -6,6 +6,7 @@ rough cuts) belongs in the editorial layer, which is API-edition agnostic.
 """
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from resolve_pilot.studio_api.bridge import get_resolve
@@ -346,3 +347,74 @@ def apply_lut_report(lut_path: str, track: int = 1, node_index: int = 1) -> dict
         out["error"] = ("Resolve rejected the LUT for every clip. It must sit inside Resolve's LUT "
                         "folder, and the node index must exist on each clip.")
     return out
+
+
+_PLAYHEAD_PAGES = ("cut", "edit", "color", "fairlight", "deliver")
+
+
+def frames_to_timecode(total: int, fps: float, drop_frame: bool) -> str:
+    """Frame index -> timecode, drop-frame aware (same rule as the Lua snippet)."""
+    base = int(fps + 0.5)
+    if drop_frame:
+        drop = base // 15
+        per10, per1 = base * 600 - drop * 9, base * 60 - drop
+        tens, rem = divmod(total, per10)
+        total += drop * 9 * tens
+        if rem > drop:
+            total += drop * ((rem - drop) // per1)
+    s = total // base
+    sep = ";" if drop_frame else ":"
+    return f"{s // 3600:02d}:{s // 60 % 60:02d}:{s % 60:02d}{sep}{total % base:02d}"
+
+
+def export_timeline_stills(positions: list[dict], out_dir: str) -> dict[str, Any]:
+    """Studio twin of snippet_export_timeline_stills."""
+    resolve = get_resolve()
+    project = _current_project()
+    tl = _current_timeline()
+    fps = _timeline_fps(project, tl)
+    df = str(tl.GetSetting("timelineDropFrameTimecode")) == "1"
+    start, last = tl.GetStartFrame(), tl.GetEndFrame() - 1
+    page = resolve.GetCurrentPage()
+    switched = page not in _PLAYHEAD_PAGES
+    if switched:
+        resolve.OpenPage("edit")
+    before = tl.GetCurrentTimecode()
+    stills = []
+    try:
+        for i, pos in enumerate(positions):
+            offset = int(pos["frame"]) if pos.get("frame") is not None else int(round(pos["seconds"] * fps))
+            row: dict[str, Any] = {"index": i, "frame": offset, "seconds": offset / fps}
+            if offset < 0 or start + offset > last:
+                row.update(ok=False, error=f"outside the timeline (0-{last - start} frames)")
+            else:
+                row["timecode"] = frames_to_timecode(start + offset, fps, df)
+                if not tl.SetCurrentTimecode(row["timecode"]):
+                    row.update(ok=False, error=f"Resolve refused to move the playhead to {row['timecode']}")
+                else:
+                    row["path"] = os.path.join(out_dir, f"still_{i:03d}.png")
+                    row["ok"] = bool(project.ExportCurrentFrameAsStill(row["path"]))
+                    if not row["ok"]:
+                        row["error"] = "ExportCurrentFrameAsStill failed"
+            stills.append(row)
+    finally:
+        if before:
+            tl.SetCurrentTimecode(before)
+        if switched and page:
+            resolve.OpenPage(page)
+    return {"ok": True, "timeline": tl.GetName(), "fps": fps, "drop_frame": df, "stills": stills}
+
+
+def render_jobs_status() -> dict[str, Any]:
+    """Every render job with its status, plus whether Resolve is rendering now."""
+    project = _current_project()
+    jobs = []
+    for job in project.GetRenderJobList() or []:
+        status = project.GetRenderJobStatus(job.get("JobId")) or {}
+        jobs.append({"job_id": job.get("JobId"), "name": job.get("RenderJobName"),
+                     "timeline": job.get("TimelineName"),
+                     "output": os.path.join(job.get("TargetDir") or "", job.get("OutputFilename") or ""),
+                     "status": status.get("JobStatus"), "percent": status.get("CompletionPercentage"),
+                     "seconds_left": (status.get("EstimatedTimeRemainingInMs") or 0) / 1000 or None,
+                     "error": status.get("Error") or None})
+    return {"ok": True, "rendering": bool(project.IsRenderingInProgress()), "jobs": jobs}

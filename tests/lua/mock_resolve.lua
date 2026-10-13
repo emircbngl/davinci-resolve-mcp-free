@@ -74,9 +74,10 @@ function Timeline:DeleteMarkerByCustomData(data)
   return false
 end
 function Timeline:GetStartTimecode() return "01:00:00:00" end
-function Timeline:GetCurrentTimecode() return "01:00:00:00" end
 function Timeline:Export(path, kind) return true end
 function Timeline:GetCurrentVideoItem() return self.tracks.video[1][1] end
+function Timeline:GetCurrentTimecode() return self.playhead or "01:00:00:00" end
+function Timeline:SetCurrentTimecode(tc) self.playhead = tc; return true end
 
 -- MediaPool / Project ------------------------------------------------------------
 local Project = {}
@@ -126,6 +127,31 @@ function Project:AddRenderJob()
   return id
 end
 function Project:StartRendering() self.rendering = true; return true end
+function Project:IsRenderingInProgress() return self.rendering == true end
+function Project:GetRenderJobList()
+  local out = {}
+  for _, id in ipairs(self.render_jobs) do
+    out[#out + 1] = { JobId = id, RenderJobName = id, TimelineName = "Main", TargetDir = "/out",
+      OutputFilename = id .. ".mov" }
+  end
+  return out
+end
+function Project:GetRenderJobStatus(id)
+  return { JobStatus = self.rendering and "Rendering" or "Ready", CompletionPercentage = self.rendering and 40 or 0,
+    EstimatedTimeRemainingInMs = self.rendering and 12000 or nil }
+end
+-- Copies mock.png_path (a real PNG set by the test) and records the playhead it saw.
+function Project:ExportCurrentFrameAsStill(path)
+  local src = mock.png_path and io.open(mock.png_path, "rb")
+  local f = io.open(path, "wb")
+  if not (src and f) then return false end
+  f:write(src:read("*a"))
+  src:close()
+  f:close()
+  self.stills = self.stills or {}
+  table.insert(self.stills, self.current:GetCurrentTimecode())
+  return true
+end
 
 -- Resolve ------------------------------------------------------------------------
 local project = Project.new("Test Project")

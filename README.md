@@ -85,10 +85,10 @@ After connecting, ask Claude things like:
 |---|---|
 | Session | `resolve_pilot_status` · `get_workflow_guide` · `setup_bridge` |
 | Analyze | `probe_media` · `detect_scenes` · `detect_beats` · `transcribe_audio` (cached, background jobs) · `analyze_quality` (silence, black, freeze, loud/quiet) |
-| See | `grab_frames` · `scene_frames` · `read_video` (speech + frames) · `screenshot_resolve` (macOS) — images Claude looks at |
+| See | `grab_frames` · `scene_frames` · `read_video` (speech + frames) · `screenshot_resolve` (macOS) · `timeline_frames` (the edit as Resolve renders it, any OS) — images Claude looks at |
 | Plan | `plan_from_transcript` · `plan_from_scenes` · `create_plan` · `get_plan` · `edit_plan` |
 | Export | `export_fcpxml` · `export_srt` |
-| Resolve (auto-routed) | `get_resolve_state` · `import_timeline` · `add_markers` · `add_quality_markers` · `set_clip_color` · `apply_lut` · `queue_render` · `open_page` |
+| Resolve (auto-routed) | `get_resolve_state` · `import_timeline` · `add_markers` · `add_quality_markers` · `set_clip_color` · `apply_lut` · `queue_render` · `render_status` · `open_page` |
 | Lua | `run_lua` (live) · `list_lua_snippets` · `render_lua_snippet` (paste) |
 | macOS UI | `send_keystroke` · `menu_pick` · `open_ai_feature` |
 
@@ -96,7 +96,7 @@ Designed for agents:
 - **Plans live on the server.** Claude gets a `plan_id` and refines the cut with small operations (`keep`, `trim`, `move`, `insert`, `set`, …) instead of re-sending a whole timeline as JSON.
 - **Every plan is validated** — clips past the end of their source, dissolves without handles, reused footage, fps mismatches, a music bed that ends early — and the warnings come back with each response.
 - **Transcripts are cached** and numbered; Claude picks segments by index. Long transcriptions keep running in the background instead of timing out.
-- **Read → act → verify.** `get_resolve_state` shows what actually landed in Resolve; on macOS `screenshot_resolve` shows what the user sees.
+- **Read → act → verify.** `get_resolve_state` shows what actually landed in Resolve; `timeline_frames` shows the edit as rendered (grades, titles, transitions); on macOS `screenshot_resolve` shows what the user sees.
 - **Claude can look at footage.** Frames come back as images (one per timestamp, or a single contact sheet to save tokens), so shot choices are made on what is actually in the picture.
 - **Errors explain themselves** — what failed and what to do next.
 - **Workflow guides** (rough cut, subtitles, music video, color grade, markers, live control + a Resolve Lua API cheat sheet) are served over MCP, as a tool and as prompts.
