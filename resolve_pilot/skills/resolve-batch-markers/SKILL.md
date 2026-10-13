@@ -34,6 +34,19 @@ Places markers on the current timeline in DaVinci Resolve, Free or Studio.
    - `channel` manual: give the user `lua_code` and `instructions` verbatim ("Workspace › Console › Lua tab, paste, Enter"). The Console prints `[resolve-pilot] Added N / N markers`.
 5. **Verify** when live: `get_resolve_state(include_markers=true)`.
 
+## Quality markers
+
+To flag problems in a recording (silence, black, frozen picture, loud or quiet audio):
+```
+add_quality_markers(path="/abs/interview.mov", kinds=["silence", "black", "freeze"], min_seconds=1.0)
+```
+It analyzes the file (or takes `spans` you already got from `analyze_quality`) and places colored
+markers with their length: silence Blue, black Cocoa, freeze Lavender, loud Red, quiet Sky. The
+spans are file times; when the clip does not start the timeline at its first frame, pass
+`timeline_start_seconds`, `source_in_seconds` (and `source_out_seconds`) from
+`get_resolve_state(include_clips=true)`. Re-running replaces the markers it placed for that file
+earlier and never touches other markers (`replace_previous=true`).
+
 ## Marker colors
 
 Blue, Cyan, Green, Yellow, Red, Pink, Purple, Fuchsia, Rose, Lavender, Sky, Mint, Lemon, Sand, Cocoa, Cream.

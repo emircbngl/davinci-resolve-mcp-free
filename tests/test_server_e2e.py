@@ -164,3 +164,24 @@ async def _session(media, home: Path, tmp_path: Path) -> None:
             assert (await agent.call("open_page", page="color"))["ok"] is True
         finally:
             stop_bridge(proc)
+
+
+def test_agent_sees_frames_as_images(media, isolated_home):
+    asyncio.run(_frames_session(media, isolated_home))
+
+
+async def _frames_session(media, home: Path) -> None:
+    async with connect(home) as (agent, _init):
+        res = await agent.s.call_tool("grab_frames", {"path": str(media["clip"]), "at_seconds": [1, 4, 99]})
+        assert not _is_error(res), _text(res)
+        header = json.loads(res.content[0].text)
+        assert header["returned"] == 2 and header["dropped"][0]["index"] == 2
+        kinds = [c.type for c in res.content]
+        assert kinds == ["text", "text", "image", "text", "image"]
+        image = res.content[2]
+        assert (getattr(image, "mimeType", None) or image.mime_type) == "image/jpeg"
+
+        res = await agent.s.call_tool("scene_frames", {"path": str(media["clip"])})
+        assert not _is_error(res), _text(res)
+        assert json.loads(res.content[0].text)["scene_count"] == 2
+        assert [c.type for c in res.content] == ["text", "text", "image"]

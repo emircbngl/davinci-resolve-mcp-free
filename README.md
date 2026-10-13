@@ -9,7 +9,7 @@
 | **Live Lua bridge** | Claude reads and changes the open project directly: import timelines, add markers, color clips, apply LUTs, queue renders, run any Lua | ✅ | ✅ |
 | **FCPXML export** | Build a rough cut outside Resolve, import via `File > Import > Timeline` (or automatically through the bridge) | ✅ | ✅ |
 | **Lua snippets** | Ready-to-paste Console snippets when nothing live is connected | ✅ | ✅ |
-| **UI automation** (macOS) | Page switching, menu items, Magic Mask & other AI tools via the Accessibility API | ✅ | ✅ |
+| **UI automation** (macOS) | Page switching, menu items, Magic Mask & other AI tools via the Accessibility API; screenshots of the Resolve window | ✅ | ✅ |
 | **Python scripting API** | Direct DaVinciResolveScript control | ❌ | ✅ |
 
 Every Resolve action picks the best channel by itself — Studio API, then the live bridge, then paste-able Lua — and tells Claude which one it used.
@@ -76,16 +76,19 @@ After connecting, ask Claude things like:
 - *"Color-code V2 orange and apply `Kodak2383.cube` to V1."*
 - *"What's on my current timeline? Give every source file its own clip color."*
 - *"Make a vertical 9:16 rough cut from this 30-min talk."*
+- *"Show me what's in this B-roll folder before we pick shots."* (Claude looks at a frame per scene)
+- *"Find the dead air and black frames in this recording and mark them on the timeline."*
 
 ## Tools
 
 | Group | Tools |
 |---|---|
 | Session | `resolve_pilot_status` · `get_workflow_guide` · `setup_bridge` |
-| Analyze | `probe_media` · `detect_scenes` · `detect_beats` · `transcribe_audio` (cached, background jobs) |
+| Analyze | `probe_media` · `detect_scenes` · `detect_beats` · `transcribe_audio` (cached, background jobs) · `analyze_quality` (silence, black, freeze, loud/quiet) |
+| See | `grab_frames` · `scene_frames` · `read_video` (speech + frames) · `screenshot_resolve` (macOS) — images Claude looks at |
 | Plan | `plan_from_transcript` · `plan_from_scenes` · `create_plan` · `get_plan` · `edit_plan` |
 | Export | `export_fcpxml` · `export_srt` |
-| Resolve (auto-routed) | `get_resolve_state` · `import_timeline` · `add_markers` · `set_clip_color` · `apply_lut` · `queue_render` · `open_page` |
+| Resolve (auto-routed) | `get_resolve_state` · `import_timeline` · `add_markers` · `add_quality_markers` · `set_clip_color` · `apply_lut` · `queue_render` · `open_page` |
 | Lua | `run_lua` (live) · `list_lua_snippets` · `render_lua_snippet` (paste) |
 | macOS UI | `send_keystroke` · `menu_pick` · `open_ai_feature` |
 
@@ -93,7 +96,8 @@ Designed for agents:
 - **Plans live on the server.** Claude gets a `plan_id` and refines the cut with small operations (`keep`, `trim`, `move`, `insert`, `set`, …) instead of re-sending a whole timeline as JSON.
 - **Every plan is validated** — clips past the end of their source, dissolves without handles, reused footage, fps mismatches, a music bed that ends early — and the warnings come back with each response.
 - **Transcripts are cached** and numbered; Claude picks segments by index. Long transcriptions keep running in the background instead of timing out.
-- **Read → act → verify.** `get_resolve_state` shows what actually landed in Resolve.
+- **Read → act → verify.** `get_resolve_state` shows what actually landed in Resolve; on macOS `screenshot_resolve` shows what the user sees.
+- **Claude can look at footage.** Frames come back as images (one per timestamp, or a single contact sheet to save tokens), so shot choices are made on what is actually in the picture.
 - **Errors explain themselves** — what failed and what to do next.
 - **Workflow guides** (rough cut, subtitles, music video, color grade, markers, live control + a Resolve Lua API cheat sheet) are served over MCP, as a tool and as prompts.
 
@@ -101,14 +105,14 @@ Designed for agents:
 
 ```
 resolve_pilot/
-├── analyzers/        ffprobe, scene + beat detection
+├── analyzers/        ffprobe, scene + beat detection, frames + contact sheets, quality spans
 ├── transcribe/       Whisper (mlx / faster-whisper) + transcript cache
 ├── editorial/        rough-cut plans, edit operations, validation, plan store
 ├── exporters/        FCPXML 1.10 + SRT writers
 ├── bridge/           live Lua bridge: bridge.lua (runs in Resolve) + Python client
 ├── lua_snippets/     parameterized Lua for the Resolve Console
 ├── studio_api/       Resolve Studio's Python API
-├── ui_automation/    osascript + macOS Accessibility
+├── ui_automation/    osascript + macOS Accessibility, Resolve window capture
 ├── control.py        channel routing: Studio API → bridge → paste-able Lua
 ├── skills/           workflow guides (served over MCP)
 └── mcp_server.py     MCP entry point (mcp SDK 1.x and 2.x)

@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+Focus: the agent can *look* — at footage, and at Resolve itself — and find problem stretches.
+
+Verified live on Resolve 20.3 (Free, macOS): screenshot_resolve, grab_frames, scene_frames, read_video, analyze_quality and add_quality_markers (including re-runs replacing only their own markers).
+
+### Added
+- **Seeing footage** — results are images the model looks at, on mcp 1.x and 2.x:
+  - `grab_frames`: frames at given times, separately or as one contact sheet (`layout="grid"`).
+  - `scene_frames`: one representative frame per detected scene (spread evenly over long videos).
+  - `read_video`: each stretch of speech next to the frame on screen while it is said, with the transcript segment indices `plan_from_transcript` takes. Reuses the transcript cache (`path` or `transcript_id`).
+  - Timestamps that cannot be served (past the end, over `max_frames`) are reported in `dropped` / `missing_frames` with a reason instead of failing or silently disappearing.
+- `analyze_quality`: silence, black, frozen picture, and audio that is loud or quiet *for its surroundings* (rolling local median), with kind / length filters.
+- `add_quality_markers`: those spans as colored timeline markers, through the same Studio API → bridge → paste-Lua routing as `add_markers`, mapped through the clip's timeline position and source in/out. Re-running replaces only the markers it placed for that file. `add_markers` rows (and the `add_markers` snippet) accept `duration_seconds`, `custom_data` and a `replace_owned_prefix`.
+- `screenshot_resolve` (macOS): the Resolve window as an image. Missing Screen Recording permission, minimized windows or a missing Quartz module (`.[ui]` extra, optional) give `ok: false` with what to do — never a blank or stale picture.
+- `resolve_pilot_status` reports `see_footage` and `resolve_screenshots` capabilities.
+
+### Fixed
+- macOS UI automation no longer types or clicks into another app: `send_keystroke`, `menu_pick` and the page shortcuts act only after verifying Resolve is frontmost, keystrokes are scoped to Resolve's process, unknown modifier names are rejected (`opt` / `ctl` accepted) and menu labels with quotes are escaped. Dialog-opening AI features report `completed: false` plus the step the user still has to take.
+- `probe_media` can no longer hang forever on an unreadable file.
+
+### Tests
+- Static check that the bridge and every snippet read no undefined Lua globals (a deleted variable still referenced) and leak none; a stale stop file must not end a freshly started bridge.
+- Frames, contact sheets, scene sampling, read_video pairing and quality detectors against real ffmpeg on generated media; marker replacement through the live bridge; images over a real MCP client session.
+
+### Fixed (found in the live run)
+- `analyze_quality` flagged sub-dB wobble on a steady tone as "loud": loud/quiet now also need a 6 dB departure from the local level.
+- Runs of the same kind were split when a span of another kind sat between them; merging is now per kind.
+- Freeze spans inside black and quiet spans inside silence are dropped (they repeat the stronger finding).
+- `add_quality_markers`: spans starting on the same frame become one marker ("Black + Loud") instead of Resolve skipping the second.
+- `read_video` on an audio-only file failed with an ffmpeg error per segment; it now returns the speech with a note that there are no frames.
+
 ## 0.2.0
 
 Focus: an agent connected to resolve-pilot can now *see* Resolve, act on it, verify the result and iterate — in the Free edition too — while spending fewer tokens.

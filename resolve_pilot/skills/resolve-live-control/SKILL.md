@@ -25,7 +25,7 @@ The bridge exits after 60 idle minutes (configurable), when a newer bridge start
 
 1. **Read**: `get_resolve_state(include_clips=true, include_markers=true)`.
 2. **Act** with a dedicated tool when one exists — `import_timeline`, `add_markers`, `set_clip_color`, `apply_lut`, `queue_render`, `open_page` — they return structured results on every channel.
-3. **Verify**: read the state again and compare with what you intended. Never report success you have not seen.
+3. **Verify**: read the state again and compare with what you intended. Never report success you have not seen. On macOS, `screenshot_resolve` shows the Resolve window itself (dialogs, the viewer, which page is open).
 
 ## 3. run_lua
 

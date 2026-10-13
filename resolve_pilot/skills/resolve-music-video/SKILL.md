@@ -36,7 +36,7 @@ detect_beats(song, min_seconds_between=0.18)
 **Snap the grid to frames first** to avoid drift: with timeline fps `F`, `f_i = round(t_i × F)`; each clip lasts `(f_{i+1} − f_i) / F` seconds.
 
 ### 3. Analyze the footage
-For each file: `probe_media(file)` and `detect_scenes(file, threshold=15)`. Build a shot list of `(source_path, in, out)` ranges between scene cuts so you never cut mid-action. Prefer high-score scenes (more visually distinct).
+For each file: `probe_media(file)` and `detect_scenes(file, threshold=15)`; `scene_frames(file, threshold=15)` shows what each scene looks like. Build a shot list of `(source_path, in, out)` ranges between scene cuts so you never cut mid-action. Prefer high-score scenes (more visually distinct).
 
 ### 4. Assemble
 For each interval of the grid, pick a shot at least as long as the interval (prefer unused shots), and take `duration_seconds = interval` from a strong point in it. Then:

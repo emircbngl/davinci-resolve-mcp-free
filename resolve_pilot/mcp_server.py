@@ -5,11 +5,13 @@ Claude Code can drive a video editing session end-to-end without an API key.
 
 Tool groups:
 - session:  resolve_pilot_status, get_workflow_guide, setup_bridge
-- analyze:  probe_media, detect_scenes, detect_beats, transcribe_audio
+- analyze:  probe_media, detect_scenes, detect_beats, transcribe_audio, analyze_quality
+- see:      grab_frames, scene_frames, read_video, screenshot_resolve (macOS)
 - plan:     plan_from_transcript, plan_from_scenes, create_plan, get_plan, edit_plan
 - export:   export_fcpxml, export_srt
-- resolve:  get_resolve_state, import_timeline, add_markers, set_clip_color, apply_lut,
-            queue_render, open_page, run_lua, list_lua_snippets, render_lua_snippet
+- resolve:  get_resolve_state, import_timeline, add_markers, add_quality_markers,
+            set_clip_color, apply_lut, queue_render, open_page, run_lua,
+            list_lua_snippets, render_lua_snippet
 - macOS UI: send_keystroke, menu_pick, open_ai_feature
 
 Run as:
@@ -18,13 +20,18 @@ or via Claude Desktop config (see README).
 """
 # No `from __future__ import annotations`: the MCP SDK builds tool schemas
 # from these signatures, so keep the annotations as real objects.
+import base64
 import functools
+import hashlib
+import json
+import math
 import os
 import platform
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -37,9 +44,10 @@ try:  # mcp >= 2.0 renamed FastMCP to MCPServer
 except ImportError:  # mcp 1.x
     from mcp.server.fastmcp import FastMCP as _Server
     from mcp.server.fastmcp.exceptions import ToolError
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 
 from resolve_pilot import __version__, analyzers, bridge, control, luts
+from resolve_pilot.analyzers import frames as frame_grab
 from resolve_pilot._paths import state_dir
 from resolve_pilot.editorial import ops as plan_ops
 from resolve_pilot.editorial import roughcut, store
@@ -61,19 +69,26 @@ it once per session; setup_bridge installs it into Workspace > Scripts.
 - manual: nothing live. Resolve actions return `lua_code` + `instructions`; relay them to the \
 user verbatim and ask them to paste it into Workspace > Console. Offer setup_bridge if they \
 want hands-free control.
-Resolve actions (get_resolve_state, import_timeline, add_markers, set_clip_color, apply_lut, \
-queue_render, open_page) choose the channel automatically and report it in `channel`.
+Resolve actions (get_resolve_state, import_timeline, add_markers, add_quality_markers, \
+set_clip_color, apply_lut, queue_render, open_page) choose the channel automatically and report \
+it in `channel`.
+
+Seeing: grab_frames (frames at given times), scene_frames (one frame per scene) and read_video \
+(speech next to the matching frames) return images you can look at; layout="grid" packs them \
+into one cheaper contact sheet. analyze_quality finds silence, black, frozen and loud/quiet \
+stretches. On macOS screenshot_resolve shows Resolve's own window.
 
 Editing loop:
 1. Analyze: probe_media, then detect_scenes / detect_beats / transcribe_audio (cached; returns \
-numbered segments).
+numbered segments). Look before choosing shots: scene_frames, read_video, grab_frames.
 2. Draft: plan_from_transcript (pick segment_indices), plan_from_scenes, or create_plan (any \
 sources, optional music bed). Plans are stored server-side; you get a plan_id.
 3. Refine with edit_plan operations (keep/remove/move/trim/update/insert/set) instead of \
 resending the plan. Every plan response lists `errors` and `warnings`; resolve them.
 4. export_fcpxml(plan_id), then import_timeline(path) when live, or tell the user \
 File > Import > Timeline.
-5. Verify with get_resolve_state(include_clips=true) and iterate.
+5. Verify with get_resolve_state(include_clips=true) (and screenshot_resolve on macOS) and \
+iterate.
 
 Conventions: times are seconds unless a parameter says frames. Marker positions can be given \
 in seconds; Resolve converts them with the timeline's real frame rate. Paths must be absolute \
@@ -148,6 +163,30 @@ def _r(x: float | None, nd: int = 3) -> float | None:
     return None if x is None else round(float(x), nd)
 
 
+_MIME = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
+
+
+def _content(header: dict[str, Any], *items: "str | Path") -> CallToolResult:
+    """A tool result the model can look at: a JSON header, then text labels and images.
+
+    Images are read into the result right away, so their temp files can be deleted
+    when the tool returns. Built from plain content blocks, which mcp 1.x and 2.x
+    both pass through unchanged (their Image helpers differ).
+    """
+    blocks: list[Any] = [TextContent(type="text", text=json.dumps(header, ensure_ascii=False, indent=2))]
+    for item in items:
+        if isinstance(item, Path):
+            mime = _MIME.get(item.suffix.lower())
+            if mime is None:
+                raise ValueError(f"Unsupported image type: {item.name}")
+            data = base64.b64encode(item.read_bytes()).decode("ascii")
+            # Alias field names validate on both SDKs (mimeType in 1.x, mime_type in 2.x).
+            blocks.append(ImageContent.model_validate({"type": "image", "data": data, "mimeType": mime}))
+        else:
+            blocks.append(TextContent(type="text", text=str(item)))
+    return CallToolResult.model_validate({"content": blocks})
+
+
 def _platform_supports_ui() -> bool:
     return platform.system() == "Darwin"
 
@@ -171,6 +210,14 @@ def _resolve_running() -> bool | None:
         return None
 
 
+def _has_quartz() -> bool:
+    import importlib.util
+    try:
+        return importlib.util.find_spec("Quartz") is not None
+    except (ImportError, ValueError):
+        return False
+
+
 @tool(READ, title="Status and capabilities")
 def resolve_pilot_status() -> dict[str, Any]:
     """Report what resolve-pilot can do on this machine and how it reaches Resolve.
@@ -191,7 +238,7 @@ def resolve_pilot_status() -> dict[str, Any]:
     next_steps: list[str] = []
     if not has_ffmpeg:
         next_steps.append("Install ffmpeg (macOS: brew install ffmpeg, Windows: winget install ffmpeg, "
-                          "Linux: apt install ffmpeg); probe/scene/beat/transcribe need it.")
+                          "Linux: apt install ffmpeg); media analysis and frames need it.")
     if channel == "manual":
         next_steps.append(
             "No live connection to Resolve. For hands-free control (works in Resolve Free): call "
@@ -222,7 +269,9 @@ def resolve_pilot_status() -> dict[str, Any]:
             "fcpxml_srt_export": True,
             "live_resolve_control": channel != "manual",
             "lua_for_manual_paste": True,
+            "see_footage": has_ffmpeg,
             "macos_ui_automation": _platform_supports_ui(),
+            "resolve_screenshots": _platform_supports_ui() and _has_quartz(),
         },
         "next_steps": next_steps,
     }
@@ -340,6 +389,145 @@ def detect_beats(
     }
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# Seeing footage: frames returned as images the model can look at
+# ────────────────────────────────────────────────────────────────────────────
+
+FrameWidth = Annotated[int, Field(ge=64, le=1920, description=(
+    "Pixel width of each frame (height keeps the aspect). Smaller is cheaper to look at."))]
+Layout = Annotated[Literal["separate", "grid"], Field(description=(
+    "separate: one image per frame with its own label. grid: one contact sheet "
+    "(cheaper; cells read left to right, top to bottom)."))]
+
+
+def _frames_result(header: dict[str, Any], frames: list, labels: list[str], layout: str,
+                   folder: Path) -> CallToolResult:
+    """Header + labelled frames, separately or as one contact sheet."""
+    header["returned"] = len(frames)
+    if not frames:
+        header["ok"] = False
+        header["hint"] = "No frame could be extracted; see `dropped` for each timestamp's reason."
+        return _content(header)
+    if layout == "grid":
+        sheet = folder / "contact_sheet.jpg"
+        cols, rows = frame_grab.contact_sheet(frames, sheet)
+        header["grid"] = {"cols": cols, "rows": rows}
+        order = "; ".join(f"cell {i + 1}: {label}" for i, label in enumerate(labels))
+        return _content(header, f"Contact sheet {cols}x{rows}, reading order - {order}", sheet)
+    items: list[Any] = []
+    for frame, label in zip(frames, labels):
+        items.extend([label, Path(frame.path)])
+    return _content(header, *items)
+
+
+@tool(READ, title="Grab frames")
+def grab_frames(
+    path: str,
+    at_seconds: Annotated[list[float], Field(min_length=1, description="Timestamps in seconds from the start of the file.")],
+    layout: Layout = "separate",
+    width: FrameWidth = 480,
+    max_frames: Annotated[int, Field(ge=1, le=48, description="Extra timestamps are reported in `dropped`.")] = 12,
+) -> CallToolResult:
+    """Look at a video: return the frames at the given times as images.
+
+    Use it to check a shot before choosing it, verify a cut point, or read on-screen
+    text. Timestamps that cannot be served (past the end, over max_frames) are listed in
+    `dropped` with a reason instead of failing the call.
+    """
+    with tempfile.TemporaryDirectory(prefix="resolve-pilot-frames-") as tmp:
+        frames, dropped, folder = frame_grab.extract_frames(path, at_seconds, width, max_frames, tmp)
+        header = {"ok": True, "path": str(Path(path).expanduser().resolve()), "layout": layout,
+                  "requested": len(at_seconds), "dropped": dropped}
+        labels = [f"t={f.pts_seconds:.2f}s" for f in frames]
+        return _frames_result(header, frames, labels, layout, folder)
+
+
+@tool(READ, title="Scene frames")
+def scene_frames(
+    path: str,
+    threshold: Annotated[float, Field(ge=0, le=100, description="As in detect_scenes: lower = more cuts.")] = 10.0,
+    layout: Layout = "grid",
+    width: FrameWidth = 320,
+    max_frames: Annotated[int, Field(ge=1, le=48, description=(
+        "At most this many scenes are shown, spread evenly over the video."))] = 16,
+    offset_seconds: Annotated[float, Field(ge=0, description=(
+        "Sample this long after each cut (capped at the scene's middle), past transitions."))] = 0.4,
+) -> CallToolResult:
+    """See what is in a video: detect its scenes and return one representative frame per scene.
+
+    The fastest way to get a visual overview of unfamiliar footage. `scenes` lists every
+    scene's start/end; the frames show a sample of them (all when they fit max_frames).
+    """
+    info = analyzers.probe_media(path)
+    if not info.video_codec:
+        raise ValueError(f"{Path(path).name} has no video stream.")
+    cuts = analyzers.detect_scenes(path, threshold=threshold)
+    starts = [0.0] + [c.pts_seconds for c in cuts if 0.0 < c.pts_seconds < info.duration_seconds]
+    ends = starts[1:] + [info.duration_seconds]
+    points = frame_grab.sample_points(starts, offset_seconds, info.duration_seconds)
+    shown = frame_grab.pick_evenly(len(starts), max_frames)
+    scenes = [{"scene": i, "start": _r(starts[i]), "end": _r(ends[i])} for i in range(len(starts))]
+    with tempfile.TemporaryDirectory(prefix="resolve-pilot-scenes-") as tmp:
+        frames, dropped, folder = frame_grab.extract_frames(
+            path, [points[i] for i in shown], width, len(shown), tmp)
+        for d in dropped:
+            d["scene"] = shown[d.pop("index")]
+        header = {
+            "ok": True, "path": str(Path(path).expanduser().resolve()), "layout": layout,
+            "scene_count": len(starts), "threshold": threshold, "scenes": scenes,
+            "shown_scenes": [shown[f.index] for f in frames], "dropped": dropped,
+        }
+        labels = [f"scene {shown[f.index]}: {starts[shown[f.index]]:.2f}-{ends[shown[f.index]]:.2f}s "
+                  f"(frame at {f.pts_seconds:.2f}s)" for f in frames]
+        return _frames_result(header, frames, labels, layout, folder)
+
+
+QualityKind = Literal["silence", "black", "freeze", "loud", "quiet"]
+
+
+def _quality_spans(path: str, kinds: list[str] | None, min_seconds: float, window_seconds: float,
+                   merge_gap_seconds: float) -> tuple[list, dict[str, Any]]:
+    spans, meta = analyzers.analyze_quality(path, window_seconds=window_seconds,
+                                            merge_gap_seconds=merge_gap_seconds)
+    wanted = set(kinds or analyzers.quality.KINDS)
+    return [s for s in spans if s.kind in wanted and s.end - s.start >= min_seconds], meta
+
+
+@tool(READ, title="Analyze quality")
+def analyze_quality(
+    path: str,
+    kinds: Annotated[list[QualityKind] | None, Field(description="Only these kinds; omit for all.")] = None,
+    min_seconds: Annotated[float, Field(ge=0, description="Drop spans shorter than this.")] = 0.0,
+    window_seconds: Annotated[float, Field(gt=0, le=600, description=(
+        "loud/quiet are judged against the median level of this window around each moment."))] = 30.0,
+    merge_gap_seconds: Annotated[float, Field(ge=0, le=10, description="Join same-kind spans closer than this.")] = 0.5,
+    limit: Annotated[int, Field(ge=1, description="Return at most this many spans (the strongest and longest).")] = 200,
+) -> dict[str, Any]:
+    """Find questionable or notable stretches: silence, black frames, frozen picture,
+    and audio that is unusually loud or quiet for its surroundings.
+
+    Times are seconds in the media file. Use it to skip dead air and black/frozen
+    footage when planning a cut, or turn the spans into timeline markers with
+    add_quality_markers. Detectors missing from this ffmpeg build are listed in
+    `detectors_skipped`.
+    """
+    spans, meta = _quality_spans(path, kinds, min_seconds, window_seconds, merge_gap_seconds)
+    kept = sorted(spans, key=lambda s: -(s.score * (s.end - s.start)))[:limit]
+    kept.sort(key=lambda s: (s.start, s.kind))
+    counts: dict[str, int] = {}
+    for s in spans:
+        counts[s.kind] = counts.get(s.kind, 0) + 1
+    return {
+        "duration_seconds": _r(meta["duration"]),
+        "detectors_ran": meta["detectors_ran"],
+        "detectors_skipped": meta["detectors_skipped"],
+        "counts": counts,
+        "returned": len(kept),
+        "spans": [{"start": _r(s.start), "end": _r(s.end), "kind": s.kind, "score": _r(s.score, 2)}
+                  for s in kept],
+    }
+
+
 @tool(READ, title="Transcribe audio")
 def transcribe_audio(
     path: str,
@@ -384,6 +572,101 @@ def transcribe_audio(
     if nxt < len(segs):
         out["next_offset"] = nxt
     return out
+
+
+def _segment_groups(n: int, k: int) -> list[tuple[int, int]]:
+    """Split segments 0..n-1 into at most ``k`` contiguous (first, last) groups."""
+    k = max(1, min(k, n))
+    return [(i * n // k, (i + 1) * n // k - 1) for i in range(k)]
+
+
+def _clip_text(text: str, limit: int) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:max(1, limit - 1)].rstrip() + "…"
+
+
+@tool(READ, title="Read video")
+def read_video(
+    path: Annotated[str | None, Field(description="Media file; transcribed (cached) if needed.")] = None,
+    transcript_id: Annotated[str | None, Field(description="Reuse a transcript from transcribe_audio instead.")] = None,
+    language: Annotated[str | None, Field(description="As in transcribe_audio.")] = None,
+    model: Annotated[str | None, Field(description="As in transcribe_audio.")] = None,
+    engine: Literal["auto", "mlx", "faster-whisper"] = "auto",
+    max_frames: Annotated[int, Field(ge=1, le=48, description=(
+        "One frame per segment; with more segments than this, neighbours are grouped."))] = 12,
+    width: FrameWidth = 320,
+    layout: Layout = "separate",
+    max_chars_per_label: Annotated[int, Field(ge=40, le=4000)] = 400,
+    wait_seconds: Annotated[float, Field(ge=0, le=600, description="As in transcribe_audio.")] = 45.0,
+) -> CallToolResult:
+    """Watch and listen at once: what is said, next to what is on screen while it is said.
+
+    Each label carries the transcript segment indices ([first-last], usable as
+    plan_from_transcript segment_indices), the time range and the speech; the image is a
+    frame from the middle of that range. Transcripts come from the same cache as
+    transcribe_audio. A range whose frame cannot be extracted is still listed, with the
+    reason, in `missing_frames`.
+    """
+    if transcript_id:
+        data = transcripts.require_transcript(transcript_id)
+    elif path:
+        data = transcripts.get_or_start(path, model=model, language=language, engine=engine,
+                                        wait_seconds=wait_seconds)
+        if data["status"] != "done":
+            return _content({**data, "hint": (
+                "Still transcribing in the background. Call read_video again with the same "
+                "arguments in a little while.")})
+    else:
+        raise ValueError("Pass path (or transcript_id from transcribe_audio).")
+    source = data["source_path"]
+    segs = data["segments"]
+    header: dict[str, Any] = {
+        "ok": True, "transcript_id": data["transcript_id"], "source_path": source,
+        "language": data.get("language"), "segment_count": len(segs), "layout": layout,
+    }
+    if not segs:
+        header["hint"] = "No speech was found; use scene_frames for a visual overview."
+        return _content(header)
+
+    info = analyzers.probe_media_cached(source)
+    if info is not None and not info.video_codec:
+        header["hint"] = "The source has no video stream, so there are no frames; this is the speech only."
+        header["segments"] = [f"[{i}] {float(s['start']):.2f}-{float(s['end']):.2f} {s['text']}"
+                              for i, s in enumerate(segs)]
+        return _content(header)
+
+    groups = _segment_groups(len(segs), max_frames)
+    spans = [(float(segs[a]["start"]), float(segs[b]["end"])) for a, b in groups]
+    texts = [_clip_text(" ".join(str(segs[i]["text"]) for i in range(a, b + 1)), max_chars_per_label)
+             for a, b in groups]
+    labels = [f"[{a}-{b}] {t0:.1f}-{t1:.1f}s | speech: {txt}" if a != b
+              else f"[{a}] {t0:.1f}-{t1:.1f}s | speech: {txt}"
+              for (a, b), (t0, t1), txt in zip(groups, spans, texts)]
+    with tempfile.TemporaryDirectory(prefix="resolve-pilot-read-") as tmp:
+        frames, dropped, folder = frame_grab.extract_frames(
+            source, [(t0 + t1) / 2 for t0, t1 in spans], width, len(groups), tmp)
+        # Pair by request index: a dropped frame must never shift or hide a segment.
+        header["missing_frames"] = [
+            {"segments": list(groups[d["index"]]), "start": _r(spans[d["index"]][0]),
+             "end": _r(spans[d["index"]][1]), "speech": texts[d["index"]], "reason": d["reason"]}
+            for d in dropped
+        ]
+        header["grouped"] = len(groups) < len(segs)
+        if layout == "grid" or not frames:
+            return _frames_result(header, frames, [labels[f.index] for f in frames], layout, folder)
+        by_index = {f.index: f for f in frames}
+        items: list[Any] = []
+        for i, label in enumerate(labels):
+            if i in by_index:
+                items.extend([label, Path(by_index[i].path)])
+            else:
+                items.append(f"{label} (no frame: {_dropped_reason(dropped, i)})")
+        header["returned"] = len(frames)
+        return _content(header, *items)
+
+
+def _dropped_reason(dropped: list[dict[str, Any]], index: int) -> str:
+    return next((d["reason"] for d in dropped if d["index"] == index), "unknown")
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -718,6 +1001,121 @@ def add_markers(
                            lambda: _studio().add_markers_batch(rows), channel)
 
 
+QUALITY_MARKER_COLORS = {"silence": "Blue", "black": "Cocoa", "freeze": "Lavender",
+                         "loud": "Red", "quiet": "Sky"}
+
+
+class QualitySpanIn(BaseModel):
+    start: float = Field(ge=0)
+    end: float = Field(ge=0)
+    kind: QualityKind
+    score: float = Field(1.0, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _ordered(self) -> "QualitySpanIn":
+        if self.end < self.start:
+            raise ValueError(f"span end ({self.end}) is before start ({self.start})")
+        return self
+
+
+def quality_markers(
+    spans: list[Any], source_path: str, timeline_start_seconds: float = 0.0,
+    source_in_seconds: float = 0.0, source_out_seconds: float | None = None,
+) -> tuple[list[dict[str, Any]], int, str]:
+    """Map media-relative spans onto the timeline as marker dicts.
+
+    Returns (markers, spans outside the clip, owned customData prefix for this source).
+    Each marker's customData is stable for the same source and span, and every marker
+    for one source shares a prefix, so a re-run replaces exactly its own markers.
+    """
+    source = str(Path(source_path).expanduser().resolve())
+    prefix = f"resolve-pilot:quality:{hashlib.sha1(source.encode()).hexdigest()[:8]}:"
+    out_point = math.inf if source_out_seconds is None else source_out_seconds
+    markers, outside = [], 0
+    for s in spans:
+        start, end = max(s.start, source_in_seconds), min(s.end, out_point)
+        if end < start or (end == start and s.end > s.start):
+            outside += 1
+            continue
+        digest = hashlib.sha1(json.dumps([s.kind, round(s.start, 3), round(s.end, 3)]).encode()).hexdigest()[:12]
+        markers.append({
+            "seconds": round(timeline_start_seconds + start - source_in_seconds, 3),
+            "duration_seconds": max(end - start, 0.001),
+            "color": QUALITY_MARKER_COLORS[s.kind],
+            "name": s.kind.capitalize(),
+            "note": f"{s.kind} {s.start:.2f}-{s.end:.2f}s in {Path(source).name} (score {s.score:.2f})",
+            "custom_data": f"{prefix}{s.kind}:{digest}",
+        })
+    return _combine_same_frame(markers), outside, prefix
+
+
+# Resolve keeps one marker per frame; spans that start within a frame of each other
+# (at 24 fps or faster) become one marker instead of the second being skipped.
+_SAME_FRAME_SECONDS = 0.04
+
+
+def _combine_same_frame(markers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for m in sorted(markers, key=lambda m: m["seconds"]):
+        if out and m["seconds"] - out[-1]["seconds"] < _SAME_FRAME_SECONDS:
+            first = out[-1]
+            first["name"] = f"{first['name']} + {m['name']}"
+            first["note"] = f"{first['note']}; {m['note']}"
+            first["duration_seconds"] = max(first["duration_seconds"], m["duration_seconds"])
+        else:
+            out.append(dict(m))
+    return out
+
+
+@tool(EDIT_RESOLVE, title="Add quality markers")
+def add_quality_markers(
+    path: Annotated[str, Field(description="The media file the spans come from.")],
+    spans: Annotated[list[QualitySpanIn] | None, Field(description=(
+        "Spans from analyze_quality (start, end, kind, score). Omit to analyze path now."))] = None,
+    kinds: Annotated[list[QualityKind] | None, Field(description="Only these kinds; omit for all.")] = None,
+    min_seconds: Annotated[float, Field(ge=0, description="Skip spans shorter than this.")] = 0.5,
+    timeline_start_seconds: Annotated[float, Field(ge=0, description=(
+        "Where the clip starts on the timeline (start_seconds from get_resolve_state); "
+        "0 when the timeline is just this file."))] = 0.0,
+    source_in_seconds: Annotated[float, Field(ge=0, description=(
+        "The clip's in-point inside the file (source_in_frame / fps)."))] = 0.0,
+    source_out_seconds: Annotated[float | None, Field(gt=0, description=(
+        "The clip's out-point inside the file; spans past it are skipped."))] = None,
+    replace_previous: Annotated[bool, Field(description=(
+        "Delete the quality markers this tool added earlier for the same file first, "
+        "so re-running does not pile up duplicates. Never touches other markers."))] = True,
+    max_markers: Annotated[int, Field(ge=1, le=500)] = 100,
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """Mark silence, black, frozen and loud/quiet stretches on the current timeline.
+
+    Spans are media times; they are placed relative to where the clip sits on the
+    timeline (timeline_start_seconds / source_in_seconds / source_out_seconds; read them
+    with get_resolve_state(include_clips=true)). Colors: silence Blue, black Cocoa,
+    freeze Lavender, loud Red, quiet Sky.
+    """
+    if spans is None:
+        found, _meta = _quality_spans(path, kinds, min_seconds, 30.0, 0.5)
+    else:
+        wanted = set(kinds or QUALITY_MARKER_COLORS)
+        found = [s for s in spans if s.kind in wanted and s.end - s.start >= min_seconds]
+    if source_out_seconds is not None and source_out_seconds <= source_in_seconds:
+        raise ValueError("source_out_seconds must be after source_in_seconds.")
+    found = sorted(found, key=lambda s: -(s.score * (s.end - s.start)))[:max_markers]
+    found.sort(key=lambda s: s.start)
+    markers, outside, prefix = quality_markers(found, path, timeline_start_seconds,
+                                               source_in_seconds, source_out_seconds)
+    if not markers:
+        return {"ok": True, "added": 0, "spans_outside_clip": outside,
+                "note": "No quality spans to mark (after kinds / min_seconds / clip range)."}
+    rows = lua_lib.normalize_markers(markers)
+    owned = prefix if replace_previous else None
+    out = control.perform(lua_lib.snippet_add_markers(rows, owned),
+                          lambda: _studio().add_markers_batch(rows, owned), channel)
+    out["spans_outside_clip"] = outside
+    return out
+
+
 @tool(_hints(read_only=False, idempotent=True), title="Set clip color")
 def set_clip_color(
     color: Literal[lua_lib.CLIP_COLORS],  # type: ignore[valid-type]
@@ -856,9 +1254,13 @@ def _ui_call(fn, *args) -> dict[str, Any]:
 @tool(DESTRUCTIVE, title="Send keystroke (macOS)")
 def send_keystroke(
     key: Annotated[str, Field(description="One character, or return/tab/space/delete/escape/left/right/up/down/f1-f12.")],
-    modifiers: Annotated[str, Field(description="e.g. 'command', 'shift+command'.")] = "",
+    modifiers: Annotated[str, Field(description=(
+        "'+'-joined: command/cmd, shift, option/opt/alt, control/ctrl/ctl; e.g. 'shift+command'."))] = "",
 ) -> dict[str, Any]:
     """Send a keyboard shortcut to Resolve (brought to the front first). macOS only.
+
+    Nothing is typed if Resolve cannot be brought to the front (ok=false), so the
+    keystroke never lands in another app.
 
     Examples: key='s' + 'command' saves; 'space' plays/pauses; 't' + 'command' applies the
     default transition to selected edits on the Edit page.
@@ -878,6 +1280,76 @@ def menu_pick(
     from resolve_pilot.ui_automation import menu_pick as ui_menu_pick
     res = _ui_call(ui_menu_pick, menu_path)
     return {**res, "path": menu_path}
+
+
+def _screen_error(error: str, hint: str, **extra: Any) -> CallToolResult:
+    return _content({"ok": False, "error": error, "hint": hint, **extra})
+
+
+@tool(READ, title="Screenshot Resolve (macOS)")
+def screenshot_resolve(
+    width: Annotated[int, Field(ge=320, le=3840, description="Downscale to this pixel width (never upscaled).")] = 1280,
+    focus_first: Annotated[bool, Field(description=(
+        "Bring Resolve to the front if none of its windows is on screen."))] = True,
+) -> CallToolResult:
+    """See Resolve's UI: capture its main window as an image. macOS only.
+
+    Use it to check what the user sees (page, dialogs, timeline, viewer) after acting
+    through the UI tools. Needs Screen Recording permission for the app running this
+    server; without it (or with Resolve minimized) you get ok=false and what to do,
+    never a blank or old image.
+    """
+    if not _platform_supports_ui():
+        return _screen_error(f"screenshot_resolve is macOS only (this is {platform.system()}).",
+                             "Use get_resolve_state to inspect Resolve instead.")
+    from resolve_pilot.ui_automation import screen
+    if screen._quartz() is None:
+        return _screen_error("pyobjc's Quartz module is not installed.",
+                             "Install the UI extra: pip install 'davinci-resolve-mcp-free[ui]' "
+                             "(or pip install -e '.[ui]' in a checkout), then restart the server.")
+    if not screen.screen_recording_available():
+        return _screen_error(
+            "Screen Recording permission is not granted to the app running resolve-pilot.",
+            "System Settings > Privacy & Security > Screen Recording: enable the app that runs "
+            "this MCP server (e.g. Claude Desktop, or the terminal running Claude Code), then "
+            "quit and reopen that app.")
+    onscreen, every = screen.find_resolve_windows()
+    if not every:
+        return _screen_error("No DaVinci Resolve window found.", "Is Resolve running? Ask the user to open it.")
+    if not onscreen and focus_first:
+        from resolve_pilot.ui_automation import applescript
+        applescript.focus_resolve()
+        onscreen, every = screen.find_resolve_windows()
+    if not onscreen:
+        return _screen_error("DaVinci Resolve's windows are minimized or on another Space.",
+                             "Ask the user to bring Resolve onto the current screen, then retry.",
+                             windows=len(every))
+    window = max(onscreen, key=lambda w: float(w["bounds"].get("Width", 0)) * float(w["bounds"].get("Height", 0)))
+    with tempfile.TemporaryDirectory(prefix="resolve-pilot-screen-") as tmp:
+        captured = Path(tmp) / "capture.png"
+        if not screen.capture_window(window["id"], captured):
+            return _screen_error("Capturing the Resolve window failed.",
+                                 "Check Screen Recording permission and that Resolve is visible, then retry.")
+        native = screen.png_size(captured)
+        if native is None:
+            return _screen_error("The capture is not a readable PNG.", "Retry; if it persists, restart Resolve.")
+        final = captured
+        if native[0] > width:
+            final = Path(tmp) / "resolve.png"
+            proc = subprocess.run(["sips", "--resampleWidth", str(width), str(captured), "--out", str(final)],
+                                  capture_output=True, text=True, timeout=30.0, check=False)
+            if proc.returncode != 0 or screen.png_size(final) is None:
+                return _screen_error("Downscaling the screenshot failed.", "Retry with a larger width.")
+        returned = screen.png_size(final)
+        bounds = window["bounds"]
+        header = {
+            "ok": True, "window_id": window["id"], "window_name": window["name"], "bounds": bounds,
+            "native_px": {"width": native[0], "height": native[1]},
+            "returned_px": {"width": returned[0], "height": returned[1]},
+            # Screen points per returned pixel: x_screen = bounds.X + x_image * this.
+            "points_per_pixel": round(float(bounds.get("Width", 0)) / returned[0], 4),
+        }
+        return _content(header, f"Resolve window '{window['name']}' ({returned[0]}x{returned[1]})", final)
 
 
 @tool(EDIT_RESOLVE, title="Open an AI feature (macOS)")

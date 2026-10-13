@@ -19,6 +19,8 @@ Builds a first-pass timeline from raw footage, deciding what to keep from the tr
 3. **Pick the backbone**
    - Talking head, interview, talk → `transcribe_audio(path, language=...)`. If it returns `status: "running"`, call again with the same arguments. When `next_offset` is present, page with `offset` (cached calls are instant).
    - B-roll, montage → `plan_from_scenes(source_path=path)` (it detects scenes itself), or `detect_scenes` first if you want to inspect scores.
+   - **Look before you choose.** `scene_frames(path)` shows one frame per scene as a contact sheet; `read_video(transcript_id=...)` puts each stretch of speech next to the frame on screen while it is said (labels carry the segment indices); `grab_frames(path, at_seconds=[...])` checks specific moments.
+   - `analyze_quality(path, kinds=["silence", "black", "freeze"])` lists dead air and black / frozen picture to leave out.
 4. **Decide editorially.** Read the numbered transcript (`[i] start-end text`):
    - keep complete thoughts and the strongest delivery; drop false starts, repeats, filler, dead air
    - pacing: 3–5 s clips for energetic edits, 8–15 s for documentary

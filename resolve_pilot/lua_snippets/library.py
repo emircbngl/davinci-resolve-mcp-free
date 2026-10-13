@@ -181,8 +181,23 @@ _TIMELINE_FPS = (
 # Snippets
 # ────────────────────────────────────────────────────────────────────────────
 
+# Markers resolve-pilot may delete again carry customData starting with this.
+OWNED_MARKER_PREFIX = "resolve-pilot:"
+
+
+def validate_owned_prefix(prefix: str) -> str:
+    """Only a specific resolve-pilot namespace may be replaced, never the user's markers."""
+    if not prefix.startswith(OWNED_MARKER_PREFIX) or len(prefix) <= len(OWNED_MARKER_PREFIX):
+        raise ValueError(f"replace prefix must start with {OWNED_MARKER_PREFIX!r} and name a namespace")
+    return prefix
+
+
 def normalize_markers(markers: list[dict]) -> list[dict]:
-    """Validate marker dicts and fill defaults; shared by the Lua and Studio paths."""
+    """Validate marker dicts and fill defaults; shared by the Lua and Studio paths.
+
+    Optional keys: ``duration_seconds`` (converted with the timeline fps inside Resolve,
+    overrides ``duration``) and ``custom_data`` (Resolve's per-marker customData).
+    """
     if not markers:
         raise ValueError("markers is empty")
     rows = []
@@ -199,39 +214,71 @@ def normalize_markers(markers: list[dict]) -> list[dict]:
             row["frame"] = int(m["frame"])
         else:
             row["seconds"] = float(m["seconds"])
+            if not math.isfinite(row["seconds"]) or row["seconds"] < 0:
+                raise ValueError(f"marker #{i} has an invalid time {m['seconds']!r}")
+        if m.get("duration_seconds") is not None:
+            ds = float(m["duration_seconds"])
+            if not math.isfinite(ds) or ds <= 0:
+                raise ValueError(f"marker #{i} has an invalid duration_seconds {ds!r}")
+            row["duration_seconds"] = ds
+        if m.get("custom_data"):
+            row["custom_data"] = str(m["custom_data"])
         rows.append(row)
     return rows
 
 
 @_snippet
-def snippet_add_markers(markers: list[dict]) -> str:
+def snippet_add_markers(markers: list[dict], replace_owned_prefix: str | None = None) -> str:
     """Add markers to the current timeline; positions in frames or seconds.
 
-    markers: list of {frame | seconds, color="Blue", name="", note="", duration=1}.
-    `frame` is an offset from the timeline start; `seconds` is converted inside
-    Resolve using the timeline's real frame rate. `duration` is in frames.
+    markers: list of {frame | seconds, color="Blue", name="", note="", duration=1,
+    duration_seconds?, custom_data?}. `frame` is an offset from the timeline start;
+    `seconds` and `duration_seconds` are converted inside Resolve using the timeline's
+    real frame rate. `duration` is in frames.
+    replace_owned_prefix: first delete the markers whose customData starts with this
+    (a "resolve-pilot:..." namespace), so re-running a tool replaces its own markers.
     """
     rows = normalize_markers(markers)
+    prefix = validate_owned_prefix(replace_owned_prefix) if replace_owned_prefix else None
     body = ",\n  ".join(to_lua(r) for r in rows)
     return f"""-- resolve-pilot: add_markers
 {_TIMELINE_PREAMBLE}{_TIMELINE_FPS}local markers = {{
   {body}
 }}
+local replace_prefix = {to_lua(prefix)}
+local removed = 0
+if replace_prefix then
+  local owned = {{}}
+  for _, m in pairs(timeline:GetMarkers() or {{}}) do
+    local data = m.customData
+    if type(data) == "string" and data:sub(1, #replace_prefix) == replace_prefix then
+      owned[#owned + 1] = data
+    end
+  end
+  for _, data in ipairs(owned) do
+    if timeline:DeleteMarkerByCustomData(data) then removed = removed + 1 end
+  end
+end
 local added, skipped = 0, {{}}
 for _, m in ipairs(markers) do
   local frame = m.frame or math.floor(m.seconds * fps + 0.5)
-  if timeline:AddMarker(frame, m.color, m.name, m.note, m.duration, "") then
+  local duration = m.duration
+  if m.duration_seconds then duration = math.max(1, math.floor(m.duration_seconds * fps + 0.5)) end
+  if timeline:AddMarker(frame, m.color, m.name, m.note, duration, m.custom_data or "") then
     added = added + 1
   else
     skipped[#skipped + 1] = frame
   end
 end
 print(string.format("[resolve-pilot] Added %d / %d markers on '%s'", added, #markers, timeline:GetName()))
+if removed > 0 then
+  print(string.format("[resolve-pilot] Replaced %d earlier resolve-pilot markers", removed))
+end
 if #skipped > 0 then
   print("[resolve-pilot] Skipped frames (marker already there or out of range): " .. table.concat(skipped, ", "))
 end
 return {{ok = true, added = added, requested = #markers, skipped_frames = skipped,
-  timeline = timeline:GetName(), timeline_fps = fps}}
+  removed_previous = removed, timeline = timeline:GetName(), timeline_fps = fps}}
 """
 
 

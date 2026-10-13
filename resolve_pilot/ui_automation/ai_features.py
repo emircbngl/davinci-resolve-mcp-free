@@ -77,13 +77,14 @@ def trigger_voice_isolation(intensity: int = 60) -> dict:
 
 def trigger_scene_cut_detection() -> dict:
     """Run Resolve's built-in scene cut detection on the active timeline."""
-    focus_resolve()
     try:
         menu_pick(LABELS["scene_cut_detect"])
     except StudioOnlyFeature as e:
         return {"ok": False, "error": str(e)}
     return {
         "ok": True,
+        "completed": False,
+        "next_step": "Adjust sensitivity and click Add Cuts to Selected Clip in the dialog.",
         "message": (
             "Detect Scene Cuts dialog opened. Adjust sensitivity if needed, "
             "click Add Cuts to Selected Clip. Resulting cuts appear as edits "
@@ -94,7 +95,6 @@ def trigger_scene_cut_detection() -> dict:
 
 def trigger_auto_subtitle(language: str = "en") -> dict:
     """Open the Create Subtitles from Audio dialog on the current timeline."""
-    focus_resolve()
     try:
         menu_pick(LABELS["auto_subtitle"])
     except StudioOnlyFeature as e:
@@ -102,6 +102,8 @@ def trigger_auto_subtitle(language: str = "en") -> dict:
     _wait(500)
     return {
         "ok": True,
+        "completed": False,
+        "next_step": "Set the subtitle options and click Create in the dialog.",
         "message": (
             f"Create Subtitles dialog opened. Set language to '{language}', "
             "tweak max chars/line, click Create. Subtitles appear on a "
@@ -121,6 +123,8 @@ def trigger_magic_mask_person() -> dict:
     open_color_page()
     return {
         "ok": True,
+        "completed": False,
+        "next_step": "Open the Magic Mask panel and track the subject in Resolve.",
         "next_steps": [
             "On the Color page, look at the bottom toolbar — click the Magic Mask icon "
             "(person silhouette). The Magic Mask panel opens at the bottom right.",
@@ -134,10 +138,11 @@ def trigger_magic_mask_person() -> dict:
 
 def open_speed_warp() -> dict:
     """Open the Retime Controls for the selected clip and switch to Speed Warp."""
-    focus_resolve()
     send_keystroke("r", "command")  # default keyboard shortcut for Retime Controls
     return {
         "ok": True,
+        "completed": False,
+        "next_step": "Choose Optical Flow and Speed Warp in the Retime Process menu.",
         "message": (
             "Retime Controls opened on selected clip. Right-click the speed indicator "
             "above the clip → Retime Process → Optical Flow → Speed Warp 2 (Studio)."

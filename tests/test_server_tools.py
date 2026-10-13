@@ -27,6 +27,40 @@ def test_tool_hints_match_what_the_tools_do():
         assert ann[name]["readOnlyHint"] is True, name
 
 
+# The exact tool surface. An exact set, not a count: a tool that silently fails to
+# register (or a stray one) must fail here, not in an agent session.
+EXPECTED_TOOLS = {
+    # session
+    "resolve_pilot_status", "get_workflow_guide", "setup_bridge",
+    # analyze
+    "probe_media", "detect_scenes", "detect_beats", "transcribe_audio", "analyze_quality",
+    # see
+    "grab_frames", "scene_frames", "read_video", "screenshot_resolve",
+    # plan
+    "plan_from_transcript", "plan_from_scenes", "create_plan", "get_plan", "edit_plan",
+    # export
+    "export_fcpxml", "export_srt",
+    # resolve
+    "get_resolve_state", "import_timeline", "add_markers", "add_quality_markers", "set_clip_color",
+    "apply_lut", "queue_render", "open_page", "run_lua", "list_lua_snippets", "render_lua_snippet",
+    # macOS UI
+    "send_keystroke", "menu_pick", "open_ai_feature",
+}
+
+
+def test_server_registers_exactly_the_expected_tools():
+    names = set(_annotations())
+    assert len(EXPECTED_TOOLS) == 33
+    assert names == EXPECTED_TOOLS, (sorted(EXPECTED_TOOLS - names), sorted(names - EXPECTED_TOOLS))
+
+
+def test_vision_tools_are_read_only_and_markers_are_not():
+    ann = _annotations()
+    for name in ("grab_frames", "scene_frames", "read_video", "screenshot_resolve", "analyze_quality"):
+        assert ann[name]["readOnlyHint"] is True, name
+    assert ann["add_quality_markers"]["readOnlyHint"] is False
+
+
 def test_inverted_segments_are_rejected():
     with pytest.raises(ValidationError, match="must be after start"):
         mcp_server.SegmentIn(start=2, end=1, text="x")

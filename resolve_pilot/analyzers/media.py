@@ -49,7 +49,7 @@ def probe_media(path: str | Path) -> MediaInfo:
         "-show_streams",
         str(p),
     ]
-    out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
+    out = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=60.0).stdout
     data = json.loads(out)
 
     fmt = data.get("format", {})

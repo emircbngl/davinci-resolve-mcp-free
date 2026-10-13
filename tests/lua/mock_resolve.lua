@@ -67,6 +67,12 @@ function Timeline:AddMarker(frame, color, name, note, duration, data)
   return true
 end
 function Timeline:GetMarkers() return self.markers end
+function Timeline:DeleteMarkerByCustomData(data)
+  for frame, m in pairs(self.markers) do
+    if m.customData == data then self.markers[frame] = nil; return true end
+  end
+  return false
+end
 function Timeline:GetStartTimecode() return "01:00:00:00" end
 function Timeline:GetCurrentTimecode() return "01:00:00:00" end
 function Timeline:Export(path, kind) return true end

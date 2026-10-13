@@ -1,7 +1,9 @@
 """Live bridge: the real bridge.lua under LuaJIT, driven through the Python client."""
 from __future__ import annotations
 
+import re
 import subprocess
+import time
 
 import pytest
 
@@ -108,6 +110,18 @@ def test_snippets_run_against_mock_resolve(live_bridge, tmp_path):
     assert bridge.exec_lua(lua.snippet_open_page("color")).result == {"ok": True, "page": "color"}
 
 
+_SNIPPET_SAMPLES = {
+    "add_markers": {"markers": [{"frame": 1}]},
+    "batch_markers": {"frames": [1, 2]},
+    "import_timeline": {"path": "/x.fcpxml"},
+    "export_timeline": {"out_path": "/x.fcpxml"},
+    "apply_lut_to_clips": {"lut_path": "/x.cube"},
+    "relink_media": {"folder": "/x"},
+    "grade_from_drx": {"drx_path": "/x.drx"},
+    "open_page": {"page": "edit"},
+}
+
+
 @needs_luajit
 def test_transitions_are_not_counted_or_touched_as_clips(live_bridge):
     assert bridge.exec_lua("return mock.add_transition()").result == 3
@@ -130,21 +144,68 @@ def test_apply_lut_reports_failure_when_resolve_rejects_every_clip(live_bridge):
 
 @needs_luajit
 def test_every_snippet_compiles(tmp_path):
-    samples = {
-        "add_markers": {"markers": [{"frame": 1}]},
-        "batch_markers": {"frames": [1, 2]},
-        "import_timeline": {"path": "/x.fcpxml"},
-        "export_timeline": {"out_path": "/x.fcpxml"},
-        "apply_lut_to_clips": {"lut_path": "/x.cube"},
-        "relink_media": {"folder": "/x"},
-        "grade_from_drx": {"drx_path": "/x.drx"},
-        "open_page": {"page": "edit"},
-    }
     for s in lua.list_snippets():
-        code = lua.render_snippet(s["name"], samples.get(s["name"], {}))
+        code = lua.render_snippet(s["name"], _SNIPPET_SAMPLES.get(s["name"], {}))
         f = tmp_path / f"{s['name']}.lua"
         f.write_text(code)
         subprocess.run([LUAJIT, "-b", str(f), str(tmp_path / "out")], check=True)
+
+
+# Globals Resolve's LuaJIT provides; anything else a script reads is a typo or a
+# variable that was deleted while a reference to it survived (a bridge once died
+# on startup reading a removed MAX_TICKS), which only fails at runtime.
+_LUA_BUILTINS = {
+    "assert", "collectgarbage", "debug", "dofile", "error", "getmetatable", "io", "ipairs",
+    "load", "loadstring", "math", "next", "os", "package", "pairs", "pcall", "print", "rawget",
+    "rawset", "require", "select", "setmetatable", "string", "table", "tonumber", "tostring",
+    "type", "unpack", "xpcall", "_G",
+}
+_RESOLVE_GLOBALS = {"resolve", "Resolve", "fusion", "bmd", "app", "rp"}
+
+
+def _globals(luajit_listing: str) -> tuple[set[str], set[str]]:
+    reads = set(re.findall(r'\bGGET\b.*?"([^"]+)"', luajit_listing))
+    writes = set(re.findall(r'\bGSET\b.*?"([^"]+)"', luajit_listing))
+    return reads, writes
+
+
+def _listing(tmp_path, name: str, code: str) -> str:
+    f = tmp_path / f"{name}.lua"
+    f.write_text(code)
+    return subprocess.run([LUAJIT, "-bl", str(f)], check=True, capture_output=True, text=True).stdout
+
+
+@needs_luajit
+def test_bridge_reads_no_undefined_globals(tmp_path):
+    reads, writes = _globals(_listing(tmp_path, "bridge", bridge.render_script()))
+    assert reads, "luajit -bl output format changed; the check would pass vacuously"
+    assert reads - _LUA_BUILTINS - _RESOLVE_GLOBALS == set()
+    # It deliberately sets only these: `print` is swapped while capturing output.
+    assert writes <= {"print", "resolve", "rp"}
+
+
+@needs_luajit
+def test_snippets_read_no_undefined_globals_and_leak_none(tmp_path):
+    for s in lua.list_snippets():
+        code = lua.render_snippet(s["name"], _SNIPPET_SAMPLES.get(s["name"], {}))
+        reads, writes = _globals(_listing(tmp_path, s["name"], code))
+        assert reads - _LUA_BUILTINS - _RESOLVE_GLOBALS == set(), s["name"]
+        assert writes == set(), s["name"]
+
+
+@needs_luajit
+def test_stale_stop_file_does_not_kill_a_fresh_bridge(tmp_path):
+    # A stop request left behind (the previous bridge exited before reading it)
+    # must not end the next bridge on its first stop check (every 10 ticks).
+    (bridge.bridge_dir() / "stop").write_text("stop", encoding="utf-8")
+    proc = start_bridge(tmp_path)
+    try:
+        time.sleep(3.0)
+        assert proc.poll() is None, proc.stdout.read()
+        assert bridge.exec_lua("return 7", timeout=10).result == 7
+    finally:
+        out = stop_bridge(proc)
+    assert "stopped (stop requested)" in out
 
 
 @needs_luajit

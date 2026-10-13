@@ -260,20 +260,32 @@ def resolve_state(
     return state
 
 
-def add_markers_batch(markers: list[dict]) -> dict[str, Any]:
-    """Add normalized markers ({frame|seconds, color, name, note, duration})."""
+def add_markers_batch(markers: list[dict], replace_owned_prefix: str | None = None) -> dict[str, Any]:
+    """Add normalized markers; mirrors lua_snippets.snippet_add_markers."""
+    from resolve_pilot.lua_snippets.library import validate_owned_prefix
+
+    prefix = validate_owned_prefix(replace_owned_prefix) if replace_owned_prefix else None
     p = _current_project()
     tl = _current_timeline()
     fps = _timeline_fps(p, tl)
+    removed = 0
+    if prefix:
+        owned = [m.get("customData") for m in (tl.GetMarkers() or {}).values()]
+        for data in owned:
+            if isinstance(data, str) and data.startswith(prefix) and tl.DeleteMarkerByCustomData(data):
+                removed += 1
     added, skipped = 0, []
     for m in markers:
         frame = int(m["frame"]) if m.get("frame") is not None else int(float(m["seconds"]) * fps + 0.5)
-        if tl.AddMarker(frame, m["color"], m["name"], m["note"], int(m["duration"]), ""):
+        duration = int(m["duration"])
+        if m.get("duration_seconds"):
+            duration = max(1, int(float(m["duration_seconds"]) * fps + 0.5))
+        if tl.AddMarker(frame, m["color"], m["name"], m["note"], duration, m.get("custom_data") or ""):
             added += 1
         else:
             skipped.append(frame)
     return {"ok": True, "added": added, "requested": len(markers), "skipped_frames": skipped,
-            "timeline": tl.GetName(), "timeline_fps": fps}
+            "removed_previous": removed, "timeline": tl.GetName(), "timeline_fps": fps}
 
 
 def import_timeline(path: str, timeline_name: str | None = None,

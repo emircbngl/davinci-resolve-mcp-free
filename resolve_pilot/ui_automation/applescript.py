@@ -10,10 +10,13 @@ the MCP server). On first run macOS will prompt; user must approve.
 """
 from __future__ import annotations
 
+import re
 import subprocess
+import time
 from typing import Literal
 
 Page = Literal["media", "cut", "edit", "fusion", "color", "fairlight", "deliver"]
+RESOLVE_BUNDLE_ID = "com.blackmagic-design.DaVinciResolve"
 
 _PAGE_SHORTCUTS: dict[Page, tuple[str, str]] = {
     # (key, modifiers) — Resolve default page shortcuts. User-customized keymaps
@@ -65,9 +68,48 @@ def is_resolve_running() -> bool:
     return out.lower() == "true"
 
 
-def focus_resolve() -> None:
-    """Bring DaVinci Resolve to the front."""
-    osascript('tell application "DaVinci Resolve" to activate')
+def frontmost_bundle_id() -> str | None:
+    """Bundle identifier of the frontmost application, or None if it cannot be read."""
+    try:
+        front = subprocess.run(["lsappinfo", "front"], capture_output=True, text=True,
+                               timeout=1.0, check=False)
+        if front.returncode != 0:
+            return None
+        asn = re.search(r"(ASN:\S+)", front.stdout)
+        if asn is None:
+            return None
+        info = subprocess.run(["lsappinfo", "info", "-only", "bundleid", asn.group(1)],
+                              capture_output=True, text=True, timeout=1.0, check=False)
+        if info.returncode != 0:
+            return None
+        bundle = re.search(r'"CFBundleIdentifier"="([^"]+)"', info.stdout)
+        return bundle.group(1) if bundle else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def focus_resolve(wait: bool = True, timeout: float = 3.0, poll: float = 0.1) -> bool:
+    """Bring DaVinci Resolve to the front; return whether it actually is frontmost.
+
+    Keystrokes and menu clicks go to whatever app is frontmost, so callers must not
+    send them when this returns False (another app would receive them blind).
+    """
+    try:
+        osascript('tell application "DaVinci Resolve" to activate')
+    except UIAutomationError:
+        return False
+    deadline = time.monotonic() + (max(0.0, timeout) if wait else 0.0)
+    while True:
+        if frontmost_bundle_id() == RESOLVE_BUNDLE_ID:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(max(0.0, poll))
+
+
+def _as_quoted(value: str) -> str:
+    """``value`` as an AppleScript string literal (quotes and backslashes escaped)."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def _mods_to_using(mods: str) -> str:
@@ -78,11 +120,17 @@ def _mods_to_using(mods: str) -> str:
         "cmd": "command down",
         "shift": "shift down",
         "option": "option down",
+        "opt": "option down",
         "alt": "option down",
         "control": "control down",
         "ctrl": "control down",
+        "ctl": "control down",
     }
-    pieces = [mapping[p] for p in parts if p in mapping]
+    unknown = [p for p in parts if p not in mapping]
+    if unknown:
+        raise UIAutomationError(
+            f"Unknown modifier(s): {', '.join(unknown)}. Use command, shift, option or control.")
+    pieces = [mapping[p] for p in parts]
     if not pieces:
         return ""
     return "using {" + ", ".join(pieces) + "}"
@@ -97,22 +145,33 @@ _KEY_CODES = {
 
 
 def send_keystroke(key: str, modifiers: str = "") -> None:
-    """Send a single keystroke (with optional modifiers) to the frontmost app.
+    """Send a single keystroke (with optional modifiers) to Resolve.
+
+    Raises UIAutomationError, without typing anything, if Resolve cannot be made
+    frontmost or a modifier name is unknown.
 
     `key` is a single character or a special key name like 'tab', 'space',
     'return', 'escape', 'left'/'right'/'up'/'down', 'f1'..'f12'.
     """
-    focus_resolve()
     using = _mods_to_using(modifiers)
     if len(key) == 1:
-        esc = key.replace("\\", "\\\\").replace('"', '\\"')
-        cmd = f'keystroke "{esc}"'
+        cmd = f"keystroke {_as_quoted(key)}"
     else:
         code = _KEY_CODES.get(key.lower())
         if code is None:
             raise UIAutomationError(f"Unknown key name: {key}")
         cmd = f"key code {code}"
-    script = f'tell application "System Events" to {cmd} {using}'.strip()
+    if not focus_resolve():
+        raise UIAutomationError("DaVinci Resolve did not become frontmost; keystroke not sent.")
+    # Scoped to Resolve's process so the keystroke cannot land in another app.
+    script = f'''
+tell application "System Events"
+    tell process "Resolve"
+        set frontmost to true
+        {cmd} {using}
+    end tell
+end tell
+'''
     osascript(script)
 
 
@@ -142,8 +201,9 @@ def menu_pick(menu_path: list[str]) -> None:
     """
     if not menu_path:
         raise UIAutomationError("Empty menu path")
-    focus_resolve()
-    path_quoted = [f'"{_normalize_menu_label(m)}"' for m in menu_path]
+    if not focus_resolve():
+        raise UIAutomationError("DaVinci Resolve did not become frontmost; menu click not sent.")
+    path_quoted = [_as_quoted(_normalize_menu_label(m)) for m in menu_path]
     parts = [f'click menu bar item {path_quoted[0]} of menu bar 1']
     cur = f'menu bar item {path_quoted[0]} of menu bar 1'
     last = len(path_quoted) - 1
