@@ -2,7 +2,7 @@
 
 **Claude-driven video editing that runs in [DaVinci Resolve Free](https://www.blackmagicdesign.com/products/davinciresolve) — the no-cost edition that Blackmagic ships at $0.** No Studio license required, no API key required.
 
-> ℹ️ **What "free" means here:** DaVinci Resolve ships in two editions — **Free** (no cost) and **Studio** (~$295 one-time license). Studio exposes a Python scripting API for automation; Free does not. Every existing DaVinci MCP server out there ([samuelgursky/davinci-resolve-mcp](https://github.com/samuelgursky/davinci-resolve-mcp), barckley75, apvlv, Tooflex) **requires Resolve Studio** for that reason. This project gets Claude-driven editing working in **Resolve Free too**, by routing around the missing Python API:
+> ℹ️ **What "free" means here:** DaVinci Resolve ships in two editions — **Free** (no cost) and **Studio** (~$295 one-time license). Studio exposes a Python scripting API for automation; Free does not — and since **Resolve 21.1, Python scripting (and Resolve's own MCP server) are Studio-only**, so MCP servers that drive Free through Python stop working there. This project gets Claude-driven editing working in **Resolve Free too**, through a Lua bridge that runs inside Resolve (verified on 20.3; written for 21.1's restricted Lua, not yet tried on a 21.1 install) plus FCPXML and UI automation:
 
 | Channel | What it does | Free | Studio |
 |---|---|:---:|:---:|
@@ -14,7 +14,7 @@
 
 Every Resolve action picks the best channel by itself — Studio API, then the live bridge, then paste-able Lua — and tells Claude which one it used.
 
-If you've been turned away by other DaVinci MCP servers because you only have the free Blackmagic download — this is for you.
+If you only have the free Blackmagic download — this is for you.
 
 ## Installation
 
