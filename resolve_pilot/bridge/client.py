@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from resolve_pilot import __version__
+from resolve_pilot import __version__, traps
 from resolve_pilot._paths import home
 from resolve_pilot.lua_snippets.library import lua_string
 
@@ -38,6 +38,15 @@ START_HINT = (
     "ResolvePilotBridge (put it there with setup_bridge(action='install')), or paste "
     "the script from setup_bridge(action='show_script') into Workspace > Console "
     "(Lua tab) and press Enter."
+)
+
+
+# A modal dialog in Resolve stops script calls, so a request that times out (or a
+# heartbeat that goes stale) may simply be waiting behind one.
+MODAL_HINT = (
+    "A modal dialog in Resolve may be blocking the scripting API: check screenshot_resolve "
+    "(macOS) or ask the user to close any open dialog in Resolve. "
+    f"(known_trap: {traps.get('modal-dialog-blocks-api').id})"
 )
 
 
@@ -199,7 +208,8 @@ def status() -> BridgeStatus:
     if age > HEARTBEAT_STALE_SECONDS:
         return BridgeStatus(
             False, str(d), age, version,
-            f"Bridge heartbeat is {age:.0f}s old: it stopped, or Resolve is busy. " + START_HINT,
+            f"Bridge heartbeat is {age:.0f}s old: it stopped, or Resolve is busy. {MODAL_HINT} "
+            + START_HINT,
         )
     detail = "Bridge is running."
     if version != __version__:
@@ -319,9 +329,10 @@ def exec_lua(code: str, timeout: float = 30.0) -> BridgeResult:
         raise BridgeError(
             f"Resolve took the request but did not answer within {timeout:g}s. It is probably "
             "still running (long imports or renders); the bridge reports busy until it is done. "
-            "Wait, then retry with a longer timeout or check get_resolve_state."
+            "Wait, then retry with a longer timeout or check get_resolve_state. " + MODAL_HINT
         )
-    raise BridgeNotRunning(f"The bridge did not pick up the request within {timeout:g}s. " + START_HINT)
+    raise BridgeNotRunning(
+        f"The bridge did not pick up the request within {timeout:g}s. {MODAL_HINT} " + START_HINT)
 
 
 def stop() -> bool:
