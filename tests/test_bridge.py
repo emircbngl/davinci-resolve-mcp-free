@@ -31,7 +31,8 @@ def test_render_script_bakes_in_folder_and_escapes_it(tmp_path):
     assert "local IDLE_LIMIT = 300" in code
 
 
-def test_scripts_menu_dir_is_utility_folder():
+def test_scripts_menu_dir_is_utility_folder(monkeypatch):
+    monkeypatch.delenv("RESOLVE_PILOT_SCRIPTS_DIR")
     assert bridge.scripts_menu_dir().name == "Utility"
     with pytest.raises(ValueError):
         bridge.scripts_menu_dir("everyone")
@@ -355,12 +356,13 @@ def test_bridge_works_without_io_os_execute_package_or_debug(live_bridge, tmp_pa
 
 def test_install_gives_a_console_line_and_flags_older_bridge_scripts(tmp_path, monkeypatch):
     from resolve_pilot import mcp_server
-    monkeypatch.setattr(bridge, "scripts_menu_dir", lambda scope="user": tmp_path / "Utility")
-    (tmp_path / "Utility").mkdir()
-    (tmp_path / "Utility" / "resolve_pilot_bridge.lua").write_text("-- old")
-    (tmp_path / "Utility" / "AutoCut.lua").write_text("-- unrelated")
+    folder = bridge.scripts_menu_dir()
+    assert str(folder).startswith(str(tmp_path))  # the autouse fixture keeps tests out of Resolve
+    folder.mkdir(parents=True)
+    (folder / "resolve_pilot_bridge.lua").write_text("-- old")
+    (folder / "AutoCut.lua").write_text("-- unrelated")
     out = mcp_server.setup_bridge("install")
-    assert out["installed"].endswith("ResolvePilotBridge.lua")
+    assert out["installed"] == str(folder / "ResolvePilotBridge.lua")
     assert out["console_command"].startswith("dofile(") and "ResolvePilotBridge.lua" in out["console_command"]
     assert out["other_bridge_scripts"] == ["resolve_pilot_bridge.lua"]
 

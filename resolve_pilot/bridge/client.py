@@ -115,9 +115,16 @@ def render_script(idle_minutes: int = DEFAULT_IDLE_MINUTES, directory: Path | No
 
 
 def scripts_menu_dir(scope: str = "user") -> Path:
-    """Resolve's Workspace › Scripts folder for Utility scripts on this OS."""
+    """Resolve's Workspace › Scripts folder for Utility scripts on this OS.
+
+    RESOLVE_PILOT_SCRIPTS_DIR overrides it (the tests use that so they never write into
+    the real Resolve install).
+    """
     if scope not in ("user", "all"):
         raise ValueError("scope must be 'user' or 'all'")
+    override = os.environ.get("RESOLVE_PILOT_SCRIPTS_DIR")
+    if override:
+        return Path(override).expanduser()
     sysname = platform.system()
     if sysname == "Darwin":
         base = (

@@ -27,6 +27,10 @@ def isolated_home(tmp_path, monkeypatch):
     home = tmp_path / "rp-home"
     monkeypatch.setenv("RESOLVE_PILOT_HOME", str(home))
     monkeypatch.delenv("RESOLVE_PILOT_BRIDGE_DIR", raising=False)
+    # Never write into the real Resolve install: a test once replaced the user's
+    # installed bridge with one pointing at a pytest folder.
+    monkeypatch.setenv("RESOLVE_PILOT_SCRIPTS_DIR", str(tmp_path / "resolve-scripts" / "Utility"))
+    monkeypatch.setenv("RESOLVE_PILOT_LUT_DIR", str(tmp_path / "resolve-luts"))
     return home
 
 
