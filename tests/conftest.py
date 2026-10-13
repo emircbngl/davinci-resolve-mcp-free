@@ -30,7 +30,23 @@ def isolated_home(tmp_path, monkeypatch):
     return home
 
 
-def start_bridge(workdir: Path, idle_minutes: int = 1) -> subprocess.Popen:
+# Resolve 21.1+ Free: Console Lua without io, package, require, debug or os.execute
+# (reported by other bridges on 21.1.0.14). os.remove/os.rename are dropped too, as
+# the worst case; ffi stays, as it is a global inside Resolve.
+_SANDBOX_21_1 = """\
+local safe_os = {time = os.time, clock = os.clock, date = os.date, getenv = os.getenv,
+  difftime = os.difftime}
+local env = setmetatable({io = false, package = false, require = false, debug = false,
+  os = safe_os, ffi = require("ffi")}, {__index = _G})
+setmetatable(env, {__index = function(_, k)
+  local v = rawget(env, k)
+  if v == false then return nil end
+  return _G[k]
+end})
+"""
+
+
+def start_bridge(workdir: Path, idle_minutes: int = 1, sandbox: bool = False) -> subprocess.Popen:
     """Render the bridge for the current RESOLVE_PILOT_HOME and run it under LuaJIT."""
     from resolve_pilot import bridge
     from resolve_pilot.lua_snippets.library import lua_string
@@ -43,8 +59,9 @@ def start_bridge(workdir: Path, idle_minutes: int = 1) -> subprocess.Popen:
         # the globals, while chunks it compiles with loadstring get the real globals.
         f"dofile({lua_string(str(MOCK_RESOLVE))})\n"
         f"local chunk = assert(loadfile({lua_string(str(script))}))\n"
-        "setfenv(chunk, setmetatable({}, {__index = _G}))\n"
-        "chunk()\n",
+        + (_SANDBOX_21_1 + "setfenv(chunk, env)\n" if sandbox
+           else "setfenv(chunk, setmetatable({}, {__index = _G}))\n")
+        + "chunk()\n",
         encoding="utf-8",
     )
     proc = subprocess.Popen([LUAJIT, str(runner)], stdout=subprocess.PIPE,
@@ -73,10 +90,10 @@ def stop_bridge(proc: subprocess.Popen) -> str:
 
 
 @pytest.fixture
-def live_bridge(tmp_path):
+def live_bridge(tmp_path, request):
     if not LUAJIT:
         pytest.skip("luajit not installed")
-    proc = start_bridge(tmp_path)
+    proc = start_bridge(tmp_path, sandbox=getattr(request, "param", None) == "21.1")
     yield proc
     if proc.poll() is None:
         stop_bridge(proc)

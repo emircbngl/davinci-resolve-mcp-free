@@ -106,6 +106,7 @@ def render_script(idle_minutes: int = DEFAULT_IDLE_MINUTES, directory: Path | No
     return (
         _TEMPLATE.read_text(encoding="utf-8")
         .replace("__RP_BRIDGE_DIR__", lua_string(str(d)))
+        .replace("__RP_SEP__", lua_string(os.sep))
         .replace("__RP_VERSION_TEXT__", __version__)
         .replace("__RP_VERSION__", lua_string(__version__))
         .replace("__RP_IDLE_SECONDS__", str(minutes * 60))

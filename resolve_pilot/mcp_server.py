@@ -218,6 +218,31 @@ def _has_quartz() -> bool:
         return False
 
 
+_MAC_RESOLVE_APPS = (
+    Path("/Applications/DaVinci Resolve/DaVinci Resolve.app"),
+    Path("/Applications/DaVinci Resolve Studio/DaVinci Resolve Studio.app"),
+)
+
+
+def _resolve_app_version() -> str | None:
+    """Installed Resolve version from the app bundle (macOS); None elsewhere or if unknown."""
+    if platform.system() != "Darwin":
+        return None
+    import plistlib
+    for app in _MAC_RESOLVE_APPS:
+        try:
+            with open(app / "Contents" / "Info.plist", "rb") as f:
+                return str(plistlib.load(f).get("CFBundleShortVersionString") or "") or None
+        except (OSError, plistlib.InvalidFileException):
+            continue
+    return None
+
+
+def _version_at_least(text: str | None, major: int, minor: int) -> bool:
+    parts = [int(p) for p in (text or "").split(".")[:2] if p.isdigit()]
+    return len(parts) == 2 and (parts[0], parts[1]) >= (major, minor)
+
+
 @tool(READ, title="Status and capabilities")
 def resolve_pilot_status() -> dict[str, Any]:
     """Report what resolve-pilot can do on this machine and how it reaches Resolve.
@@ -235,6 +260,7 @@ def resolve_pilot_status() -> dict[str, Any]:
     except PackageNotFoundError:
         sdk = None
 
+    resolve_version = _resolve_app_version()
     next_steps: list[str] = []
     if not has_ffmpeg:
         next_steps.append("Install ffmpeg (macOS: brew install ffmpeg, Windows: winget install ffmpeg, "
@@ -245,6 +271,12 @@ def resolve_pilot_status() -> dict[str, Any]:
             "setup_bridge(action='install'), then ask the user to click Workspace > Scripts > "
             "ResolvePilotBridge in Resolve. Until then Resolve actions return Lua for the user to paste."
         )
+        if _version_at_least(resolve_version, 21, 1):
+            next_steps.append(
+                f"Resolve {resolve_version}: from 21.1 the Free edition limits scripts started from "
+                "the Workspace > Scripts menu. If the menu entry does nothing, have the user paste "
+                "setup_bridge's console_command into Workspace > Console (Lua tab)."
+            )
     else:
         next_steps.append("Call get_resolve_state to see the open project and timeline.")
     if not engines:
@@ -259,6 +291,7 @@ def resolve_pilot_status() -> dict[str, Any]:
         "mcp_sdk": sdk,
         "ffmpeg": has_ffmpeg,
         "resolve_running": _resolve_running(),
+        "resolve_version": resolve_version,
         "channel": channel,
         "studio_api": {"available": studio_ok, "detail": studio_detail},
         "bridge": br.to_dict(),
@@ -323,14 +356,24 @@ def setup_bridge(
             ),
         }
     path = bridge.install_script(idle_minutes)
-    return {
+    out: dict[str, Any] = {
         "installed": str(path),
+        "console_command": f"dofile({lua_lib.lua_string(str(path))})",
         "instructions": (
             "In DaVinci Resolve choose Workspace > Scripts > ResolvePilotBridge (it may sit under "
-            "a 'Utility' submenu; restart Resolve if it is not listed yet). Then call "
+            "a 'Utility' submenu; restart Resolve if it is not listed yet). If the menu entry does "
+            "nothing (Resolve 21.1+ Free limits scripts run from that menu), open Workspace > "
+            "Console, pick the Lua tab, paste console_command and press Enter. Then call "
             "setup_bridge(action='status') to confirm it is running."
         ),
     }
+    others = sorted(p.name for p in path.parent.glob("*.lua")
+                    if p != path and "bridge" in p.name.lower() and "pilot" in p.name.lower())
+    if others:
+        out["other_bridge_scripts"] = others
+        out["note"] = (f"{', '.join(others)} in {path.parent} look like older resolve-pilot bridges. "
+                       "Tell the user to start ResolvePilotBridge, not those; they can delete them.")
+    return out
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -1245,9 +1288,9 @@ def _ui_call(fn, *args) -> dict[str, Any]:
         return {"ok": False, "error": str(e),
                 "hint": "This needs DaVinci Resolve Studio. Tell the user, or do it another way."}
     except UIAutomationError as e:
+        from resolve_pilot.ui_automation.permissions import permission_hint
         return {"ok": False, "error": str(e),
-                "hint": "If this is a permission error, allow the MCP host app under System "
-                        "Settings > Privacy & Security > Accessibility."}
+                "hint": "If this is a permission error: " + permission_hint("Accessibility")}
     return out if isinstance(out, dict) else {"ok": True}
 
 
@@ -1308,11 +1351,10 @@ def screenshot_resolve(
                              "Install the UI extra: pip install 'davinci-resolve-mcp-free[ui]' "
                              "(or pip install -e '.[ui]' in a checkout), then restart the server.")
     if not screen.screen_recording_available():
+        from resolve_pilot.ui_automation.permissions import permission_hint
         return _screen_error(
             "Screen Recording permission is not granted to the app running resolve-pilot.",
-            "System Settings > Privacy & Security > Screen Recording: enable the app that runs "
-            "this MCP server (e.g. Claude Desktop, or the terminal running Claude Code), then "
-            "quit and reopen that app.")
+            permission_hint("Screen Recording"))
     onscreen, every = screen.find_resolve_windows()
     if not every:
         return _screen_error("No DaVinci Resolve window found.", "Is Resolve running? Ask the user to open it.")

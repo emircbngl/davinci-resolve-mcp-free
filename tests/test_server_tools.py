@@ -93,3 +93,11 @@ def test_studio_only_ui_failures_get_a_studio_hint():
 
     assert "Studio" in mcp_server._ui_call(studio_only)["hint"]
     assert "Accessibility" in mcp_server._ui_call(no_permission)["hint"]
+
+
+def test_version_compare_for_the_21_1_note():
+    from resolve_pilot import mcp_server
+    assert mcp_server._version_at_least("21.1.0", 21, 1)
+    assert mcp_server._version_at_least("22.0", 21, 1)
+    assert not mcp_server._version_at_least("20.3.0", 21, 1)
+    assert not mcp_server._version_at_least(None, 21, 1)

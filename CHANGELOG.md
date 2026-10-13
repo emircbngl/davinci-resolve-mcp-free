@@ -25,6 +25,14 @@ Verified live on Resolve 20.3 (Free, macOS): screenshot_resolve, grab_frames, sc
 - Static check that the bridge and every snippet read no undefined Lua globals (a deleted variable still referenced) and leak none; a stale stop file must not end a freshly started bridge.
 - Frames, contact sheets, scene sampling, read_video pairing and quality detectors against real ffmpeg on generated media; marker replacement through the live bridge; images over a real MCP client session.
 
+### Resolve 21.1+ Free
+- The bridge no longer needs `io`, `os.execute`, `package` or `debug`, which Resolve 21.1+ Free removed from its Lua. When `io` is missing it reads and writes its files through LuaJIT's `ffi` (a global in Resolve), takes the path separator from the MCP server, and the server creates the bridge folder. `rp.file_access` says which one is in use. Tests run the bridge in an emulated 21.1 sandbox. Not yet tried on a real 21.1 install.
+- `setup_bridge(install)` returns `console_command`, a one-line `dofile(...)` to paste into the Console when the Scripts menu entry does nothing, and lists older resolve-pilot bridge scripts left in the same menu.
+- `resolve_pilot_status` reports `resolve_version` (macOS) and, on 21.1+, how to start the bridge from the Console.
+
+### Permissions (macOS)
+- Accessibility and Screen Recording hints now name the app macOS actually checks. Claude Desktop starts MCP servers through a helper that makes the Python interpreter (Python.app) responsible, so "allow Claude" never worked for `screenshot_resolve`.
+
 ### Fixed (found in the live run)
 - `run_lua`: request code could not see the `rp` helpers and its `print()` output was lost, because Resolve runs the bridge script in its own environment while `loadstring` compiles against the real globals. Requests now get an environment with both; globals they set still persist between requests. Tests now run the bridge in a separate script environment like Resolve does.
 - `analyze_quality` flagged sub-dB wobble on a steady tone as "loud": loud/quiet now also need a 6 dB departure from the local level.

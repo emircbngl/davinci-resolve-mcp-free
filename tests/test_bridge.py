@@ -160,7 +160,7 @@ _LUA_BUILTINS = {
     "rawset", "require", "select", "setmetatable", "string", "table", "tonumber", "tostring",
     "type", "unpack", "xpcall", "_G", "getfenv", "setfenv",
 }
-_RESOLVE_GLOBALS = {"resolve", "Resolve", "fusion", "bmd", "app", "rp"}
+_RESOLVE_GLOBALS = {"resolve", "Resolve", "fusion", "bmd", "app", "rp", "ffi"}
 
 
 def _globals(luajit_listing: str) -> tuple[set[str], set[str]]:
@@ -337,3 +337,28 @@ def test_requests_see_rp_and_have_print_captured_in_a_script_environment(live_br
     # see the rp helpers and have print() captured (measured on Resolve 20.3).
     r = bridge.exec_lua('print("hi")\nreturn rp.timeline():GetName()')
     assert r.result == "Main" and r.output == "hi"
+
+
+@needs_luajit
+@pytest.mark.parametrize("live_bridge", ["21.1"], indirect=True)
+def test_bridge_works_without_io_os_execute_package_or_debug(live_bridge, tmp_path):
+    """Resolve 21.1+ Free sandbox: file access falls back to ffi, errors still report."""
+    r = bridge.exec_lua('print("hi ş")\nreturn {access = rp.file_access, tl = rp.timeline():GetName()}')
+    assert r.result == {"access": "ffi", "tl": "Main"} and r.output == "hi ş"
+    state = bridge.exec_lua(lua.snippet_get_state(include_clips=True)).result
+    assert state["current_timeline"]["clip_count"] == 2
+    r = bridge.exec_lua('error("boom")')
+    assert not r.ok and "boom" in r.error  # no debug.traceback here, the message still comes back
+    assert bridge.exec_lua("return 42").result == 42
+
+
+def test_install_gives_a_console_line_and_flags_older_bridge_scripts(tmp_path, monkeypatch):
+    from resolve_pilot import mcp_server
+    monkeypatch.setattr(bridge, "scripts_menu_dir", lambda scope="user": tmp_path / "Utility")
+    (tmp_path / "Utility").mkdir()
+    (tmp_path / "Utility" / "resolve_pilot_bridge.lua").write_text("-- old")
+    (tmp_path / "Utility" / "AutoCut.lua").write_text("-- unrelated")
+    out = mcp_server.setup_bridge("install")
+    assert out["installed"].endswith("ResolvePilotBridge.lua")
+    assert out["console_command"].startswith("dofile(") and "ResolvePilotBridge.lua" in out["console_command"]
+    assert out["other_bridge_scripts"] == ["resolve_pilot_bridge.lua"]

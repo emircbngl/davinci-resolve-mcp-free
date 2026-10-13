@@ -22,44 +22,115 @@ local MAX_OUTPUT = 256 * 1024     -- bytes of print() output kept per request
 local MAX_VALUES = 200000         -- values encoded per JSON document
 local MAX_STRING = 1024 * 1024    -- characters kept per string
 
-local SEP = package.config:sub(1, 1)
+local SEP = __RP_SEP__
 local REQ = DIR .. SEP .. "request.lua"
 local RESP = DIR .. SEP .. "response.json"
 local BEAT = DIR .. SEP .. "heartbeat"
 local STOP = DIR .. SEP .. "stop"
 local log = print
 
+-- File access ----------------------------------------------------------------
+-- Resolve 21.1+ Free runs Console Lua without io, package, require, debug or
+-- os.execute. LuaJIT's ffi is still there (a global in Resolve), so when io is
+-- missing the same operations go through the C library instead.
+
+local FFI = rawget(_G, "ffi") or ffi
+local C
+if not (io and io.open) and FFI then
+  pcall(FFI.cdef, [[
+    typedef struct FILE FILE;
+    FILE *fopen(const char *path, const char *mode);
+    size_t fread(void *ptr, size_t size, size_t n, FILE *f);
+    size_t fwrite(const void *ptr, size_t size, size_t n, FILE *f);
+    int fclose(FILE *f);
+    int fseek(FILE *f, long off, int whence);
+    long ftell(FILE *f);
+    int rename(const char *a, const char *b);
+    int remove(const char *p);
+  ]])
+  C = FFI.C
+end
+local BACKEND = (io and io.open) and "io" or (C and "ffi") or "none"
+
+local function remove(path)
+  if os and os.remove then return os.remove(path) end
+  return C and C.remove(path) == 0
+end
+
+local function rename(a, b)
+  if os and os.rename then return os.rename(a, b) end
+  return C and C.rename(a, b) == 0
+end
+
 local function read_file(path)
-  local f = io.open(path, "rb")
-  if not f then return nil end
-  local s = f:read("*a")
-  f:close()
-  return s
+  if BACKEND == "io" then
+    local f = io.open(path, "rb")
+    if not f then return nil end
+    local s = f:read("*a")
+    f:close()
+    return s
+  elseif BACKEND == "ffi" then
+    local f = C.fopen(path, "rb")
+    if f == nil then return nil end
+    C.fseek(f, 0, 2)
+    local n = tonumber(C.ftell(f))
+    C.fseek(f, 0, 0)
+    local s = ""
+    if n and n > 0 then
+      local buf = FFI.new("char[?]", n)
+      s = FFI.string(buf, tonumber(C.fread(buf, 1, n, f)))
+    end
+    C.fclose(f)
+    return s
+  end
+  return nil
 end
 
 local function exists(path)
-  local f = io.open(path, "rb")
-  if f then f:close() end
-  return f ~= nil
+  if BACKEND == "io" then
+    local f = io.open(path, "rb")
+    if f then f:close() end
+    return f ~= nil
+  elseif BACKEND == "ffi" then
+    local f = C.fopen(path, "rb")
+    if f ~= nil then C.fclose(f) return true end
+  end
+  return false
+end
+
+local function write_file(path, content)
+  if BACKEND == "io" then
+    local f = io.open(path, "wb")
+    if not f then return false end
+    f:write(content)
+    f:close()
+    return true
+  elseif BACKEND == "ffi" then
+    local f = C.fopen(path, "wb")
+    if f == nil then return false end
+    local n = C.fwrite(content, 1, #content, f)
+    C.fclose(f)
+    return tonumber(n) == #content
+  end
+  return false
 end
 
 local function write_atomic(path, content)
   local tmp = path .. ".tmp"
-  local f = io.open(tmp, "wb")
-  if not f then return false end
-  f:write(content)
-  f:close()
-  if os.rename(tmp, path) then return true end
-  os.remove(path) -- Windows cannot rename onto an existing file
-  return os.rename(tmp, path) and true or false
+  if not write_file(tmp, content) then return false end
+  if rename(tmp, path) then return true end
+  remove(path) -- Windows cannot rename onto an existing file
+  return rename(tmp, path) and true or false
 end
 
 local function sleep(sec)
   if bmd and bmd.wait then bmd.wait(sec) return end
-  if SEP == "/" then os.execute("sleep " .. sec) return end
+  if os and os.execute and SEP == "/" then os.execute("sleep " .. sec) return end
   local t = os.clock() + sec
   while os.clock() < t do end
 end
+
+local traceback = (debug and debug.traceback) or function(err) return tostring(err) end
 
 -- JSON encoding ------------------------------------------------------------
 -- Safe on anything a script can return: cycles become "<cycle>", and huge or
@@ -151,6 +222,7 @@ if not resolve then resolve = get_resolve() end
 
 rp = {
   version = VERSION,
+  file_access = BACKEND, -- "io", or "ffi" where Resolve's Lua has no io (21.1+ Free)
   json = encode,
   resolve = get_resolve,
 }
@@ -225,7 +297,7 @@ local function handle(id, raw)
     resp.ok = false
     resp.error = "Lua syntax error: " .. tostring(perr)
   else
-    local ok, value = xpcall(fn, debug.traceback)
+    local ok, value = xpcall(fn, traceback)
     resp.ok = ok
     if ok then resp.result = value else resp.error = tostring(value) end
   end
@@ -265,11 +337,16 @@ local function superseded()
   return s ~= nil and not s:find(TOKEN, 1, true)
 end
 
-os.remove(REQ)
-os.remove(RESP)
-os.remove(STOP)
+if BACKEND == "none" then
+  log("[bridge] ERROR: this Lua has neither io nor ffi, so the bridge cannot reach its folder.")
+  return
+end
+remove(REQ)
+remove(RESP)
+remove(STOP)
 if not heartbeat() then
-  os.execute((SEP == "/" and 'mkdir -p "' or 'mkdir "') .. DIR .. '"')
+  -- The MCP server creates the folder; this only helps when it was deleted since.
+  if os and os.execute then os.execute((SEP == "/" and 'mkdir -p "' or 'mkdir "') .. DIR .. '"') end
   if not heartbeat() then
     log("[bridge] ERROR: cannot write to " .. DIR)
     log("[bridge] Make sure the folder is writable, or point RESOLVE_PILOT_BRIDGE_DIR at another " ..
@@ -279,7 +356,7 @@ if not heartbeat() then
   end
 end
 
-log("[bridge] resolve-pilot bridge " .. VERSION .. " ready. Folder: " .. DIR)
+log("[bridge] resolve-pilot bridge " .. VERSION .. " ready (" .. BACKEND .. " file access). Folder: " .. DIR)
 if not resolve then
   log("[bridge] WARNING: no 'resolve' object here. Run this from Resolve's Console or Workspace > Scripts.")
 end
@@ -294,7 +371,7 @@ while true do
   if exists(REQ) then
     if superseded() then reason = "another bridge started"; break end
     local req = read_file(REQ)
-    os.remove(REQ)
+    remove(REQ)
     if req then
       local id = req:match("^%-%- rp%-id: ([%w%-_]+)") or ""
       heartbeat(os.time())
@@ -312,7 +389,7 @@ while true do
   end
   if tick % 10 == 0 then
     if exists(STOP) then
-      os.remove(STOP)
+      remove(STOP)
       reason = "stop requested"
       break
     end
@@ -323,5 +400,5 @@ while true do
   sleep(TICK)
 end
 
-if not superseded() then os.remove(BEAT) end
+if not superseded() then remove(BEAT) end
 log("[bridge] stopped (" .. reason .. ").")

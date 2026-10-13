@@ -99,10 +99,13 @@ def test_screenshot_returns_header_label_and_downscaled_png(monkeypatch, mac):
 
 def test_missing_permission_is_an_error_not_a_blank_image(monkeypatch, mac):
     monkeypatch.setitem(sys.modules, "Quartz", _quartz([_win(1, "Main", 100, 100)], permitted=False))
+    from resolve_pilot.ui_automation import permissions
+    monkeypatch.setattr(permissions, "responsible_app", lambda: "/Applications/Host.app")
     monkeypatch.setattr(screen.subprocess, "run", lambda *a, **k: pytest.fail("must not capture"))
     result = mcp_server.screenshot_resolve()
     header = _header(result)
     assert header["ok"] is False and "Screen Recording" in header["hint"]
+    assert "/Applications/Host.app" in header["hint"]
     assert len(result.content) == 1
 
 
