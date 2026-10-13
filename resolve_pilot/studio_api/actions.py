@@ -780,3 +780,198 @@ def add_subtitles(srt_path: str, replace: bool = False) -> dict[str, Any]:
              "text": it.GetName()} for it in tl.GetItemListInTrack("subtitle", 1) or []]
     return {"ok": bool(cues), "timeline": tl.GetName(), "fps": fps, "imported": imported,
             "media_pool_item": item.GetName(), "removed": removed, "cues": cues}
+
+
+def _pcall(obj, method: str, *args) -> tuple[bool, Any]:
+    """(succeeded, value or error text), like the Lua snippets' pcall wrapper."""
+    fn = getattr(obj, method, None)
+    if not callable(fn):
+        return False, f"{method} is not available"
+    try:
+        return True, fn(*args)
+    except Exception as e:  # the native module raises on bad keys / types
+        return False, str(e)
+
+
+def set_clip_properties(track_type: str = "video", track: int = 1, indices: list[int] | None = None,
+                        properties: dict[str, Any] | None = None,
+                        enabled: bool | None = None) -> dict[str, Any]:
+    """Studio twin of snippet_set_clip_properties (same result shape, read-back `ok`)."""
+    from resolve_pilot.lua_snippets.library import normalize_clip_properties, values_match
+
+    rows = normalize_clip_properties(properties)
+    resolve = get_resolve()
+    resolved: dict[str, Any] = {}
+    for p in rows:
+        if "const" in p:
+            value = getattr(resolve, p["const"], None)
+            if value is None:
+                return {"ok": False, "error": f"This Resolve has no resolve.{p['const']} constant; "
+                                              f"pass the integer value for {p['key']} instead."}
+            p["value"] = resolved[p["key"]] = value
+    tl = _current_timeline()
+    items = clip_items(tl, track_type, int(track))
+    if indices is None:
+        targets, missing = list(enumerate(items)), []
+    else:
+        targets = [(i, items[i]) for i in indices if 0 <= i < len(items)]
+        missing = [i for i in indices if not 0 <= i < len(items)]
+    clips, changed = [], 0
+    for index, it in targets:
+        row: dict[str, Any] = {"index": index, "name": it.GetName(), "requested": {}, "actual": {},
+                               "mismatched": [], "contradicted": [], "ok": True}
+        checks = [(p["key"], p["kind"], p["value"], p["requested"], ("SetProperty", p["key"], p["value"]),
+                   ("GetProperty", p["key"])) for p in rows]
+        if enabled is not None:
+            checks.append(("enabled", "bool", enabled, enabled, ("SetClipEnabled", enabled),
+                           ("GetClipEnabled",)))
+        for key, kind, value, requested, setter, getter in checks:
+            row["requested"][key] = requested
+            done, said = _pcall(it, *setter)
+            read, got = _pcall(it, *getter)
+            if read and got is not None:
+                row["actual"][key] = got
+            if not (done and read and values_match(kind, value, got)):
+                row["ok"] = False
+                row["mismatched"].append(key)
+                if not done:
+                    row["error"] = str(said)
+                elif said is True:
+                    row["contradicted"].append(key)
+        changed += row["ok"]
+        clips.append(row)
+    out: dict[str, Any] = {
+        "ok": bool(targets) and changed == len(targets) and not missing, "track_type": track_type,
+        "track": int(track), "clip_count": len(items), "changed": changed, "clips": clips,
+        "missing_indices": missing, "resolved_values": resolved, "timeline": tl.GetName()}
+    if not targets:
+        out["error"] = (f"No clips to change on {track_type} track {track} "
+                        f"({len(items)} clips there).")
+    elif not out["ok"]:
+        out["error"] = ("Some values did not stick: Resolve's read-back differs from what was "
+                        "requested (see clips[].mismatched), or indices are missing.")
+    return out
+
+
+_TRACK_FIELDS = (("name", "SetTrackName", "GetTrackName", "string"),
+                 ("enabled", "SetTrackEnable", "GetIsTrackEnabled", "bool"),
+                 ("locked", "SetTrackLock", "GetIsTrackLocked", "bool"))
+
+
+def set_tracks(changes: list[dict] | None = None, add: list[dict] | None = None) -> dict[str, Any]:
+    """Studio twin of snippet_set_tracks (same result shape, read-back `ok`)."""
+    from resolve_pilot.lua_snippets.library import normalize_track_changes, values_match
+
+    rows, adds = normalize_track_changes(changes, add)
+    tl = _current_timeline()
+
+    def count(kind: str) -> int:
+        done, n = _pcall(tl, "GetTrackCount", kind)
+        try:
+            return int(n) if done and n is not None else 0
+        except (TypeError, ValueError):
+            return 0
+
+    added, all_ok = [], True
+    for a in adds:
+        before = count(a["track_type"])
+        done, said = _pcall(tl, "AddTrack", a["track_type"], *([a["sub_type"]] if a.get("sub_type") else []))
+        after = count(a["track_type"])
+        row: dict[str, Any] = {"track_type": a["track_type"], "before": before, "after": after,
+                               "ok": after == before + 1}
+        if a.get("sub_type"):
+            row["sub_type"] = a["sub_type"]
+        if row["ok"]:
+            row["index"] = after
+        if not done:
+            row["error"] = str(said)
+        elif not row["ok"]:
+            row["error"] = f"AddTrack returned {said} but the track count did not grow"
+        all_ok = all_ok and row["ok"]
+        added.append(row)
+    results = []
+    for c in rows:
+        row = {"track_type": c["track_type"], "index": c["index"], "requested": {}, "actual": {},
+               "mismatched": [], "contradicted": [], "ok": True}
+        n = count(c["track_type"])
+        if c["index"] > n:
+            row.update(ok=False, error=f"There is no {c['track_type']} track {c['index']} ({n} tracks).")
+        else:
+            for key, setter, getter, kind in _TRACK_FIELDS:
+                if key not in c:
+                    continue
+                row["requested"][key] = c[key]
+                done, said = _pcall(tl, setter, c["track_type"], c["index"], c[key])
+                read, got = _pcall(tl, getter, c["track_type"], c["index"])
+                if read and got is not None:
+                    row["actual"][key] = got
+                same = read and (got == c[key] if kind == "string" else values_match("bool", c[key], got))
+                if not (done and same):
+                    row["ok"] = False
+                    row["mismatched"].append(key)
+                    if not done:
+                        row["error"] = str(said)
+                    elif said is True:
+                        row["contradicted"].append(key)
+        all_ok = all_ok and row["ok"]
+        results.append(row)
+    out: dict[str, Any] = {"ok": all_ok, "added": added, "changes": results, "timeline": tl.GetName(),
+                           "track_counts": {k: count(k) for k in ("video", "audio", "subtitle")}}
+    if not all_ok:
+        out["error"] = "Some track changes did not stick (see added[].error and changes[].mismatched)."
+    return out
+
+
+def export_timeline(out_path: str | None = None, export_type: str = "FCPXML_1_10",
+                    export_subtype: str | None = None, timeline_name: str | None = None,
+                    out_dir: str | None = None, stamp: str | None = None) -> dict[str, Any]:
+    """Studio twin of snippet_export_timeline (same result shape)."""
+    import re
+
+    from resolve_pilot.lua_snippets.library import EXPORT_FORMATS
+
+    if export_subtype is None:
+        export_subtype = {"AAF": "AAF_NEW", "EDL": "NONE"}.get(export_type)
+    resolve = get_resolve()
+    kind = getattr(resolve, f"EXPORT_{export_type}", None)
+    if kind is None:
+        return {"ok": False, "error": f"Unknown export_type {export_type} in this Resolve version"}
+    sub = getattr(resolve, f"EXPORT_{export_subtype}", None) if export_subtype else None
+    if export_subtype and sub is None:
+        return {"ok": False, "error": f"This Resolve has no resolve.EXPORT_{export_subtype}"}
+    project = _current_project()
+    current = project.GetCurrentTimeline()
+    timeline = current
+    if timeline_name:
+        timelines = [project.GetTimelineByIndex(i) for i in range(1, int(project.GetTimelineCount() or 0) + 1)]
+        names = [t.GetName() for t in timelines if t]
+        timeline = next((t for t in timelines if t and t.GetName() == timeline_name), None)
+        if timeline is None:
+            return {"ok": False, "error": f"No timeline named '{timeline_name}'.", "timelines": names}
+    if timeline is None:
+        return {"ok": False, "error": "No active timeline. Open a timeline on the Edit page first."}
+    name = timeline.GetName()
+    if out_path:
+        out = os.path.expanduser(out_path)
+    else:
+        ext = next((e for t, _, e in EXPORT_FORMATS.values() if t == export_type), ".txt")
+        slug = re.sub(r"[^A-Za-z0-9\-]+", "_", name).strip("_") or "timeline"
+        out = os.path.join(os.path.expanduser(out_dir or "."), f"{slug}_{stamp or 'export'}{ext}")
+    args = (out, kind, sub) if export_subtype else (out, kind)
+    done, ok = _pcall(timeline, "Export", *args)
+    switched = False
+    if not (done and ok) and current and name != current.GetName():
+        switched = bool(project.SetCurrentTimeline(timeline))
+        if switched:
+            try:
+                done, ok = _pcall(timeline, "Export", *args)
+            finally:
+                project.SetCurrentTimeline(current)
+    result: dict[str, Any] = {"ok": bool(done and ok), "path": out, "timeline": name,
+                              "export_type": export_type, "export_subtype": export_subtype,
+                              "switched_timeline": switched}
+    if not done:
+        result["error"] = str(ok)
+    elif not ok:
+        result["error"] = f"Resolve's Timeline:Export returned {ok}"
+    return result

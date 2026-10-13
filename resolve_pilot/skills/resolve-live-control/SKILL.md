@@ -24,7 +24,7 @@ The bridge exits after 60 idle minutes (configurable), when a newer bridge start
 ## 2. Work in a read → act → verify loop
 
 1. **Read**: `get_resolve_state(include_clips=true, include_markers=true)`.
-2. **Act** with a dedicated tool when one exists — `import_media`, `append_clips`, `remove_clips`, `import_timeline`, `add_markers`, `set_clip_color`, `apply_lut`, `queue_render`, `open_page` — they return structured results on every channel.
+2. **Act** with a dedicated tool when one exists — `import_media`, `append_clips`, `remove_clips`, `import_timeline`, `add_markers`, `set_clip_color`, `apply_lut`, `queue_render`, `open_page`, `set_clip_properties` (Inspector values, clip enable), `set_tracks` (add / rename / mute / lock tracks), `export_timeline` — they return structured results on every channel.
 3. **Verify**: read the state again and compare with what you intended. Never report success you have not seen. On macOS, `screenshot_resolve` shows the Resolve window itself (dialogs, the viewer, which page is open).
 
 ### Building and changing the timeline live

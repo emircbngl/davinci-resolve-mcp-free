@@ -13,6 +13,7 @@ Tool groups:
             set_clip_color, apply_lut, queue_render, render_status, open_page, run_lua,
             list_lua_snippets, render_lua_snippet
 - timeline: import_media, append_clips, remove_clips (live building, no FCPXML)
+- inspector / tracks: set_clip_properties, set_tracks, export_timeline
 - macOS UI: send_keystroke, menu_pick, open_ai_feature
 
 Run as:
@@ -71,8 +72,14 @@ it once per session; setup_bridge installs it into Workspace > Scripts.
 user verbatim and ask them to paste it into Workspace > Console. Offer setup_bridge if they \
 want hands-free control.
 Resolve actions (get_resolve_state, import_timeline, import_media, append_clips, remove_clips, \
-add_markers, add_quality_markers, set_clip_color, apply_lut, queue_render, open_page) choose the \
-channel automatically and report it in `channel`.
+add_markers, add_quality_markers, add_subtitles, set_clip_color, apply_lut, queue_render, open_page, \
+set_clip_properties, set_tracks, export_timeline) choose the channel automatically and report \
+it in `channel`.
+Changing clips and tracks: set_clip_properties (zoom, pan, crop, opacity, scaling, enable / \
+disable; a 9:16 reframe) and set_tracks (add, rename, mute / hide, lock) read every value back \
+from Resolve; trust `ok` and `mismatched`, not the request. After a visual change, look at it \
+with timeline_frames. export_timeline writes FCPXML / EDL / AAF / OTIO / DRT for other NLEs \
+or as a backup (drt) before large edits.
 
 Seeing: grab_frames (frames at given times), scene_frames (one frame per scene) and read_video \
 (speech next to the matching frames) return images you can look at; layout="grid" packs them \
@@ -1289,6 +1296,176 @@ def set_clip_color(
         return {"ok": True, "colored": _studio().set_clip_color(track=track, color=color),
                 "track": track, "color": color}
     return control.perform(lua_lib.snippet_set_clip_color(color, track), studio, channel)
+
+
+_PROPERTY_HELP = (
+    "Inspector values by key. Numbers: ZoomX, ZoomY (0-100, 1 = 100%), Pan, Tilt (pixels, "
+    "documented range +-4x the timeline width/height), RotationAngle (-360..360), AnchorPointX, "
+    "AnchorPointY, Pitch, Yaw (-1.5..1.5), CropLeft, CropRight, CropTop, CropBottom (pixels, >= 0), "
+    "CropSoftness (-100..100), Distortion (-1..1), Opacity (0-100). Booleans: ZoomGang, FlipX, "
+    "FlipY, CropRetain. Names (or the integer value): Scaling (use_project, crop, fit, fill, "
+    "stretch), CompositeMode (normal, screen, multiply, add, overlay, ...), DynamicZoomEase "
+    "(linear, in, out, in_and_out), RetimeProcess (use_project, nearest, frame_blend, "
+    "optical_flow), MotionEstimation (use_project, standard_faster, ..., speed_warp_better), "
+    "ResizeFilter (use_project, sharper, smoother, lanczos, ...).")
+
+
+@tool(_hints(read_only=False, idempotent=True), title="Set clip properties")
+def set_clip_properties(
+    track_type: Literal["video", "audio"] = "video",
+    track: Annotated[int, Field(ge=1, description="Track number (V1 = 1).")] = 1,
+    indices: Annotated[list[Annotated[int, Field(ge=0)]] | None, Field(min_length=1, description=(
+        "0-based clip indices as get_resolve_state(include_clips=true) lists them "
+        "(transitions skipped). Omit for every clip on the track."))] = None,
+    properties: Annotated[dict[str, Any] | None, Field(description=_PROPERTY_HELP)] = None,
+    enabled: Annotated[bool | None, Field(description="Enable (true) or disable (false) the clips.")] = None,
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """Change Inspector properties of timeline clips (zoom, position, rotation, crop, flip,
+    opacity, composite mode, scaling, retime) and enable/disable them, with read-back.
+
+    Each clip comes back as {index, name, requested, actual, ok, mismatched}: `ok` is what
+    Resolve reports *after* the write (GetProperty / GetClipEnabled), not the setter's
+    return value, which can be true for a value that did not stick (`contradicted`).
+    9:16 reframe of 16:9 footage on a 1080x1920 timeline: properties={"Scaling": "fill"}
+    fills the frame (crops the sides); then move the subject into view with Pan, or
+    ZoomX/ZoomY above 1 to punch in. Pan's unit and sign are not verified yet: check the
+    picture with timeline_frames and adjust. See get_workflow_guide('rough-cut').
+    """
+    rows = lua_lib.normalize_clip_properties(properties)  # fail fast, before any channel
+    if not rows and enabled is None:
+        raise ValueError("Nothing to change: pass properties and/or enabled.")
+    args = dict(track_type=track_type, track=track, indices=indices, properties=properties,
+                enabled=enabled)
+    return control.perform(lua_lib.snippet_set_clip_properties(**args),
+                           lambda: _studio().set_clip_properties(**args), channel)
+
+
+class TrackChange(BaseModel):
+    track_type: Literal["video", "audio", "subtitle"]
+    index: int = Field(ge=1, description="Track number (V1 / A1 = 1).")
+    name: str | None = None
+    enabled: bool | None = Field(None, description="false hides a video track / mutes an audio track.")
+    locked: bool | None = None
+
+
+class TrackAdd(BaseModel):
+    track_type: Literal["video", "audio", "subtitle"]
+    sub_type: str | None = Field(None, description=(
+        "Audio only: mono, stereo, 5.1, 5.1film, 7.1, 7.1film, adaptive1-adaptive24."))
+
+
+@tool(EDIT_RESOLVE, title="Set tracks")
+def set_tracks(
+    changes: Annotated[list[TrackChange] | None, Field(description=(
+        "Rename, enable/disable or lock/unlock existing tracks."))] = None,
+    add: Annotated[list[TrackAdd] | None, Field(description=(
+        "Tracks to append (done before `changes`, so a change can name a track added here)."))] = None,
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """Add tracks and rename, enable/disable (mute a B-roll or music track) or lock tracks of
+    the current timeline.
+
+    Every change is read back from Resolve: each comes back as {requested, actual, ok,
+    mismatched}, and added tracks report the track count before and after.
+    """
+    args = dict(changes=[c.model_dump(exclude_none=True) for c in changes or []],
+                add=[a.model_dump(exclude_none=True) for a in add or []])
+    lua_lib.normalize_track_changes(**args)  # fail fast, before any channel
+    return control.perform(lua_lib.snippet_set_tracks(**args),
+                           lambda: _studio().set_tracks(**args), channel)
+
+
+def _export_candidates(path: Path) -> list[Path]:
+    """Where an export can land: the path itself, or a bundle folder next to it (Resolve
+    has been reported to write FCPXML 1.10 as a .fcpxmld bundle)."""
+    out = [path]
+    if path.suffix.lower() == ".fcpxml":
+        out += [path.with_suffix(".fcpxmld"), Path(str(path) + "d")]
+    return list(dict.fromkeys(out))
+
+
+def _snapshot(path: Path) -> tuple[int, int] | None:
+    try:
+        if path.is_dir():
+            files = [f for f in path.rglob("*") if f.is_file()]
+            return sum(f.stat().st_size for f in files), max((f.stat().st_mtime_ns for f in files), default=0)
+        st = path.stat()
+        return st.st_size, st.st_mtime_ns
+    except OSError:
+        return None
+
+
+def _verify_export(path: Path, before: dict[Path, tuple[int, int] | None]) -> dict[str, Any]:
+    """Check on disk that Resolve really wrote the export (non-empty, new or rewritten)."""
+    for cand in _export_candidates(path):
+        snap = _snapshot(cand)
+        if snap is None:
+            continue
+        size, _ = snap
+        out: dict[str, Any] = {"path": str(cand), "size_bytes": size, "is_bundle": cand.is_dir()}
+        if cand.is_dir():
+            out["bundle_files"] = sorted(str(f.relative_to(cand)) for f in cand.rglob("*") if f.is_file())[:20]
+        if size == 0:
+            out.update(verified=False, error=f"Resolve wrote {cand}, but it is empty.")
+        elif before.get(cand) == snap:
+            out.update(verified=False, error=f"{cand} already existed and was not rewritten.")
+        else:
+            out["verified"] = True
+        return out
+    return {"verified": False, "error": f"Nothing was written at {path}."}
+
+
+@tool(WRITE_FILES, title="Export timeline")
+def export_timeline(
+    format: Annotated[Literal[tuple(lua_lib.EXPORT_FORMATS)], Field(description=(  # type: ignore[valid-type]
+        "fcpxml (= 1.10, Final Cut / Premiere via FCPXML), fcpxml_1_9, fcpxml_1_8, fcp7_xml, "
+        "edl (+ edl_cdl, edl_sdl, edl_missing_clips), aaf (new) / aaf_existing (Pro Tools, Avid), "
+        "otio (OpenTimelineIO), drt (Resolve's own timeline file, the best backup), "
+        "csv / tab (edit list as text), ale / ale_cdl."))] = "fcpxml",
+    out_path: Annotated[str | None, Field(description=(
+        "Defaults to <timeline name>_<date-time>.<ext> in resolve-pilot's exports folder. "
+        "An explicit path is overwritten."))] = None,
+    timeline: Annotated[str | None, Field(description="Timeline name; defaults to the current one.")] = None,
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """Export a Resolve timeline as FCPXML, EDL, AAF, OTIO, DRT, CSV and more.
+
+    Use it to hand a cut to another NLE or a sound editor, to read back the real cut, or to
+    back up a timeline (drt) before large edits; import_timeline loads it back. The file is
+    checked on disk afterwards: `ok` needs a non-empty file (or bundle folder) that Resolve
+    actually wrote, and `size_bytes` says how big it is.
+    """
+    import time
+    export_type, subtype, _ext = lua_lib.EXPORT_FORMATS[format]
+    if out_path:
+        target: Path | None = Path(out_path).expanduser().resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        args = dict(out_path=str(target), export_type=export_type, export_subtype=subtype,
+                    timeline_name=timeline)
+    else:
+        target = None
+        args = dict(export_type=export_type, export_subtype=subtype, timeline_name=timeline,
+                    out_dir=str(state_dir("exports")), stamp=time.strftime("%Y%m%d-%H%M%S"))
+    before = {c: _snapshot(c) for c in _export_candidates(target)} if target else {}
+    out = control.perform(lua_lib.snippet_export_timeline(**args),
+                          lambda: _studio().export_timeline(**args), channel, timeout=180.0)
+    out["format"] = format
+    if out.get("channel") == "manual" or not out.get("path"):
+        return out
+    check = _verify_export(Path(out["path"]), before)
+    resolve_said, resolve_error = bool(out.get("ok")), out.pop("error", None)
+    out.update(check)
+    out["ok"] = bool(check["verified"])
+    if out["ok"] and not resolve_said:
+        out["note"] = "Resolve reported failure, but a fresh non-empty file is there."
+    elif not out["ok"] and resolve_said:
+        out["error"] = "Resolve reported success, but: " + check["error"]
+    elif not out["ok"]:
+        out["error"] = resolve_error or check["error"]
+    if out["ok"]:
+        out["next_step"] = f"import_timeline(path={out['path']!r}) loads it back into Resolve."
+    return out
 
 
 @tool(DESTRUCTIVE, title="Apply LUT")

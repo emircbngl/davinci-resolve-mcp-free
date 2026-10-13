@@ -91,6 +91,7 @@ After connecting, ask Claude things like:
 | Export | `export_fcpxml` · `export_srt` |
 | Resolve (auto-routed) | `get_resolve_state` · `import_timeline` · `add_markers` · `add_quality_markers` · `set_clip_color` · `apply_lut` · `queue_render` · `render_status` · `add_subtitles` · `open_page` |
 | Build timelines (auto-routed) | `import_media` (into bins, no duplicates) · `append_clips` (source ranges onto the current, a named or a new timeline, any track) · `remove_clips` (by index, name-checked) |
+| Inspector & tracks (auto-routed) | `set_clip_properties` (zoom, pan, crop, opacity, scaling, enable; read back) · `set_tracks` (add, rename, mute/hide, lock) · `export_timeline` (FCPXML, EDL, AAF, OTIO, DRT, CSV) |
 | Lua | `run_lua` (live) · `list_lua_snippets` · `render_lua_snippet` (paste) |
 | macOS UI | `send_keystroke` · `menu_pick` · `open_ai_feature` |
 

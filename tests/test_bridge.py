@@ -127,6 +127,10 @@ _SNIPPET_SAMPLES = {
                                {"media_pool_id": "id", "media": "audio"}],
                      "new_timeline": "Cut", "new_timeline_fps": 25},
     "remove_clips": {"indices": [0, 2], "names": ["a", "b"], "ripple": True},
+    "set_clip_properties": {"indices": [0], "properties": {"Scaling": "fill", "Pan": -200.0,
+                                                           "FlipX": True}, "enabled": False},
+    "set_tracks": {"changes": [{"track_type": "video", "index": 1, "name": "A", "locked": True}],
+                   "add": [{"track_type": "audio", "sub_type": "stereo"}]},
 }
 
 

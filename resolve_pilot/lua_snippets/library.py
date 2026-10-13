@@ -555,18 +555,45 @@ return {{ok = true, timeline = tl:GetName(), video_clip_count = n,
 
 EXPORT_SUBTYPES = ("NONE", "AAF_NEW", "AAF_EXISTING", "CDL", "SDL", "MISSING_CLIPS")
 
+# export_timeline formats -> (resolve.EXPORT_<type>, resolve.EXPORT_<subtype> or None, extension).
+# Types and subtypes from Resolve's scripting README; AAF and EDL require a subtype.
+EXPORT_FORMATS: dict[str, tuple[str, str | None, str]] = {
+    "fcpxml": ("FCPXML_1_10", None, ".fcpxml"),
+    "fcpxml_1_10": ("FCPXML_1_10", None, ".fcpxml"),
+    "fcpxml_1_9": ("FCPXML_1_9", None, ".fcpxml"),
+    "fcpxml_1_8": ("FCPXML_1_8", None, ".fcpxml"),
+    "fcp7_xml": ("FCP_7_XML", None, ".xml"),
+    "edl": ("EDL", "NONE", ".edl"),
+    "edl_cdl": ("EDL", "CDL", ".edl"),
+    "edl_sdl": ("EDL", "SDL", ".edl"),
+    "edl_missing_clips": ("EDL", "MISSING_CLIPS", ".edl"),
+    "aaf": ("AAF", "AAF_NEW", ".aaf"),
+    "aaf_existing": ("AAF", "AAF_EXISTING", ".aaf"),
+    "otio": ("OTIO", None, ".otio"),
+    "drt": ("DRT", None, ".drt"),
+    "csv": ("TEXT_CSV", None, ".csv"),
+    "tab": ("TEXT_TAB", None, ".txt"),
+    "ale": ("ALE", None, ".ale"),
+    "ale_cdl": ("ALE_CDL", None, ".ale"),
+}
+
 
 @_snippet
 def snippet_export_timeline(
-    out_path: str,
+    out_path: str | None = None,
     export_type: str = "FCPXML_1_10",
     export_subtype: str | None = None,
+    timeline_name: str | None = None,
+    out_dir: str | None = None,
+    stamp: str | None = None,
 ) -> str:
-    """Export the current timeline (FCPXML_1_10, FCPXML_1_9, AAF, EDL, OTIO, DRT, ...).
+    """Export a timeline (FCPXML_1_10, FCPXML_1_9, AAF, EDL, OTIO, DRT, TEXT_CSV, ...).
 
     export_type is the suffix of Resolve's `resolve.EXPORT_*` constant. AAF and EDL
     also need export_subtype (AAF: AAF_NEW / AAF_EXISTING; EDL: NONE / CDL / SDL /
     MISSING_CLIPS); it defaults to AAF_NEW and NONE.
+    timeline_name: export that timeline instead of the current one.
+    Without out_path the file goes to out_dir as <timeline name>_<stamp><extension>.
     """
     if not re.fullmatch(r"[A-Z0-9_]+", export_type):
         raise ValueError(f"export_type must look like FCPXML_1_10, got {export_type!r}")
@@ -574,16 +601,59 @@ def snippet_export_timeline(
         export_subtype = {"AAF": "AAF_NEW", "EDL": "NONE"}.get(export_type)
     if export_subtype is not None and export_subtype not in EXPORT_SUBTYPES:
         raise ValueError(f"export_subtype must be one of {', '.join(EXPORT_SUBTYPES)}")
-    out_path = os.path.expanduser(out_path)
+    if out_path is None and out_dir is None:
+        raise ValueError("Pass out_path, or out_dir for an automatic file name.")
+    ext = next((e for t, _, e in EXPORT_FORMATS.values() if t == export_type), ".txt")
+    out_path = os.path.expanduser(out_path) if out_path else None
+    out_dir = os.path.expanduser(out_dir) if out_dir else None
     sub = f", resolve.EXPORT_{export_subtype}" if export_subtype else ""
+    sub_check = (f'\nif resolve.EXPORT_{export_subtype} == nil then\n  return {{ok = false, error = '
+                 f'"This Resolve has no resolve.EXPORT_{export_subtype}"}}\nend' if export_subtype else "")
     return f"""-- resolve-pilot: export_timeline
-{_TIMELINE_PREAMBLE}if resolve.EXPORT_{export_type} == nil then
+{_PROJECT_PREAMBLE}if resolve.EXPORT_{export_type} == nil then
   return {{ok = false, error = "Unknown export_type {export_type} in this Resolve version"}}
+end{sub_check}
+local wanted, out = {to_lua(timeline_name)}, {to_lua(out_path)}
+local current = project:GetCurrentTimeline()
+local timeline = current
+if wanted then
+  timeline = nil
+  local names = {{}}
+  for i = 1, (project:GetTimelineCount() or 0) do
+    local t = project:GetTimelineByIndex(i)
+    if t and t:GetName() == wanted then timeline = t end
+    if t then names[#names + 1] = t:GetName() end
+  end
+  if not timeline then
+    return {{ok = false, error = "No timeline named '" .. wanted .. "'.", timelines = names}}
+  end
 end
-local out = {to_lua(out_path)}
-local ok = timeline:Export(out, resolve.EXPORT_{export_type}{sub})
-print(string.format("[resolve-pilot] Export %s -> %s", tostring(ok), out))
-return {{ok = ok and true or false, path = out}}
+if not timeline then
+  return {{ok = false, error = "No active timeline. Open a timeline on the Edit page first."}}
+end
+local name = timeline:GetName()
+if not out then
+  local slug = name:gsub("[^%w%-]+", "_"):gsub("^_+", ""):gsub("_+$", "")
+  if slug == "" then slug = "timeline" end
+  out = {to_lua(out_dir)} .. {to_lua(os.sep)} .. slug .. "_" .. {to_lua(stamp or "export")} .. {to_lua(ext)}
+end
+local function export() return timeline:Export(out, resolve.EXPORT_{export_type}{sub}) end
+local done, ok = pcall(export)
+local switched = false
+-- Export may only work on the current timeline; retry with it current, then switch back.
+if not (done and ok) and current and name ~= current:GetName() then
+  switched = project:SetCurrentTimeline(timeline) and true or false
+  if switched then
+    done, ok = pcall(export)
+    project:SetCurrentTimeline(current)
+  end
+end
+print(string.format("[resolve-pilot] Export %s -> %s", tostring(done and ok), out))
+local result = {{ok = (done and ok) and true or false, path = out, timeline = name,
+  export_type = {to_lua(export_type)}, export_subtype = {to_lua(export_subtype)}, switched_timeline = switched}}
+if not done then result.error = tostring(ok)
+elseif not ok then result.error = "Resolve's Timeline:Export returned " .. tostring(ok) end
+return result
 """
 
 
@@ -599,6 +669,349 @@ for _, item in ipairs(items or {{}}) do
 end
 print(string.format("[resolve-pilot] Colored %d clips on V%d", n, {int(track)}))
 return {{ok = true, colored = n, track = {int(track)}, color = {to_lua(c)}}}
+"""
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Inspector properties (TimelineItem:SetProperty) and tracks
+# ────────────────────────────────────────────────────────────────────────────
+
+# Keys TimelineItem:SetProperty accepts, from Resolve's scripting README, in the order they
+# are written (Scaling before zoom, ZoomGang before ZoomX/ZoomY). Value kinds:
+#   ("number", min, max)  min/max None = only finite; Pan/Tilt/AnchorPoint are documented
+#                         as +-4x the timeline width/height, crops as 0..width/height
+#   ("bool",)
+#   ("enum", prefix, names)  a name resolves to the resolve.<prefix><NAME> constant inside
+#                         Resolve (its integer value is not assumed); an int is passed as is
+CLIP_PROPERTIES: dict[str, tuple] = {
+    "Scaling": ("enum", "SCALE_", ("USE_PROJECT", "CROP", "FIT", "FILL", "STRETCH")),
+    "ResizeFilter": ("enum", "RESIZE_FILTER_", (
+        "USE_PROJECT", "SHARPER", "SMOOTHER", "BICUBIC", "BILINEAR", "BESSEL", "BOX",
+        "CATMULL_ROM", "CUBIC", "GAUSSIAN", "LANCZOS", "MITCHELL", "NEAREST_NEIGHBOR",
+        "QUADRATIC", "SINC", "LINEAR")),
+    "ZoomGang": ("bool",),
+    "ZoomX": ("number", 0.0, 100.0),
+    "ZoomY": ("number", 0.0, 100.0),
+    "Pan": ("number", None, None),
+    "Tilt": ("number", None, None),
+    "RotationAngle": ("number", -360.0, 360.0),
+    "AnchorPointX": ("number", None, None),
+    "AnchorPointY": ("number", None, None),
+    "Pitch": ("number", -1.5, 1.5),
+    "Yaw": ("number", -1.5, 1.5),
+    "FlipX": ("bool",),
+    "FlipY": ("bool",),
+    "CropLeft": ("number", 0.0, None),
+    "CropRight": ("number", 0.0, None),
+    "CropTop": ("number", 0.0, None),
+    "CropBottom": ("number", 0.0, None),
+    "CropSoftness": ("number", -100.0, 100.0),
+    "CropRetain": ("bool",),
+    "Distortion": ("number", -1.0, 1.0),
+    "Opacity": ("number", 0.0, 100.0),
+    "CompositeMode": ("enum", "COMPOSITE_", (
+        "NORMAL", "ADD", "SUBTRACT", "DIFF", "MULTIPLY", "SCREEN", "OVERLAY", "HARDLIGHT",
+        "SOFTLIGHT", "DARKEN", "LIGHTEN", "COLOR_DODGE", "COLOR_BURN", "EXCLUSION", "HUE",
+        "SATURATE", "COLORIZE", "LUMA_MASK", "DIVIDE", "LINEAR_DODGE", "LINEAR_BURN",
+        "LINEAR_LIGHT", "VIVID_LIGHT", "PIN_LIGHT", "HARD_MIX", "LIGHTER_COLOR",
+        "DARKER_COLOR", "FOREGROUND", "ALPHA", "INVERTED_ALPHA", "LUM", "INVERTED_LUM")),
+    "DynamicZoomEase": ("enum", "DYNAMIC_ZOOM_EASE_", ("LINEAR", "IN", "OUT", "IN_AND_OUT")),
+    "RetimeProcess": ("enum", "RETIME_", ("USE_PROJECT", "NEAREST", "FRAME_BLEND", "OPTICAL_FLOW")),
+    "MotionEstimation": ("enum", "MOTION_EST_", (
+        "USE_PROJECT", "STANDARD_FASTER", "STANDARD_BETTER", "ENHANCED_FASTER",
+        "ENHANCED_BETTER", "SPEED_WARP_BETTER", "SPEED_WARP_FASTER")),
+}
+TRACK_TYPES = ("video", "audio", "subtitle")
+# Timeline:AddTrack(trackType, subTrackType): audio channel layouts from the scripting README.
+AUDIO_TRACK_SUBTYPES = ("mono", "stereo", "5.1", "5.1film", "7.1", "7.1film",
+                        *(f"adaptive{n}" for n in range(1, 25)))
+
+
+def normalize_clip_properties(properties: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Validate Inspector properties against CLIP_PROPERTIES; shared by Lua and Studio.
+
+    Returns rows in write order: {key, kind, requested, value | const}. ``const`` is the
+    name of a resolve.* enum constant to look up inside Resolve.
+    """
+    by_lower = {k.lower(): k for k in CLIP_PROPERTIES}
+    picked: dict[str, Any] = {}
+    for raw_key, v in (properties or {}).items():
+        key = by_lower.get(str(raw_key).lower())
+        if key is None:
+            raise ValueError(f"Unknown or unsupported clip property {raw_key!r}. "
+                             f"Use one of: {', '.join(CLIP_PROPERTIES)}")
+        picked[key] = v
+    rows = []
+    for key, spec in CLIP_PROPERTIES.items():
+        if key not in picked:
+            continue
+        v = picked[key]
+        row: dict[str, Any] = {"key": key, "kind": spec[0], "requested": v}
+        if spec[0] == "bool":
+            if not isinstance(v, bool):
+                raise ValueError(f"{key} takes true or false, got {v!r}")
+            row["value"] = v
+        elif spec[0] == "number":
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                raise ValueError(f"{key} takes a number, got {v!r}")
+            lo, hi = spec[1], spec[2]
+            if (lo is not None and v < lo) or (hi is not None and v > hi):
+                raise ValueError(f"{key} must be between {lo if lo is not None else '-inf'} "
+                                 f"and {hi if hi is not None else 'inf'}, got {v!r}")
+            row["value"] = float(v)
+        else:
+            prefix, names = spec[1], spec[2]
+            if isinstance(v, int) and not isinstance(v, bool):
+                row["value"] = v
+            elif isinstance(v, str):
+                name = v.strip().upper().replace(" ", "_").replace("-", "_")
+                name = name.removeprefix(prefix)
+                if name not in names:
+                    raise ValueError(f"{key} takes one of {', '.join(n.lower() for n in names)} "
+                                     f"(or the integer value), got {v!r}")
+                row["const"] = prefix + name
+            else:
+                raise ValueError(f"{key} takes a name or an integer, got {v!r}")
+        rows.append(row)
+    return rows
+
+
+# Read-back comparison, the same rule as values_match() in Python: Resolve can report
+# booleans as 0/1 and stores numbers as floats, so allow a small relative tolerance.
+_SAME_VALUE_FN = """\
+local function same_value(kind, want, got)
+  if got == nil then return false end
+  if kind == "bool" then
+    if type(got) == "number" then got = got ~= 0 end
+    if type(got) == "string" then got = (got == "true" or got == "1") end
+    return got == want
+  end
+  local g, w = tonumber(got), tonumber(want)
+  return g ~= nil and w ~= nil and math.abs(g - w) <= 1e-3 * math.max(1, math.abs(w))
+end
+"""
+
+
+def values_match(kind: str, want: Any, got: Any) -> bool:
+    """Python twin of the Lua ``same_value`` read-back check."""
+    if got is None:
+        return False
+    if kind == "bool":
+        if isinstance(got, (int, float)) and not isinstance(got, bool):
+            got = got != 0
+        elif isinstance(got, str):
+            got = got in ("true", "1")
+        return got is want or got == want
+    try:
+        g, w = float(got), float(want)
+    except (TypeError, ValueError):
+        return False
+    return abs(g - w) <= 1e-3 * max(1.0, abs(w))
+
+
+@_snippet
+def snippet_set_clip_properties(
+    track_type: str = "video",
+    track: int = 1,
+    indices: list[int] | None = None,
+    properties: dict[str, Any] | None = None,
+    enabled: bool | None = None,
+) -> str:
+    """Set Inspector properties (zoom, pan, crop, opacity, ...) and enable/disable clips, with read-back.
+
+    indices: 0-based clip indices as get_state(include_clips=true) lists them (transitions
+    skipped); None = every clip on the track. Every write is read back with GetProperty /
+    GetClipEnabled, and `ok` comes from the read-back, not from the setter's return value.
+    """
+    track_type = _pick(track_type, ("video", "audio"), "track type")
+    rows = normalize_clip_properties(properties)
+    if not rows and enabled is None:
+        raise ValueError("Nothing to change: pass properties and/or enabled.")
+    idx = None if indices is None else [int(i) for i in indices]
+    if idx is not None and (not idx or min(idx) < 0):
+        raise ValueError("indices must be a non-empty list of 0-based clip indices (or None for all)")
+    return f"""-- resolve-pilot: set_clip_properties
+{_TIMELINE_PREAMBLE}{_CLIP_ITEMS}{_SAME_VALUE_FN}local track_type, track = {to_lua(track_type)}, {int(track)}
+local indices, enabled = {to_lua(idx)}, {to_lua(enabled)}
+local props = {to_lua(rows)}
+local resolved = {{}}
+for _, p in ipairs(props) do
+  if p.const then
+    p.value = resolve[p.const]
+    if p.value == nil then
+      return {{ok = false, error = "This Resolve has no resolve." .. p.const ..
+        " constant; pass the integer value for " .. p.key .. " instead."}}
+    end
+    resolved[p.key] = p.value
+  end
+end
+local items = clip_items(timeline, track_type, track)
+local targets, missing = {{}}, {{}}
+if indices then
+  for _, i in ipairs(indices) do
+    if items[i + 1] then targets[#targets + 1] = {{i, items[i + 1]}} else missing[#missing + 1] = i end
+  end
+else
+  for i, it in ipairs(items) do targets[#targets + 1] = {{i - 1, it}} end
+end
+local function call(it, method, ...)
+  if type(it[method]) ~= "function" then return false, method .. " is not available" end
+  return pcall(it[method], it, ...)
+end
+local clips, changed = {{}}, 0
+for _, t in ipairs(targets) do
+  local index, it = t[1], t[2]
+  local row = {{index = index, name = it:GetName(), requested = {{}}, actual = {{}}, mismatched = {{}},
+    contradicted = {{}}, ok = true}}
+  for _, p in ipairs(props) do
+    row.requested[p.key] = p.requested
+    local done, said = call(it, "SetProperty", p.key, p.value)
+    local read, got = call(it, "GetProperty", p.key)
+    if read then row.actual[p.key] = got end
+    if not (done and read and same_value(p.kind, p.value, got)) then
+      row.ok = false
+      row.mismatched[#row.mismatched + 1] = p.key
+      if not done then row.error = tostring(said)
+      elseif said == true then row.contradicted[#row.contradicted + 1] = p.key end
+    end
+  end
+  if enabled ~= nil then
+    row.requested.enabled = enabled
+    local done, said = call(it, "SetClipEnabled", enabled)
+    local read, got = call(it, "GetClipEnabled")
+    if read then row.actual.enabled = got end
+    if not (done and read and same_value("bool", enabled, got)) then
+      row.ok = false
+      row.mismatched[#row.mismatched + 1] = "enabled"
+      if not done then row.error = tostring(said)
+      elseif said == true then row.contradicted[#row.contradicted + 1] = "enabled" end
+    end
+  end
+  if row.ok then changed = changed + 1 end
+  clips[#clips + 1] = row
+end
+local out = {{ok = #targets > 0 and changed == #targets and #missing == 0, track_type = track_type,
+  track = track, clip_count = #items, changed = changed, clips = clips, missing_indices = missing,
+  resolved_values = resolved, timeline = timeline:GetName()}}
+if #targets == 0 then
+  out.error = "No clips to change on " .. track_type .. " track " .. track .. " (" .. #items .. " clips there)."
+elseif not out.ok then
+  out.error = "Some values did not stick: Resolve's read-back differs from what was requested " ..
+    "(see clips[].mismatched), or indices are missing."
+end
+print(string.format("[resolve-pilot] Changed %d / %d clips on %s %d", changed, #targets, track_type, track))
+return out
+"""
+
+
+def normalize_track_changes(changes: list[dict] | None, add: list[dict] | None
+                            ) -> tuple[list[dict], list[dict]]:
+    """Validate set_tracks input; shared by the Lua and Studio paths."""
+    out_changes, out_add = [], []
+    for i, a in enumerate(add or []):
+        kind = _pick(str(a.get("track_type") or ""), TRACK_TYPES, "track type")
+        row: dict[str, Any] = {"track_type": kind}
+        if a.get("sub_type"):
+            if kind != "audio":
+                raise ValueError(f"add #{i}: sub_type is only for audio tracks")
+            row["sub_type"] = _pick(str(a["sub_type"]), AUDIO_TRACK_SUBTYPES, "audio track sub_type")
+        out_add.append(row)
+    for i, c in enumerate(changes or []):
+        kind = _pick(str(c.get("track_type") or ""), TRACK_TYPES, "track type")
+        index = c.get("index")
+        if isinstance(index, bool) or not isinstance(index, int) or index < 1:
+            raise ValueError(f"change #{i}: index must be a track number >= 1")
+        row = {"track_type": kind, "index": index}
+        if c.get("name") is not None:
+            row["name"] = str(c["name"])
+        for key in ("enabled", "locked"):
+            if c.get(key) is not None:
+                if not isinstance(c[key], bool):
+                    raise ValueError(f"change #{i}: {key} must be true or false")
+                row[key] = c[key]
+        if len(row) == 2:
+            raise ValueError(f"change #{i}: give name, enabled and/or locked")
+        out_changes.append(row)
+    if not out_changes and not out_add:
+        raise ValueError("Nothing to do: pass changes and/or add.")
+    return out_changes, out_add
+
+
+@_snippet
+def snippet_set_tracks(changes: list[dict] | None = None, add: list[dict] | None = None) -> str:
+    """Add tracks, and rename / enable / disable / lock / unlock tracks, with read-back.
+
+    add: [{track_type, sub_type?}] runs first (audio sub_type: mono, stereo, 5.1, ...).
+    changes: [{track_type, index, name?, enabled?, locked?}]; each reports
+    {requested, actual, ok} read back with GetTrackName / GetIsTrackEnabled / GetIsTrackLocked.
+    """
+    rows, adds = normalize_track_changes(changes, add)
+    return f"""-- resolve-pilot: set_tracks
+{_TIMELINE_PREAMBLE}{_SAME_VALUE_FN}local adds, changes = {to_lua(adds)}, {to_lua(rows)}
+local function call(method, ...)
+  if type(timeline[method]) ~= "function" then return false, method .. " is not available" end
+  return pcall(timeline[method], timeline, ...)
+end
+local function count(kind)
+  local done, n = call("GetTrackCount", kind)
+  return done and tonumber(n) or 0
+end
+local added, all_ok = {{}}, true
+for _, a in ipairs(adds) do
+  local before = count(a.track_type)
+  local done, said
+  if a.sub_type then done, said = call("AddTrack", a.track_type, a.sub_type)
+  else done, said = call("AddTrack", a.track_type) end
+  local after = count(a.track_type)
+  local row = {{track_type = a.track_type, sub_type = a.sub_type, before = before, after = after,
+    ok = after == before + 1}}
+  if row.ok then row.index = after end
+  if not done then row.error = tostring(said)
+  elseif not row.ok then row.error = "AddTrack returned " .. tostring(said) .. " but the track count did not grow" end
+  all_ok = all_ok and row.ok
+  added[#added + 1] = row
+end
+local fields = {{
+  {{"name", "SetTrackName", "GetTrackName", "string"}},
+  {{"enabled", "SetTrackEnable", "GetIsTrackEnabled", "bool"}},
+  {{"locked", "SetTrackLock", "GetIsTrackLocked", "bool"}},
+}}
+local results = {{}}
+for _, c in ipairs(changes) do
+  local row = {{track_type = c.track_type, index = c.index, requested = {{}}, actual = {{}},
+    mismatched = {{}}, contradicted = {{}}, ok = true}}
+  local n = count(c.track_type)
+  if c.index > n then
+    row.ok = false
+    row.error = "There is no " .. c.track_type .. " track " .. c.index .. " (" .. n .. " tracks)."
+  else
+    for _, f in ipairs(fields) do
+      local key, setter, getter, kind = f[1], f[2], f[3], f[4]
+      if c[key] ~= nil then
+        row.requested[key] = c[key]
+        local done, said = call(setter, c.track_type, c.index, c[key])
+        local read, got = call(getter, c.track_type, c.index)
+        if read then row.actual[key] = got end
+        local same = read and (kind == "string" and got == c[key] or kind == "bool" and same_value("bool", c[key], got))
+        if not (done and same) then
+          row.ok = false
+          row.mismatched[#row.mismatched + 1] = key
+          if not done then row.error = tostring(said)
+          elseif said == true then row.contradicted[#row.contradicted + 1] = key end
+        end
+      end
+    end
+  end
+  all_ok = all_ok and row.ok
+  results[#results + 1] = row
+end
+local out = {{ok = all_ok, added = added, changes = results, timeline = timeline:GetName(),
+  track_counts = {{video = count("video"), audio = count("audio"), subtitle = count("subtitle")}}}}
+if not all_ok then
+  out.error = "Some track changes did not stick (see added[].error and changes[].mismatched)."
+end
+print(string.format("[resolve-pilot] Tracks: %d added, %d changed, ok=%s", #added, #results, tostring(all_ok)))
+return out
 """
 
 

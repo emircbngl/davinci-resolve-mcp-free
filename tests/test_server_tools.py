@@ -47,12 +47,14 @@ EXPECTED_TOOLS = {
     "import_media", "append_clips", "remove_clips",
     # macOS UI
     "send_keystroke", "menu_pick", "open_ai_feature",
+    # inspector / tracks
+    "set_clip_properties", "set_tracks", "export_timeline",
 }
 
 
 def test_server_registers_exactly_the_expected_tools():
     names = set(_annotations())
-    assert len(EXPECTED_TOOLS) == 39
+    assert len(EXPECTED_TOOLS) == 42
     assert names == EXPECTED_TOOLS, (sorted(EXPECTED_TOOLS - names), sorted(names - EXPECTED_TOOLS))
 
 
