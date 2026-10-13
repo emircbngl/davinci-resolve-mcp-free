@@ -2010,6 +2010,7 @@ _TOOL_CHANNELS: dict[str, list[str]] = {
     "timeline_frames": ["studio", "bridge"],
     "add_title": ["bridge", "manual"],  # Lua only, no Studio Python path
     "checkpoint": ["bridge", "manual"],
+    "grade_clips": ["bridge", "manual"],
     "open_page": _LIVE + ["macos_ui"],
     "screenshot_resolve": ["macos_ui"],
     "send_keystroke": ["macos_ui"],
