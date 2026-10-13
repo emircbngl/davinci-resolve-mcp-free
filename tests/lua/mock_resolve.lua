@@ -576,3 +576,14 @@ pm.ExportProject = function(_, name, path, with_stills)
   f:close()
   return true
 end
+
+-- Grading: SetCDL has no getter in Resolve; the mock records it so tests can look.
+function Item:SetCDL(cdl)
+  if type(cdl) ~= "table" or not cdl.NodeIndex then return false end
+  self.cdl = cdl
+  return true
+end
+function Item:CopyGrades(targets)
+  for _, t in ipairs(targets or {}) do t.cdl = self.cdl end
+  return true
+end

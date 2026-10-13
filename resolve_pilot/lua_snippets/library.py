@@ -588,6 +588,88 @@ return {{ok = true, restored_from = name, current = project:GetCurrentTimeline()
 """
 
 
+def _triple(name: str, v: Any, lo: float, hi: float) -> str:
+    if v is None:
+        return ""
+    vals = [float(v)] * 3 if isinstance(v, (int, float)) else [float(x) for x in v]
+    if len(vals) != 3 or any(not (math.isfinite(x) and lo <= x <= hi) for x in vals):
+        raise ValueError(f"{name} must be one number or [r, g, b], each {lo}..{hi}")
+    return " ".join(f"{x:.6g}" for x in vals)
+
+
+@_snippet
+def snippet_grade_clips(
+    track: int = 1,
+    indices: list[int] | None = None,
+    slope: Any = None,
+    offset: Any = None,
+    power: Any = None,
+    saturation: float | None = None,
+    node: int = 1,
+    copy_from: int | None = None,
+    still_dir: str | None = None,
+) -> str:
+    """Primary grade by numbers (ASC CDL) or copy one clip's grade, with before/after stills.
+
+    Resolve has no GetCDL, so when still_dir is given the clip's middle frame is exported
+    before and after and the caller compares them.
+    """
+    cdl = None
+    if copy_from is None:
+        cdl = {"NodeIndex": str(int(node)),
+               "Slope": _triple("slope", slope, 0, 4) or "1 1 1",
+               "Offset": _triple("offset", offset, -1, 1) or "0 0 0",
+               "Power": _triple("power", power, 0.1, 4) or "1 1 1"}
+        if saturation is not None:
+            if not (math.isfinite(saturation) and 0 <= saturation <= 4):
+                raise ValueError("saturation must be 0..4 (1 = unchanged)")
+            cdl["Saturation"] = f"{float(saturation):.6g}"
+        else:
+            cdl["Saturation"] = "1"
+    idx = None if indices is None else [int(i) for i in indices]
+    return f"""-- resolve-pilot: grade_clips
+{_TIMELINE_PREAMBLE}{_TIMELINE_FPS}{_TIMECODE_FN}{_CLIP_ITEMS}local cdl, indices, copy_from, still_dir = {to_lua(cdl)}, {to_lua(idx)}, {to_lua(copy_from)}, {to_lua(os.path.expanduser(still_dir) if still_dir else None)}
+local items = clip_items(timeline, "video", {int(track)})
+local df = tostring(timeline:GetSetting("timelineDropFrameTimecode")) == "1"
+local targets = {{}}
+if indices then
+  for _, i in ipairs(indices) do
+    if not items[i + 1] then return {{ok = false, error = "V{int(track)} has " .. #items .. " clips; no index " .. i}} end
+    targets[#targets + 1] = i
+  end
+else
+  for i = 1, #items do targets[#targets + 1] = i - 1 end
+end
+local page, playhead = resolve:GetCurrentPage(), timeline:GetCurrentTimecode()
+local on_page = page == "cut" or page == "edit" or page == "color" or page == "fairlight" or page == "deliver"
+if not on_page then resolve:OpenPage("edit") end
+local function still(it, tag, i)
+  if not still_dir then return nil end
+  local mid = math.floor((it:GetStart() + it:GetEnd()) / 2)
+  if not timeline:SetCurrentTimecode(frames_to_tc(mid, fps, df)) then return nil end
+  local path = still_dir .. {to_lua(os.sep)} .. string.format("%s_%03d.png", tag, i)
+  return project:ExportCurrentFrameAsStill(path) and path or nil
+end
+local rows = {{}}
+local source = copy_from and items[copy_from + 1]
+if copy_from and not source then return {{ok = false, error = "no clip " .. copy_from .. " to copy from"}} end
+for _, i in ipairs(targets) do
+  local it = items[i + 1]
+  local row = {{index = i, name = it:GetName(), before = still(it, "before", i)}}
+  if source then
+    row.applied = (it ~= source) and (source:CopyGrades({{it}}) and true or false) or true
+  else
+    row.applied = it:SetCDL(cdl) and true or false
+  end
+  row.after = still(it, "after", i)
+  rows[#rows + 1] = row
+end
+if playhead then timeline:SetCurrentTimecode(playhead) end
+if not on_page and page then resolve:OpenPage(page) end
+return {{ok = true, timeline = timeline:GetName(), track = {int(track)}, cdl = cdl, copied_from = copy_from, clips = rows}}
+"""
+
+
 @_snippet
 def snippet_add_markers(markers: list[dict], replace_owned_prefix: str | None = None) -> str:
     """Add markers to the current timeline; positions in frames or seconds.

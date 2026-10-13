@@ -123,6 +123,7 @@ _SNIPPET_SAMPLES = {
     "export_timeline_stills": {"positions": [{"seconds": 1}, {"frame": 3}], "out_dir": "/x"},
     "add_subtitles": {"srt_path": "/x.srt"},
     "checkpoint": {"action": "save", "label": "before cut"},
+    "grade_clips": {"indices": [0], "slope": [1.1, 1, 0.9], "saturation": 1.2, "still_dir": "/x"},
     "add_title": {"text": "Hi", "start_seconds": 1, "duration_seconds": 7, "position": (0.5, 0.2),
                   "color": (1, 1, 0), "size": 0.1, "font": "Open Sans"},
     "import_media": {"paths": ["/x.mov"], "bin": "B-roll/Day 1"},
@@ -526,3 +527,27 @@ def test_checkpoint_save_list_restore_and_backup(live_bridge):
     assert mcp_server.checkpoint("save", label="v2")["checkpoint"] == "Main (restored) · checkpoint v2"
     backup = mcp_server.checkpoint("export_project")
     assert backup["ok"] and backup["size_bytes"] > 0 and backup["path"].endswith(".drp")
+
+
+@needs_luajit
+def test_grade_clips_sets_cdl_copies_grades_and_reports_no_visible_change(live_bridge, tmp_path):
+    from tests.conftest import FFMPEG
+    if not FFMPEG:
+        pytest.skip("ffmpeg not installed")
+    from resolve_pilot import mcp_server
+    png = tmp_path / "s.png"
+    subprocess.run([FFMPEG, "-loglevel", "error", "-f", "lavfi", "-i", "color=gray:s=16x16",
+                    "-frames:v", "1", "-y", str(png)], check=True)
+    bridge.exec_lua(f"mock.png_path = {lua.lua_string(str(png))}")
+    out = mcp_server.grade_clips(indices=[0], slope=[1.1, 1, 0.9], saturation=1.2)
+    assert out["ok"] and out["applied"] == 1
+    assert out["cdl"] == {"NodeIndex": "1", "Slope": "1.1 1 0.9", "Offset": "0 0 0", "Power": "1 1 1",
+                          "Saturation": "1.2"}
+    row = out["clips"][0]
+    # The mock exports the same still before and after, like a grade that changed nothing.
+    assert row["visible_change"] is False and "warning" in out and "before" not in row
+    assert mcp_server.grade_clips(indices=[1], copy_from=0, verify=False)["applied"] == 1
+    cdls = bridge.exec_lua("local v = rp.timeline().tracks.video[1] return {v[1].cdl.Slope, v[2].cdl.Slope}").result
+    assert cdls == ["1.1 1 0.9", "1.1 1 0.9"]
+    with pytest.raises(ValueError, match="slope"):
+        lua.snippet_grade_clips(slope=[9, 1, 1])

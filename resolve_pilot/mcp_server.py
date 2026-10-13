@@ -1745,6 +1745,69 @@ def checkpoint(
     return out
 
 
+def _mean_rgb(path: str) -> list[float] | None:
+    """Average colour of an image, 0-255 per channel (ffmpeg area downscale to 1x1)."""
+    try:
+        proc = subprocess.run([frame_grab._ffmpeg_bin(), "-loglevel", "error", "-i", path, "-vf",
+                               "scale=1:1:flags=area", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                              capture_output=True, timeout=60)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return None
+    return [float(b) for b in proc.stdout[:3]] if proc.returncode == 0 and len(proc.stdout) >= 3 else None
+
+
+RGB = Annotated[list[float] | float | None, Field(description="One number for all channels, or [r, g, b].")]
+
+
+@tool(EDIT_RESOLVE, title="Grade clips (CDL)")
+def grade_clips(
+    track: Annotated[int, Field(ge=1)] = 1,
+    indices: Annotated[list[int] | None, Field(description=(
+        "Clips as get_resolve_state(include_clips=true) lists them; omit for every clip."))] = None,
+    slope: RGB = None,
+    offset: RGB = None,
+    power: RGB = None,
+    saturation: Annotated[float | None, Field(ge=0, le=4, description="1 = unchanged.")] = None,
+    node: Annotated[int, Field(ge=1, description="Color node that receives the CDL.")] = 1,
+    copy_from: Annotated[int | None, Field(ge=0, description=(
+        "Instead of numbers: copy this clip's grade (same track) onto the others."))] = None,
+    verify: Annotated[bool, Field(description=(
+        "Export each clip's middle frame before and after and report the colour change."))] = True,
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """Primary colour by numbers (ASC CDL: slope = gain, offset = lift, power = gamma,
+    saturation) on one colour node, or copy one clip's grade to others ("match these").
+
+    Warmer: slope [1.06, 1, 0.94]; more contrast: power 1.1; punchier: saturation 1.15;
+    a little brighter: offset 0.02. Resolve cannot read a CDL back, so `verify` compares
+    the actual frames: `visible_change` false means nothing happened on screen.
+    """
+    if copy_from is None and all(v is None for v in (slope, offset, power, saturation)):
+        raise ValueError("Give slope / offset / power / saturation, or copy_from.")
+    with tempfile.TemporaryDirectory(prefix="grade-", dir=state_dir("stills")) as tmp:
+        out = control.perform(
+            lua_lib.snippet_grade_clips(track, indices, slope, offset, power, saturation, node,
+                                        copy_from, tmp if verify else None),
+            None, channel, timeout=60.0)
+        if out.get("channel") == "manual" or not out.get("ok"):
+            return out
+        for row in out.get("clips", []):
+            b = _mean_rgb(row.pop("before")) if row.get("before") else None
+            a = _mean_rgb(row.pop("after")) if row.get("after") else None
+            if b and a:
+                row["mean_rgb_before"], row["mean_rgb_after"] = [round(x, 1) for x in b], [round(x, 1) for x in a]
+                row["visible_change"] = max(abs(x - y) for x, y in zip(a, b)) >= 0.5
+            elif verify:
+                row["visible_change"] = None
+                row["note"] = "could not export frames to verify; check with timeline_frames"
+    rows = out.get("clips", [])
+    out["applied"] = sum(1 for r in rows if r.get("applied"))
+    if verify and rows and not any(r.get("visible_change") for r in rows):
+        out["warning"] = ("No clip looks different after the grade: it may already have had these "
+                          "values, or the node index is wrong. Check with timeline_frames.")
+    return out
+
+
 class TimelinePosition(BaseModel):
     seconds: float | None = Field(None, ge=0, description="Offset from the timeline start.")
     frame: int | None = Field(None, ge=0, description="Frame offset from the timeline start.")
