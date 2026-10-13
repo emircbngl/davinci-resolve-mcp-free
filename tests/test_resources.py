@@ -147,3 +147,11 @@ def test_state_snapshot_reports_errors_instead_of_raising(monkeypatch):
     monkeypatch.setattr(mcp_server.control, "perform", boom)
     out = mcp_server._state_snapshot()
     assert out["connected"] is False and "did not answer" in out["error"] and out["next_steps"]
+
+
+def test_tools_without_a_studio_path_do_not_claim_studio():
+    tools = mcp_server.capabilities()["tools"]
+    assert tools["add_title"]["channels"] == ["bridge", "manual"]
+    assert tools["checkpoint"]["channels"] == ["bridge", "manual"]
+    assert traps.hints_for_lua('tl:InsertFusionTitleIntoTimeline("Text+")')[0].startswith(
+        "Known trap (fusion-title-insert-edit)")

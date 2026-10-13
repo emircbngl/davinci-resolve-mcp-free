@@ -177,12 +177,27 @@ TRAPS: tuple[Trap, ...] = (
         title="DuplicateTimeline makes the copy the current timeline",
         symptom="After duplicating as a backup, later edits land on the copy.",
         cause="DuplicateTimeline silently switches the current timeline to the duplicate.",
-        handling="resolve-pilot does not duplicate timelines itself. In run_lua, remember the "
-                 "original and restore it with project:SetCurrentTimeline(original).",
-        source="reported",
-        measured_on="",
-        tools=("run_lua",),
+        handling="checkpoint(action='save') switches back to the original after copying. In "
+                 "run_lua, remember the original and restore it with "
+                 "project:SetCurrentTimeline(original).",
+        source="measured",
+        measured_on="Resolve 20.3 Free (macOS)",
+        tools=("checkpoint", "run_lua"),
         lua_methods=("DuplicateTimeline",),
+    ),
+    Trap(
+        id="fusion-title-insert-edit",
+        title="InsertFusionTitleIntoTimeline is an insert edit on V1 at the playhead",
+        symptom="Adding a title splits the clip under the playhead and ripples everything after "
+                "it to the right; with V1 locked nothing is inserted.",
+        cause="The call always inserts on V1 at the playhead; locking or disabling V1 does not "
+              "redirect it to another track.",
+        handling="add_title builds the title on a scratch timeline, wraps it as a compound clip "
+                 "and appends it on a free track above V1, leaving the edit alone.",
+        source="measured",
+        measured_on="Resolve 20.3 Free (macOS)",
+        tools=("add_title", "run_lua"),
+        lua_methods=("InsertFusionTitleIntoTimeline",),
     ),
     Trap(
         id="deleteclips-needs-edit-page",

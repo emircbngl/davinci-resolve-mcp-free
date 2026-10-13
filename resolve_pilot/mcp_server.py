@@ -1945,6 +1945,8 @@ _LIVE = ["studio", "bridge", "manual"]
 _TOOL_CHANNELS: dict[str, list[str]] = {
     "run_lua": ["bridge"],
     "timeline_frames": ["studio", "bridge"],
+    "add_title": ["bridge", "manual"],  # Lua only, no Studio Python path
+    "checkpoint": ["bridge", "manual"],
     "open_page": _LIVE + ["macos_ui"],
     "screenshot_resolve": ["macos_ui"],
     "send_keystroke": ["macos_ui"],
