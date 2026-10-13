@@ -243,7 +243,7 @@ def test_two_server_processes_share_one_bridge(live_bridge, tmp_path):
 def test_windows_non_ascii_profile_falls_back_to_ascii_folder(monkeypatch, tmp_path):
     from resolve_pilot.bridge import client
     monkeypatch.setattr(client.platform, "system", lambda: "Windows")
-    monkeypatch.setattr(client, "home", lambda: tmp_path / "Emirç" / ".resolve-pilot")
+    monkeypatch.setattr(client, "home", lambda: tmp_path / "José" / ".resolve-pilot")
     monkeypatch.setenv("PUBLIC", str(tmp_path / "Public"))
     d = client.bridge_dir()
     assert str(d).isascii() and d == tmp_path / "Public" / "resolve-pilot" / "bridge"

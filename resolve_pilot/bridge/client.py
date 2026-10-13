@@ -92,7 +92,7 @@ def bridge_dir() -> Path:
         p = home() / "bridge"
         if platform.system() == "Windows" and not str(p).isascii():
             # LuaJIT inside Resolve opens files through the ANSI code page, so a
-            # profile path like C:\Users\Emirç would be unreachable from the bridge.
+            # profile path like C:\Users\José would be unreachable from the bridge.
             base = os.environ.get("PUBLIC") or os.environ.get("PROGRAMDATA") or r"C:\ProgramData"
             p = Path(base) / "resolve-pilot" / "bridge"
     p.mkdir(parents=True, exist_ok=True)
