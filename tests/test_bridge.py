@@ -122,6 +122,8 @@ _SNIPPET_SAMPLES = {
     "open_page": {"page": "edit"},
     "export_timeline_stills": {"positions": [{"seconds": 1}, {"frame": 3}], "out_dir": "/x"},
     "add_subtitles": {"srt_path": "/x.srt"},
+    "add_title": {"text": "Hi", "start_seconds": 1, "duration_seconds": 7, "position": (0.5, 0.2),
+                  "color": (1, 1, 0), "size": 0.1, "font": "Open Sans"},
     "import_media": {"paths": ["/x.mov"], "bin": "B-roll/Day 1"},
     "append_clips": {"clips": [{"path": "/x.mov", "duration_seconds": 2, "track": 2, "record_seconds": 1},
                                {"media_pool_id": "id", "media": "audio"}],
@@ -470,3 +472,34 @@ def test_add_subtitles_ignores_where_the_playhead_is(live_bridge, tmp_path):
     out = mcp_server.add_subtitles(srt_path=str(srt))
     assert out["first"]["start_seconds"] == 0.5 and out["warnings"] == []
     assert bridge.exec_lua("return rp.timeline():GetCurrentTimecode()").result == "01:00:05:00"
+
+
+@needs_luajit
+@pytest.mark.parametrize("live_bridge", [None, "21.1"], indirect=True)
+def test_add_title_overlays_without_touching_the_edit(live_bridge):
+    from resolve_pilot import mcp_server
+    before = bridge.exec_lua(lua.snippet_get_state(include_clips=True)).result["current_timeline"]["clips"]
+    bridge.exec_lua('rp.timeline():SetCurrentTimecode("01:00:02:00")')
+    out = mcp_server.add_title("Gün 1", start_seconds=0.5, duration_seconds=7, position=[0.5, 0.15],
+                               color=[1, 0.8, 0], size=0.07)
+    assert out["ok"] and out["track"] == 2 and out["text_pieces"] == 2  # 7 s > one 5 s Text+
+    assert out["start_seconds"] == 0.5 and out["end_seconds"] == 7.5
+    assert out["inputs"]["StyledText"] == "Gün 1" and out["inputs"]["Center"] == [0.5, 0.15]
+    after = bridge.exec_lua(lua.snippet_get_state(include_clips=True)).result["current_timeline"]["clips"]
+    assert after == before  # V1 untouched, though Resolve's own insert would split and ripple it
+    state = bridge.exec_lua("local p = rp.project(); local names = {} "
+                            "for i = 1, p:GetTimelineCount() do names[i] = p:GetTimelineByIndex(i):GetName() end "
+                            "local titles = {} for _, f in ipairs(rp.media_pool():GetRootFolder():GetSubFolderList()) do "
+                            "if f:GetName() == 'Titles' then for _, c in ipairs(f:GetClipList()) do "
+                            "titles[#titles + 1] = c:GetName() end end end "
+                            "return {timelines = names, titles = titles, current = rp.timeline():GetName()}").result
+    assert state == {"timelines": ["Main"], "titles": ["Title: Gün 1"], "current": "Main"}  # scratch deleted
+    # A second title over the same time goes to the next free track.
+    assert mcp_server.add_title("İkinci", start_seconds=1, duration_seconds=2)["track"] == 3
+
+
+def test_add_title_rejects_v1_and_bad_values():
+    for kwargs, msg in (({"track": 1}, "track must be 2"), ({"position": (2, 0)}, "position"),
+                        ({"color": (1, 1)}, "color"), ({"size": 2}, "size")):
+        with pytest.raises(ValueError, match=msg):
+            lua.snippet_add_title("x", 0, 1, **kwargs)

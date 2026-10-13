@@ -105,7 +105,9 @@ index from get_resolve_state (pass names; ask first). Read their `warnings`.
 6. After queue_render(start=true), render_status(wait_seconds=...) says when it is done.
 
 Subtitles: transcribe_audio, then add_subtitles(transcript_id=...) puts them on the timeline's \
-subtitle track (or export_srt for a file). Never append .srt files with append_clips.
+subtitle track (or export_srt for a file). Never append .srt files with append_clips. Titles: \
+add_title overlays Text+ on a track above V1; never insert titles any other way, as Resolve's \
+own title insert splits and ripples the edit.
 
 Conventions: times are seconds unless a parameter says frames. Marker positions can be given \
 in seconds; Resolve converts them with the timeline's real frame rate. Paths must be absolute \
@@ -1678,6 +1680,34 @@ def add_subtitles(
                         f"{expected[0][0]:.2f}s; check with get_resolve_state or timeline_frames")
     out.update(cue_count=len(cues), first=cues[0], last=cues[-1], warnings=warnings)
     return out
+
+
+@tool(EDIT_RESOLVE, title="Add a title")
+def add_title(
+    text: Annotated[str, Field(min_length=1, description="Title text (any language; line breaks allowed).")],
+    start_seconds: Annotated[float, Field(ge=0, description="Where it starts, from the timeline start.")],
+    duration_seconds: Annotated[float, Field(gt=0, le=600)] = 3.0,
+    track: Annotated[int | None, Field(ge=2, description=(
+        "Video track for the title; omit to use the lowest free track above V1 (added if needed)."))] = None,
+    size: Annotated[float | None, Field(gt=0, le=1, description="Text height as a fraction of the frame (Text+ default 0.08).")] = None,
+    position: Annotated[list[float] | None, Field(min_length=2, max_length=2, description=(
+        "[x, y] in 0-1, origin bottom-left; [0.5, 0.15] = lower third. Default centre."))] = None,
+    color: Annotated[list[float] | None, Field(min_length=3, max_length=3, description="[r, g, b], each 0-1.")] = None,
+    font: Annotated[str | None, Field(description="Font family name as Resolve lists it.")] = None,
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """Overlay a Text+ title on the current timeline without moving or cutting anything else.
+
+    Resolve's own InsertFusionTitleIntoTimeline is an insert edit on V1 (it splits and
+    ripples the edit), so the title is built aside and placed on a free track above V1.
+    It lands in the media pool's "Titles" bin as a compound clip the user can open to
+    restyle. Check it with timeline_frames. Needs the bridge (or paste-able Lua).
+    """
+    return control.perform(
+        lua_lib.snippet_add_title(text, start_seconds, duration_seconds, track, size,
+                                  tuple(position) if position else None,
+                                  tuple(color) if color else None, font),
+        None, channel, timeout=60.0)
 
 
 class TimelinePosition(BaseModel):

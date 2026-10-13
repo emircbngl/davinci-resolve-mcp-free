@@ -39,6 +39,7 @@ function Mpi:GetUniqueId() return self.id end
 function Mpi:GetClipProperty(key)
   if key == "File Path" then return self.path end
   if key == "Type" then
+    if self.compound then return "Compound" end
     return self.subtitle and "Subtitle" or (self.video and self.audio and "Video + Audio")
       or (self.video and "Video" or "Audio")
   end
@@ -456,3 +457,88 @@ mock = {
     return #v1
   end,
 }
+
+-- Fusion titles ------------------------------------------------------------------
+-- InsertFusionTitleIntoTimeline is an INSERT edit on V1 at the playhead (measured on
+-- 20.3): it splits the clip under the playhead and pushes everything after it right.
+-- A locked V1 gets nothing.
+local TITLE_SECONDS = 5
+
+local function playhead_frame(tl)
+  local fps = tonumber(tl:GetSetting("timelineFrameRate")) or tonumber(project.settings.timelineFrameRate)
+  local h, mi, s, ff = (tl.playhead or ""):match("^(%d+):(%d+):(%d+)[:;](%d+)$")
+  if not h then return tl.start, fps end
+  return ((h * 60 + mi) * 60 + s) * math.floor(fps + 0.5) + ff, fps
+end
+
+function Timeline:InsertFusionTitleIntoTimeline(name)
+  local v1 = self.tracks.video[1]
+  if not v1 or self:GetIsTrackLocked("video", 1) then return nil end
+  local at, fps = playhead_frame(self)
+  local len = TITLE_SECONDS * math.floor(fps + 0.5)
+  local out = {}
+  for _, it in ipairs(v1) do
+    if it.start < at and it:GetEnd() > at then -- split
+      local tail = Item.new(it.name, at, it:GetEnd() - at, it.path, it.mpi)
+      tail.left = it.left + (at - it.start)
+      it.dur = at - it.start
+      out[#out + 1] = it
+      out[#out + 1] = tail
+    else
+      out[#out + 1] = it
+    end
+  end
+  for _, it in ipairs(out) do if it.start >= at then it.start = it.start + len end end
+  local tool = { inputs = { StyledText = "Title", Size = 0.08, Center = { 0.5, 0.5 } } }
+  function tool:SetInput(k, v) self.inputs[k] = v; return true end
+  function tool:GetInput(k) return self.inputs[k] end
+  local comp = { FindTool = function(_, n) if n == "Template" then return tool end end,
+    FindToolByID = function() return nil end }
+  local title = Item.new(name, at, len)
+  title.comp, title.track_type, title.track_index = comp, "video", 1
+  out[#out + 1] = title
+  table.sort(out, function(a, b) return a.start < b.start end)
+  for i = #v1, 1, -1 do v1[i] = nil end
+  for i, it in ipairs(out) do v1[i] = it end
+  return title
+end
+function Item:GetFusionCompByIndex(i) return i == 1 and self.comp or nil end
+
+-- Wraps items into one compound clip item (and media pool item) in place.
+function Timeline:CreateCompoundClip(items, opts)
+  if not items or #items == 0 then return nil end
+  local first, last = items[1].start, items[1]:GetEnd()
+  for _, it in ipairs(items) do first = math.min(first, it.start); last = math.max(last, it:GetEnd()) end
+  local fps = tonumber(self:GetSetting("timelineFrameRate")) or tonumber(project.settings.timelineFrameRate)
+  local mpi = Mpi.new((opts or {}).name or "Compound Clip")
+  mpi.name, mpi.compound, mpi.audio, mpi.video, mpi.fps, mpi.frames = (opts or {}).name or "Compound Clip",
+    true, false, true, fps, last - first
+  table.insert(project.pool.current.clips, mpi)
+  local doomed = {}
+  for _, it in ipairs(items) do doomed[it] = true end
+  local v1 = self.tracks.video[1]
+  for i = #v1, 1, -1 do if doomed[v1[i]] then table.remove(v1, i) end end
+  local cc = Item.new(mpi.name, first, last - first, nil, mpi)
+  table.insert(v1, cc)
+  return cc
+end
+
+function MediaPool:DeleteTimelines(list)
+  local doomed = {}
+  for _, t in ipairs(list or {}) do doomed[t] = true end
+  local tls = self.project.timelines
+  for i = #tls, 1, -1 do if doomed[tls[i]] then table.remove(tls, i) end end
+  return true
+end
+
+function MediaPool:MoveClips(clips, folder)
+  local moving = {}
+  for _, c in ipairs(clips or {}) do moving[c] = true end
+  local function strip(f)
+    for i = #f.clips, 1, -1 do if moving[f.clips[i]] then table.remove(f.clips, i) end end
+    for _, s in ipairs(f.subs) do strip(s) end
+  end
+  strip(self.root)
+  for _, c in ipairs(clips or {}) do table.insert(folder.clips, c) end
+  return true
+end

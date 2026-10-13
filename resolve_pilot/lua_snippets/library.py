@@ -378,6 +378,141 @@ return {{ok = #cues > 0, timeline = timeline:GetName(), fps = fps, imported = im
 
 
 @_snippet
+def snippet_add_title(
+    text: str,
+    start_seconds: float,
+    duration_seconds: float,
+    track: int | None = None,
+    size: float | None = None,
+    position: tuple[float, float] | None = None,
+    color: tuple[float, float, float] | None = None,
+    font: str | None = None,
+) -> str:
+    """Overlay a Text+ title on the current timeline without touching other clips.
+
+    InsertFusionTitleIntoTimeline is an INSERT edit on V1 (it splits and ripples the
+    edit, measured on 20.3), so the title is built on a scratch timeline, wrapped in a
+    compound clip and appended onto a free upper video track at start_seconds.
+    """
+    if not text:
+        raise ValueError("text must not be empty")
+    if not (math.isfinite(start_seconds) and start_seconds >= 0):
+        raise ValueError("start_seconds must be >= 0")
+    if not (math.isfinite(duration_seconds) and 0 < duration_seconds <= 600):
+        raise ValueError("duration_seconds must be > 0 and at most 600")
+    if track is not None and int(track) < 2:
+        raise ValueError("track must be 2 or higher; V1 holds the edit")
+    inputs: dict[str, Any] = {"StyledText": text}
+    if size is not None:
+        if not 0 < size <= 1:
+            raise ValueError("size is a fraction of the frame height, 0-1 (Text+ default 0.08)")
+        inputs["Size"] = float(size)
+    if color is not None:
+        if len(color) != 3 or any(not 0 <= c <= 1 for c in color):
+            raise ValueError("color is [r, g, b], each 0-1")
+        inputs.update(Red1=float(color[0]), Green1=float(color[1]), Blue1=float(color[2]))
+    if font:
+        inputs["Font"] = str(font)
+    center = None
+    if position is not None:
+        if len(position) != 2 or any(not 0 <= v <= 1 for v in position):
+            raise ValueError("position is [x, y] in 0-1, origin bottom-left (0.5, 0.5 = centre)")
+        center = [float(position[0]), float(position[1])]
+    return f"""-- resolve-pilot: add_title
+{_TIMELINE_PREAMBLE}{_TIMELINE_FPS}{_TIMECODE_FN}local text, start_s, dur_s = {to_lua(text)}, {to_lua(float(start_seconds))}, {to_lua(float(duration_seconds))}
+local want_track, inputs, center = {to_lua(int(track) if track else None)}, {to_lua(inputs)}, {to_lua(center)}
+local mp = project:GetMediaPool()
+local target = timeline
+local tstart = target:GetStartFrame()
+local rec = tstart + math.floor(start_s * fps + 0.5)
+local page = resolve:GetCurrentPage()
+if page ~= "edit" and page ~= "cut" then resolve:OpenPage("edit") end
+local function finish(result)
+  project:SetCurrentTimeline(target)
+  if page and page ~= "edit" and page ~= "cut" then resolve:OpenPage(page) end
+  return result
+end
+local name = "Title: " .. text:gsub("%s+", " "):sub(1, 40)
+local scratch = mp:CreateEmptyTimeline("resolve-pilot title " .. tostring({{}}):match("0x(%x+)"))
+if not scratch then return finish({{ok = false, error = "Resolve could not create a scratch timeline"}}) end
+project:SetCurrentTimeline(scratch)
+local sfps = tonumber(scratch:GetSetting("timelineFrameRate")) or fps
+local sdf = tostring(scratch:GetSetting("timelineDropFrameTimecode")) == "1"
+local need = math.max(1, math.floor(dur_s * sfps + 0.5))
+local items, total, set_inputs = {{}}, 0, {{}}
+scratch:SetCurrentTimecode(scratch:GetStartTimecode())
+while total < need and #items < 120 do
+  local it = scratch:InsertFusionTitleIntoTimeline("Text+")
+  if not it then break end
+  local comp = it:GetFusionCompByIndex(1)
+  local tool = comp and (comp:FindTool("Template") or comp:FindToolByID("TextPlus"))
+  if tool then
+    for k, v in pairs(inputs) do tool:SetInput(k, v) end
+    if center then tool:SetInput("Center", center) end
+    if #items == 0 then
+      for k in pairs(inputs) do set_inputs[k] = tool:GetInput(k) end
+      if center then
+        local c = tool:GetInput("Center")
+        set_inputs.Center = type(c) == "table" and {{c[1], c[2]}} or c
+      end
+    end
+  end
+  items[#items + 1] = it
+  total = total + it:GetDuration()
+  scratch:SetCurrentTimecode(frames_to_tc(scratch:GetEndFrame(), sfps, sdf))
+end
+if #items == 0 then
+  mp:DeleteTimelines({{scratch}})
+  return finish({{ok = false, error = "Resolve did not insert a Text+ title (is the Fusion title available?)"}})
+end
+local cc = scratch:CreateCompoundClip(items, {{name = name}})
+local cmpi = cc and cc:GetMediaPoolItem()
+project:SetCurrentTimeline(target)
+if not cmpi then
+  mp:DeleteTimelines({{scratch}})
+  return finish({{ok = false, error = "Resolve could not wrap the title in a compound clip"}})
+end
+-- keep the editable title in a "Titles" bin
+local root, bin = mp:GetRootFolder(), nil
+for _, f in ipairs(root:GetSubFolderList() or {{}}) do if f:GetName() == "Titles" then bin = f end end
+bin = bin or mp:AddSubFolder(root, "Titles")
+if bin then mp:MoveClips({{cmpi}}, bin) end
+-- a free video track above V1 over [rec, rec + length)
+local len = math.floor(need / sfps * fps + 0.5)
+local function free(t)
+  for _, it in ipairs(target:GetItemListInTrack("video", t) or {{}}) do
+    if it:GetStart() < rec + len and it:GetEnd() > rec then return false end
+  end
+  return true
+end
+local track = want_track
+if track then
+  while target:GetTrackCount("video") < track do target:AddTrack("video") end
+  if not free(track) then
+    mp:DeleteTimelines({{scratch}})
+    return finish({{ok = false, error = "V" .. track .. " already has a clip there; pick another track or time"}})
+  end
+else
+  for t = 2, target:GetTrackCount("video") do if not track and free(t) then track = t end end
+  if not track then target:AddTrack("video"); track = target:GetTrackCount("video") end
+end
+local got = mp:AppendToTimeline({{{{mediaPoolItem = cmpi, startFrame = 0, endFrame = need, trackIndex = track,
+  recordFrame = rec}}}})
+mp:DeleteTimelines({{scratch}})
+local placed
+for _, it in ipairs(target:GetItemListInTrack("video", track) or {{}}) do
+  if it:GetStart() == rec then placed = it end
+end
+if not placed then
+  return finish({{ok = false, error = "Resolve did not place the title on V" .. track, appended = got and #got or 0}})
+end
+return finish({{ok = true, timeline = target:GetName(), track = track, name = placed:GetName(),
+  start_seconds = (placed:GetStart() - tstart) / fps, end_seconds = (placed:GetEnd() - tstart) / fps,
+  media_pool_item = cmpi:GetName(), text_pieces = #items, inputs = set_inputs}})
+"""
+
+
+@_snippet
 def snippet_add_markers(markers: list[dict], replace_owned_prefix: str | None = None) -> str:
     """Add markers to the current timeline; positions in frames or seconds.
 
