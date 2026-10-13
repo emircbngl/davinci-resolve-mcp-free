@@ -215,8 +215,10 @@ def test_audio_bed_with_fade_in_hangs_off_the_gap():
 def test_asset_src_is_a_proper_file_uri():
     spec = TimelineSpec(name="t", fps=24.0, clips=[
         Clip(source_path="/tmp/My Clips/şehir #1.mov", in_seconds=0, duration_seconds=1)])
-    asset = ET.fromstring(build_fcpxml(spec).encode()).find(".//asset")
-    assert asset.get("src") == "file:///tmp/My%20Clips/%C5%9Fehir%20%231.mov"
+    src = ET.fromstring(build_fcpxml(spec).encode()).find(".//asset").get("src")
+    # /tmp may resolve elsewhere (macOS: /private/tmp), so check the encoding, not the prefix.
+    assert src.startswith("file:///")
+    assert src.endswith("/My%20Clips/%C5%9Fehir%20%231.mov")
 
 
 def test_clip_boundaries_are_frame_exact_without_gaps():

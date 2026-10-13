@@ -18,8 +18,8 @@ jobs:
         python: ["3.11", "3.13"]
         mcp: ["mcp>=1.27,<2", "mcp>=2,<3"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
       # ffmpeg for the media tests, LuaJIT (the Lua inside Resolve) for the bridge tests.
@@ -32,8 +32,8 @@ jobs:
     name: macOS
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: brew install luajit
