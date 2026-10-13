@@ -32,6 +32,16 @@ class UIAutomationError(RuntimeError):
     pass
 
 
+class StudioOnlyFeature(UIAutomationError):
+    """Resolve Free answered a menu click with its 'upgrade to Studio' dialog."""
+
+
+# Resolve Free's upsell dialog, shown when a Studio-only feature is invoked.
+_UPSELL_WINDOW = "Message"
+_UPSELL_TEXT = "reached a limitation"
+_UPSELL_DISMISS = "Not Yet"
+
+
 def osascript(script: str, timeout: float = 15.0) -> str:
     """Run an AppleScript and return its stdout. Raises on non-zero exit."""
     try:
@@ -114,15 +124,26 @@ def open_page(page: Page) -> None:
     send_keystroke(key, mods)
 
 
+def _normalize_menu_label(label: str) -> str:
+    """Resolve labels end in a single '…' character; accept '...' as well."""
+    if label.endswith("..."):
+        return label[:-3] + "…"
+    return label
+
+
 def menu_pick(menu_path: list[str]) -> None:
     """Click a menu item by path, e.g. ['File', 'Import', 'Timeline...'].
 
-    Uses System Events accessibility. Requires Accessibility permission.
+    A trailing '...' is matched against Resolve's '…'. Uses System Events
+    accessibility. Requires Accessibility permission.
+
+    Raises StudioOnlyFeature (after dismissing the dialog) when Resolve Free
+    responds with its upgrade-to-Studio message.
     """
     if not menu_path:
         raise UIAutomationError("Empty menu path")
     focus_resolve()
-    path_quoted = [f'"{m}"' for m in menu_path]
+    path_quoted = [f'"{_normalize_menu_label(m)}"' for m in menu_path]
     parts = [f'click menu bar item {path_quoted[0]} of menu bar 1']
     cur = f'menu bar item {path_quoted[0]} of menu bar 1'
     last = len(path_quoted) - 1
@@ -136,7 +157,21 @@ tell application "System Events"
     tell process "Resolve"
         set frontmost to true
         {body}
+        repeat 8 times
+            delay 0.15
+            try
+                set msg to (value of static texts of window "{_UPSELL_WINDOW}") as text
+                if msg contains "{_UPSELL_TEXT}" then
+                    click button "{_UPSELL_DISMISS}" of window "{_UPSELL_WINDOW}"
+                    return "STUDIO_ONLY"
+                end if
+            end try
+        end repeat
     end tell
 end tell
 '''
-    osascript(script)
+    if osascript(script) == "STUDIO_ONLY":
+        raise StudioOnlyFeature(
+            f"'{' > '.join(menu_path)}' is a Studio-only feature: Resolve Free "
+            f"showed its upgrade dialog (dismissed with '{_UPSELL_DISMISS}')."
+        )

@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Python ${{ matrix.python }} · ${{ matrix.mcp }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+        mcp: ["mcp>=1.27,<2", "mcp>=2,<3"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      # ffmpeg for the media tests, LuaJIT (the Lua inside Resolve) for the bridge tests.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg luajit
+      - run: pip install -e ".[dev]" "${{ matrix.mcp }}"
+      - run: ruff check .
+      - run: pytest -q
+
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: brew install luajit
+      - run: pip install -e ".[dev]"
+      - run: pytest -q

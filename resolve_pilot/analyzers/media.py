@@ -6,6 +6,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, asdict
 from fractions import Fraction
+from functools import lru_cache
 from pathlib import Path
 
 
@@ -53,7 +54,9 @@ def probe_media(path: str | Path) -> MediaInfo:
 
     fmt = data.get("format", {})
     streams = data.get("streams", [])
-    v = next((s for s in streams if s.get("codec_type") == "video"), None)
+    # Album art in MP3/M4A files shows up as a one-frame "video" stream; it is not footage.
+    v = next((s for s in streams if s.get("codec_type") == "video"
+              and (s.get("disposition") or {}).get("attached_pic") != 1), None)
     a = next((s for s in streams if s.get("codec_type") == "audio"), None)
 
     fps: float | None = None
@@ -73,3 +76,22 @@ def probe_media(path: str | Path) -> MediaInfo:
         bit_rate=int(fmt["bit_rate"]) if fmt.get("bit_rate") else None,
         container=fmt.get("format_name", ""),
     )
+
+
+@lru_cache(maxsize=256)
+def _probe_cached(path: str, mtime: float, size: int) -> MediaInfo:
+    return probe_media(path)
+
+
+def probe_media_cached(path: str | Path) -> MediaInfo | None:
+    """probe_media with a per-(path, mtime, size) cache; None if unreadable.
+
+    Used where a missing file or a missing ffprobe should degrade gracefully
+    (plan validation, FCPXML asset attributes) instead of failing the call.
+    """
+    p = Path(path).expanduser()
+    try:
+        st = p.stat()
+        return _probe_cached(str(p.resolve()), st.st_mtime, st.st_size)
+    except Exception:
+        return None

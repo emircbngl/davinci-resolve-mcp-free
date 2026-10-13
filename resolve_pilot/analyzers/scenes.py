@@ -45,10 +45,15 @@ def detect_scenes(path: str | Path, threshold: float = 10.0) -> list[SceneCut]:
         _ffmpeg_bin(),
         "-hide_banner",
         "-i", str(p),
+        "-an", "-sn", "-dn",  # only the picture matters; skip decoding the rest
         "-vf", f"scdet=threshold={threshold}",
         "-f", "null", "-",
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        # Without this an unreadable file looked like "no scene cuts".
+        tail = "\n".join(proc.stderr.strip().splitlines()[-5:])
+        raise RuntimeError(f"ffmpeg scene detection failed for {p.name}: {tail}")
 
     cuts: list[SceneCut] = []
     for line in proc.stderr.splitlines():

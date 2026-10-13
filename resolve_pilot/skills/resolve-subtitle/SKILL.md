@@ -1,11 +1,11 @@
 ---
 name: resolve-subtitle
-description: Generate burned-in or imported subtitles for a video. Transcribes audio with mlx-whisper, writes an SRT, and tells the user how to drag it onto a Resolve subtitle track. Use for any "add captions" / "burn subtitles" / "add subtitles to my video" request.
+description: Generate subtitles for a video — transcribe locally with Whisper, write a properly wrapped SRT (optionally translated), and get it onto a Resolve subtitle track. Use for any "add captions" / "burn subtitles" / "subtitle this in Turkish" request.
 ---
 
 # resolve-subtitle
 
-Transcribes a video and produces an SRT subtitle file ready to drop into Resolve's subtitle track.
+Transcribes a video and produces an SRT ready for Resolve's subtitle track.
 
 ## When to use
 
@@ -16,43 +16,37 @@ Transcribes a video and produces an SRT subtitle file ready to drop into Resolve
 
 ## Workflow
 
-1. **Probe** the media (`probe_media_tool`) — confirm duration and that it has audio.
-2. **Pick a model**:
-   - `mlx-community/whisper-large-v3-turbo` — best quality, ~realtime on M-series (default).
-   - `mlx-community/whisper-large-v3` — slightly better quality, slower.
-   - `mlx-community/whisper-tiny` — fast preview, lower accuracy.
-3. **Transcribe** (`transcribe_audio`). Pass `language` if the user specified one ("subtitle in Turkish" → `language='tr'`).
-4. **For translation**, transcribe with `language` of the source language, then have Claude translate the segments before writing SRT.
-5. **Write SRT** (`export_srt_from_transcript`). Default path: alongside source with `.srt` suffix.
-6. **Tell the user the import method**:
-   - In Resolve: drag the `.srt` from Finder directly onto an empty subtitle track in the timeline, OR `File > Import > Subtitle`.
-   - Style is applied in Inspector → Caption.
+1. **`probe_media`** — confirm the duration and that `audio_codec` is not null.
+2. **Pick a model** (`model` parameter): `large-v3-turbo` (default, best speed/quality), `large-v3` (slightly better, slower), `small` / `tiny` (quick preview).
+3. **`transcribe_audio(path, language=...)`** — pass `language` when the user names it ("Turkish subtitles" → `"tr"`). On `status: "running"`, call again with the same arguments.
+4. **Write the SRT** with `export_srt(transcript_id=..., max_chars_per_line=42, max_lines=2)`.
+   - Vertical / social video: `max_chars_per_line=32`.
+   - Default output: next to the source as `<name>.<language>.srt`.
+5. **Translation**: read the segments, translate each one yourself keeping `start`/`end`, then `export_srt(segments=[{start, end, text}, ...], out_path=".../name.en.srt")`.
+6. **Into Resolve** (no scripting API for subtitle import): tell the user to drag the `.srt` onto the timeline, or File › Import › Subtitle. Styling: Inspector › Captions.
 
-## Subtitle quality tips
+## Quality rules
 
-- For social/short-form: max 2 lines, max 32 chars per line. Re-segment if Whisper's output exceeds.
-- For accessibility: keep cues ≥ 1 s and ≤ 7 s; never split a single word across cues.
-- Punctuate sentences. Whisper occasionally drops terminal punctuation.
+- At most 2 lines per cue; `export_srt` wraps lines and splits long cues, giving each part time proportional to its text.
+- Cues between ~1 and 7 s read best; the result reports `average_cue_seconds` and `longest_cue_seconds` — if the longest is over 7 s, pass a smaller `max_chars_per_line`.
+- Whisper sometimes drops end punctuation; fix it when translating or tidying.
 
 ## Example
 
 User: *"Add Turkish subtitles to `~/Footage/talk.mp4`."*
 
-You:
-1. Probe → 1080p30, 22 min, has audio.
-2. Transcribe with `language='tr'`, model `large-v3-turbo`.
-3. Inspect segments — if any > 7 s, split them by sentence boundary in the text.
-4. Write SRT to `~/Footage/talk.tr.srt`.
-5. Reply: "Drag `talk.tr.srt` onto a subtitle track in Resolve. 47 cues, avg 3.1 s each."
+1. `probe_media` → 22 min, has audio.
+2. `transcribe_audio(path, language="tr")` → `status: running` → call again → 318 segments.
+3. `export_srt(transcript_id, max_chars_per_line=42)` → `~/Footage/talk.tr.srt`, 401 cues, average 3.1 s.
+4. Reply: "Drag `talk.tr.srt` onto the timeline in Resolve (or File › Import › Subtitle)."
 
-## Burning in (versus soft subtitles)
+## Burning in
 
-If the user wants the subtitles *baked into* the video pixels:
-1. Generate the SRT as above.
-2. Tell them to add it to a subtitle track, style it (Inspector), then render the timeline as MP4. The subtitle layer renders as part of the picture.
-3. Alternatively, use ffmpeg: `ffmpeg -i source.mp4 -vf subtitles=source.srt out.mp4` — works without Resolve.
+- In Resolve: put the SRT on a subtitle track, style it, and in Deliver › Subtitle Settings choose "Burn into video".
+- Without Resolve: `ffmpeg -i talk.mp4 -vf subtitles=talk.tr.srt out.mp4`.
 
 ## Failure modes
 
-- If `probe_media` shows no audio stream, stop and tell the user.
-- If duration > 1 hr, ask before running.
+- `audio_codec: null` → there is nothing to transcribe; tell the user.
+- "No Whisper engine installed" → Apple Silicon: `pip install '.[transcribe]'`; Windows/Linux/Intel: `pip install '.[transcribe-cpu]'`.
+- Over an hour of audio → ask before starting and quote the expected time.

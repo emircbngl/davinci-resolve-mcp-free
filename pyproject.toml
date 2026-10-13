@@ -4,14 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "davinci-resolve-mcp-free"
-version = "0.1.0"
-description = "Claude MCP server that runs inside DaVinci Resolve Free — the no-cost edition that doesn't have the Studio Python scripting API. FCPXML export + Lua console snippets + macOS UI automation."
+version = "0.2.0"
+description = "Claude MCP server that runs inside DaVinci Resolve Free — the no-cost edition that doesn't have the Studio Python scripting API. Live Lua bridge + FCPXML export + Lua console snippets + macOS UI automation."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "resolve-pilot" }]
 dependencies = [
-    "mcp>=1.27.0",
+    # 1.x (FastMCP) and 2.x (MCPServer) are both supported, see mcp_server.py.
+    "mcp>=1.27.0,<3",
     "pydantic>=2.6",
     "anyio>=4.4",
     "httpx>=0.27",
@@ -20,9 +21,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Apple Silicon: fastest local Whisper.
 transcribe = [
     "mlx-whisper>=0.4.0",
     "numpy>=1.26",
+]
+# Windows / Linux / Intel Macs (CPU or CUDA).
+transcribe-cpu = [
+    "faster-whisper>=1.1",
 ]
 ui = [
     "pyobjc-framework-Cocoa>=10.3 ; sys_platform == 'darwin'",
@@ -43,3 +49,13 @@ packages = ["resolve_pilot"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint]
+# Correctness rules only; newer ruff releases widened the defaults.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+"resolve_pilot/ui_automation/ai_features.py" = ["F401"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

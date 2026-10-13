@@ -1,11 +1,11 @@
 ---
 name: resolve-batch-markers
-description: Place markers on a Resolve timeline in bulk — from beat detection, scene cuts, transcript keywords, or a user-supplied list. Generates a Lua snippet the user pastes into Resolve's Console. Use for any "add markers at X" or "tag the timeline" request.
+description: Place markers on a Resolve timeline in bulk — from beats, scene cuts, transcript keywords or a user list — with add_markers, which runs live through the Studio API or the bridge and falls back to paste-able Lua in the Free edition. Use for any "add markers at X" or "tag the timeline" request.
 ---
 
 # resolve-batch-markers
 
-Places markers on the currently active timeline in DaVinci Resolve. Works in **Free** edition because it uses the built-in Console.
+Places markers on the current timeline in DaVinci Resolve, Free or Studio.
 
 ## When to use
 
@@ -16,44 +16,37 @@ Places markers on the currently active timeline in DaVinci Resolve. Works in **F
 
 ## Workflow
 
-1. **Figure out frame positions** for the markers. Possible sources:
-   - Scene cuts: `detect_scenes_tool(path)` → multiply each `pts_seconds × timeline_fps`.
-   - Transcript keyword hits: scan `transcribe_audio` segments for the word, multiply `start × fps`.
-   - User-given timecodes: convert `HH:MM:SS:FF` to frames using fps.
-   - Music beats: use scene detection on the waveform OR ask the user for BPM and compute `60/bpm × fps` per beat.
-2. **Generate the Lua snippet** with `render_lua_snippet`:
+1. **Know the timeline.** If live, `get_resolve_state(include_clips=true)` gives the current timeline, its fps and where each clip sits (`start_seconds`, `source_in_frame`).
+2. **Compute positions in timeline seconds** (offsets from the timeline start):
+   - Analysis of a *source file* (scene cuts, transcript, beats) is in **source time**. If the timeline is that file placed once at the start, the times are the same. Otherwise map them: `timeline_s = clip.start_seconds + (source_s − clip.source_in_frame / fps)` for the clip that contains the moment.
+   - Chapters every N seconds: `0, N, 2N, …` up to `duration_seconds`.
+   - Timecodes `HH:MM:SS:FF`: `(HH×3600 + MM×60 + SS) + FF / fps`, minus the timeline start timecode (usually 01:00:00:00).
+3. **Add them**:
    ```
-   render_lua_snippet(
-     snippet="batch_markers",
-     args_json=json.dumps({
-       "frames": [24, 120, 240, ...],
-       "color": "Blue",
-       "name_prefix": "Beat",
-       "note": "auto-generated"
-     })
-   )
+   add_markers(markers=[
+     {"seconds": 12.5, "color": "Blue", "name": "Chapter 2", "note": "intro ends"},
+     {"seconds": 47.0, "color": "Yellow", "name": "Check audio"}
+   ])
    ```
-3. **Hand the user the code** with this instruction:
-   > "Open DaVinci Resolve, make sure your timeline is the active one, then go to `Workspace → Console`, paste this Lua, and press Enter. You'll see a confirmation like `[resolve-pilot] Added 47 / 47 markers`."
+   Use `frame` instead of `seconds` when you already have frame offsets. `duration` is in frames.
+4. **Relay the result.**
+   - `channel` studio / bridge: report `added` / `requested`. `skipped_frames` already had a marker (or were out of range).
+   - `channel` manual: give the user `lua_code` and `instructions` verbatim ("Workspace › Console › Lua tab, paste, Enter"). The Console prints `[resolve-pilot] Added N / N markers`.
+5. **Verify** when live: `get_resolve_state(include_markers=true)`.
 
 ## Marker colors
 
-Available: Blue, Cyan, Green, Yellow, Red, Pink, Purple, Fuchsia, Rose, Lavender, Sky, Mint, Lemon, Sand, Cocoa, Cream.
+Blue, Cyan, Green, Yellow, Red, Pink, Purple, Fuchsia, Rose, Lavender, Sky, Mint, Lemon, Sand, Cocoa, Cream.
 
-Convention I follow:
-- **Blue**: structural beats (chapter starts)
-- **Green**: good takes / keepers
-- **Yellow**: review (needs human attention)
-- **Red**: problem (cut, fix audio, etc.)
+Suggested convention:
+- **Blue**: structure (chapter starts)
+- **Green**: keepers / good takes
+- **Yellow**: needs human review
+- **Red**: problem (fix audio, cut)
 - **Purple**: music sync points
-
-## Frame math reminder
-
-- Frames from seconds: `int(round(seconds * fps))`.
-- Timecode `HH:MM:SS:FF` (drop-frame): use `(HH*3600 + MM*60 + SS) * fps + FF` — for NTSC drop-frame (29.97, 59.94), this is approximate and Resolve will snap.
-- The current timeline's fps is in the user's project settings; ask if unsure, or have them run the `dump_project_info` snippet first.
 
 ## Failure modes
 
-- If the user doesn't have a timeline open, the snippet prints `No active timeline.` — tell them to switch to the Edit page first.
-- If markers don't appear: the timeline cursor must be active. Run `dump_project_info` to confirm.
+- `ok: false, error: "No active timeline"` → ask the user to open the timeline on the Edit page.
+- Every marker skipped → markers already exist at those frames (re-run) or positions are past the end of the timeline; compare with `duration_seconds`.
+- Drop-frame timecode (29.97 / 59.94 DF): timecode math is approximate; prefer seconds.

@@ -10,11 +10,12 @@ import json
 import sys
 from pathlib import Path
 
+from resolve_pilot import bridge
 from resolve_pilot.analyzers import detect_scenes, probe_media
 from resolve_pilot.editorial.roughcut import (
-    RoughCutPlan,
     plan_from_scenes,
     plan_to_timeline_spec,
+    validate_plan,
 )
 from resolve_pilot.exporters.fcpxml import write_fcpxml
 from resolve_pilot.lua_snippets import library as lua_lib
@@ -42,19 +43,26 @@ def main() -> None:
     print("\n=== building scene-based rough cut ===")
     plan = plan_from_scenes(src, cuts, title=f"{src.stem} — scene cut",
                             min_duration=0.8)
-    print(f"plan has {len(plan.clips)} clips, total = "
-          f"{sum(c.duration_seconds for c in plan.clips):.1f} s")
+    print(f"plan has {len(plan.clips)} clips, total = {plan.total_seconds:.1f} s")
+    report = validate_plan(plan)
+    for line in report["errors"] + report["warnings"]:
+        print(f"  ! {line}")
 
     out_fcpxml = src.with_suffix("").with_name(src.stem + "_scenes.fcpxml")
     write_fcpxml(plan_to_timeline_spec(plan), out_fcpxml)
     print(f"wrote {out_fcpxml}")
     print("→ In Resolve: File → Import → Timeline → pick that file.")
 
-    print("\n=== sample Lua snippet ===")
-    snippet = lua_lib.snippet_dump_project_info()
-    print("Paste into Resolve's Workspace → Console:")
-    print("-" * 60)
-    print(snippet)
+    print("\n=== live bridge ===")
+    st = bridge.status()
+    print(st.detail)
+    if st.running:
+        result = bridge.exec_lua(lua_lib.snippet_get_state())
+        print(json.dumps(result.result, indent=2))
+    else:
+        print("Install it into Resolve's Scripts menu with:")
+        print("  python -c 'from resolve_pilot import bridge; print(bridge.install_script())'")
+        print("then run Workspace → Scripts → ResolvePilotBridge in Resolve.")
 
 
 if __name__ == "__main__":

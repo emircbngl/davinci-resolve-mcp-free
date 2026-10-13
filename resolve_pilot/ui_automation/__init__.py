@@ -1,4 +1,5 @@
 from resolve_pilot.ui_automation.applescript import (
+    StudioOnlyFeature,
     osascript,
     focus_resolve,
     is_resolve_running,
@@ -8,6 +9,7 @@ from resolve_pilot.ui_automation.applescript import (
 )
 
 __all__ = [
+    "StudioOnlyFeature",
     "osascript",
     "focus_resolve",
     "is_resolve_running",
