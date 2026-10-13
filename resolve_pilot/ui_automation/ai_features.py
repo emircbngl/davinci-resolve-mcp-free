@@ -14,20 +14,20 @@ import time
 from typing import Literal
 
 from resolve_pilot.ui_automation.applescript import (
+    StudioOnlyFeature,
     focus_resolve,
     menu_pick,
     osascript,
     send_keystroke,
 )
 
-# Menu labels — known good as of Resolve 19.x / 20.x. Override here if a future
-# release renames them.
+# Menu labels — verified against Resolve 21.1.1 (English UI). Override here if a
+# future release renames them. Smart Reframe and Voice Isolation have no menu
+# entry in 21.x (they live in the Inspector), so they are not listed.
 LABELS = {
-    "smart_reframe_menu":   ["Workspace", "Reframe..."],
-    "voice_isolation_menu": ["Clip", "Voice Isolation..."],
     "scene_cut_detect":     ["Timeline", "Detect Scene Cuts"],
-    "speed_warp":           ["Clip", "Retime Controls"],
-    "auto_subtitle":        ["Timeline", "Create Subtitles from Audio..."],
+    "speed_warp":           ["Clip", "Clip Speed", "Retime Controls"],
+    "auto_subtitle":        ["Timeline", "AI Tools", "Create Subtitles from Audio…"],
 }
 
 
@@ -43,42 +43,34 @@ def open_color_page() -> None:
 
 
 def trigger_smart_reframe(target_aspect: Literal["1:1", "9:16", "4:5", "16:9"] = "9:16") -> dict:
-    """Open the Smart Reframe dialog and select the target aspect.
+    """Explain how to run Smart Reframe — it has no menu entry to automate.
 
-    Smart Reframe runs Resolve's neural engine to track subjects and reframe
-    each clip. We open the dialog, wait, and let the user confirm — no fully
-    headless invocation because the dialog has confirm-only controls.
+    Since Resolve 21 Smart Reframe lives only in the Inspector (Studio-only),
+    so there is nothing reliable to click; we return manual steps instead.
     """
-    focus_resolve()
-    menu_pick(LABELS["smart_reframe_menu"])
-    _wait(800)
-    # Resolve's dialog has a popup with aspect choices. We can't reliably click
-    # arbitrary popup items without UI-element inspection per build, so we
-    # nudge the user with a hint.
     return {
-        "ok": True,
-        "message": (
-            "Smart Reframe dialog opened. In the dialog, pick framing="
-            f"'{target_aspect}' and click Reframe. Smart Reframe will track "
-            "and reframe automatically on the current selection."
+        "ok": False,
+        "error": (
+            "Smart Reframe has no menu entry in Resolve 21 and is Studio-only. "
+            "Manually: set the timeline to the target aspect, select the clip, "
+            "open Inspector > Video > Smart Reframe, choose framing="
+            f"'{target_aspect}' and click Reframe."
         ),
     }
 
 
 def trigger_voice_isolation(intensity: int = 60) -> dict:
-    """Open Voice Isolation on the currently selected audio clip(s).
+    """Explain how to run Voice Isolation — it has no menu entry to automate.
 
-    intensity: 0–100. We don't drag the slider (per-build coordinates) — we
-    leave the dialog open and tell the user the target value.
+    Since Resolve 21 Voice Isolation lives only in the Inspector (Studio-only),
+    so there is nothing reliable to click; we return manual steps instead.
     """
-    focus_resolve()
-    menu_pick(LABELS["voice_isolation_menu"])
-    _wait(500)
     return {
-        "ok": True,
-        "message": (
-            f"Voice Isolation dialog opened. Set intensity to {intensity} and "
-            "click Apply. Re-run this for each clip you want to clean."
+        "ok": False,
+        "error": (
+            "Voice Isolation has no menu entry in Resolve 21 and is Studio-only. "
+            "Manually: select the audio clip, open Inspector > Audio, enable "
+            f"Voice Isolation and set the amount to {intensity}."
         ),
     }
 
@@ -86,7 +78,10 @@ def trigger_voice_isolation(intensity: int = 60) -> dict:
 def trigger_scene_cut_detection() -> dict:
     """Run Resolve's built-in scene cut detection on the active timeline."""
     focus_resolve()
-    menu_pick(LABELS["scene_cut_detect"])
+    try:
+        menu_pick(LABELS["scene_cut_detect"])
+    except StudioOnlyFeature as e:
+        return {"ok": False, "error": str(e)}
     return {
         "ok": True,
         "message": (
@@ -100,7 +95,10 @@ def trigger_scene_cut_detection() -> dict:
 def trigger_auto_subtitle(language: str = "en") -> dict:
     """Open the Create Subtitles from Audio dialog on the current timeline."""
     focus_resolve()
-    menu_pick(LABELS["auto_subtitle"])
+    try:
+        menu_pick(LABELS["auto_subtitle"])
+    except StudioOnlyFeature as e:
+        return {"ok": False, "error": str(e)}
     _wait(500)
     return {
         "ok": True,
