@@ -418,3 +418,55 @@ def render_jobs_status() -> dict[str, Any]:
                      "seconds_left": (status.get("EstimatedTimeRemainingInMs") or 0) / 1000 or None,
                      "error": status.get("Error") or None})
     return {"ok": True, "rendering": bool(project.IsRenderingInProgress()), "jobs": jobs}
+
+
+def add_subtitles(srt_path: str, replace: bool = False) -> dict[str, Any]:
+    """Studio twin of snippet_add_subtitles (same result shape and the same crash guard)."""
+    resolve = get_resolve()
+    project = _current_project()
+    tl = _current_timeline()
+    fps = _timeline_fps(project, tl)
+    mp = project.GetMediaPool()
+    item = None
+
+    def scan(folder) -> None:
+        nonlocal item
+        for c in folder.GetClipList() or []:
+            if item is None and c.GetClipProperty("File Path") == srt_path:
+                item = c
+        for f in folder.GetSubFolderList() or []:
+            if item is None:
+                scan(f)
+
+    scan(mp.GetRootFolder())
+    imported = False
+    if item is None:
+        got = mp.ImportMedia([srt_path]) or []
+        item = got[0] if got else None
+        imported = item is not None
+    if item is None:
+        return {"ok": False, "error": f"Resolve could not import {srt_path}"}
+    kind = item.GetClipProperty("Type")
+    if kind != "Subtitle":
+        return {"ok": False, "error": f"Resolve did not read {srt_path} as subtitles (Type: {kind})"}
+    if not tl.GetTrackCount("subtitle"):
+        tl.AddTrack("subtitle")
+    existing = tl.GetItemListInTrack("subtitle", 1) or []
+    removed = 0
+    if existing:
+        if not replace:
+            return {"ok": False, "error": f"Subtitle track 1 already has {len(existing)} captions. "
+                    "Pass replace=true to swap them for this file."}
+        page = resolve.GetCurrentPage()
+        if page != "edit":
+            resolve.OpenPage("edit")
+        tl.DeleteClips(existing, False)
+        if page and page != "edit":
+            resolve.OpenPage(page)
+        removed = len(existing) - len(tl.GetItemListInTrack("subtitle", 1) or [])
+    mp.AppendToTimeline([{"mediaPoolItem": item}])  # never with frame ranges: crashes 20.3
+    start = tl.GetStartFrame()
+    cues = [{"start_seconds": (it.GetStart() - start) / fps, "end_seconds": (it.GetEnd() - start) / fps,
+             "text": it.GetName()} for it in tl.GetItemListInTrack("subtitle", 1) or []]
+    return {"ok": bool(cues), "timeline": tl.GetName(), "fps": fps, "imported": imported,
+            "media_pool_item": item.GetName(), "removed": removed, "cues": cues}

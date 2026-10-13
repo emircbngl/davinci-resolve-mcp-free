@@ -299,7 +299,19 @@ local function handle(id, raw)
   else
     local ok, value = xpcall(fn, traceback)
     resp.ok = ok
-    if ok then resp.result = value else resp.error = tostring(value) end
+    if ok then
+      resp.result = value
+    else
+      resp.error = tostring(value)
+      -- Started from the Project Manager, the bridge gets a Resolve object that cannot
+      -- do anything (measured on 20.3); every API call then fails cryptically.
+      local r = get_resolve()
+      if not (r and type(r.GetProjectManager) == "function") then
+        resp.error = resp.error .. "\nThe bridge has no working Resolve object: it was probably " ..
+          "started while no project was open. Open a project, then start the bridge again " ..
+          "(Workspace > Scripts > ResolvePilotBridge)."
+      end
+    end
   end
   if total > kept then
     resp.output_truncated = true
@@ -357,8 +369,9 @@ if not heartbeat() then
 end
 
 log("[bridge] resolve-pilot bridge " .. VERSION .. " ready (" .. BACKEND .. " file access). Folder: " .. DIR)
-if not resolve then
-  log("[bridge] WARNING: no 'resolve' object here. Run this from Resolve's Console or Workspace > Scripts.")
+if not (resolve and type(resolve.GetProjectManager) == "function") then
+  log("[bridge] WARNING: no working 'resolve' object here. Open a project first, then start the bridge " ..
+    "from Resolve's Console or Workspace > Scripts.")
 end
 log(string.format("[bridge] Leave Resolve open and talk to Claude. Stops after %d min without requests.",
   math.floor(IDLE_LIMIT / 60)))

@@ -318,6 +318,61 @@ return {{ok = true, rendering = project:IsRenderingInProgress() and true or fals
 
 
 @_snippet
+def snippet_add_subtitles(srt_path: str, replace: bool = False) -> str:
+    """Put an SRT on subtitle track 1 of the current timeline, at the SRT's own times."""
+    srt_path = os.path.expanduser(srt_path)
+    return f"""-- resolve-pilot: add_subtitles
+{_TIMELINE_PREAMBLE}{_TIMELINE_FPS}local path, replace = {to_lua(srt_path)}, {to_lua(bool(replace))}
+local mp = project:GetMediaPool()
+local item
+local function scan(folder)
+  for _, c in ipairs(folder:GetClipList() or {{}}) do
+    if not item and c:GetClipProperty("File Path") == path then item = c end
+  end
+  for _, f in ipairs(folder:GetSubFolderList() or {{}}) do if not item then scan(f) end end
+end
+scan(mp:GetRootFolder())
+local imported = false
+if not item then
+  local got = mp:ImportMedia({{path}})
+  item = got and got[1]
+  imported = item ~= nil
+end
+if not item then return {{ok = false, error = "Resolve could not import " .. path}} end
+local kind = item:GetClipProperty("Type")
+if kind ~= "Subtitle" then
+  return {{ok = false, error = "Resolve did not read " .. path .. " as subtitles (Type: " .. tostring(kind) .. ")"}}
+end
+-- Without a subtitle track, AppendToTimeline silently adds nothing.
+if (timeline:GetTrackCount("subtitle") or 0) == 0 then timeline:AddTrack("subtitle") end
+local existing = timeline:GetItemListInTrack("subtitle", 1) or {{}}
+local removed = 0
+if #existing > 0 then
+  if not replace then
+    return {{ok = false, error = "Subtitle track 1 already has " .. #existing .. " captions. Pass " ..
+      "replace=true to swap them for this file."}}
+  end
+  local page = resolve:GetCurrentPage()
+  if page ~= "edit" then resolve:OpenPage("edit") end
+  timeline:DeleteClips(existing, false)
+  if page and page ~= "edit" then resolve:OpenPage(page) end
+  removed = #existing - #(timeline:GetItemListInTrack("subtitle", 1) or {{}})
+end
+-- Only mediaPoolItem: adding startFrame/endFrame/mediaType for a subtitle item crashes
+-- Resolve 20.3 (measured twice). Captions land at the SRT's own times from the start.
+mp:AppendToTimeline({{{{mediaPoolItem = item}}}})
+local start = timeline:GetStartFrame()
+local cues = {{}}
+for _, it in ipairs(timeline:GetItemListInTrack("subtitle", 1) or {{}}) do
+  cues[#cues + 1] = {{start_seconds = (it:GetStart() - start) / fps, end_seconds = (it:GetEnd() - start) / fps,
+    text = it:GetName()}}
+end
+return {{ok = #cues > 0, timeline = timeline:GetName(), fps = fps, imported = imported,
+  media_pool_item = item:GetName(), removed = removed, cues = cues}}
+"""
+
+
+@_snippet
 def snippet_add_markers(markers: list[dict], replace_owned_prefix: str | None = None) -> str:
     """Add markers to the current timeline; positions in frames or seconds.
 

@@ -1331,6 +1331,61 @@ def _screen_error(error: str, hint: str, **extra: Any) -> CallToolResult:
     return _content({"ok": False, "error": error, "hint": hint, **extra})
 
 
+_SRT_TIME = re.compile(r"(\d+):(\d\d):(\d\d)[,.](\d{1,3})\s*-->\s*(\d+):(\d\d):(\d\d)[,.](\d{1,3})")
+
+
+def _srt_times(path: str) -> list[tuple[float, float]]:
+    def sec(h, m, s, ms):
+        return int(h) * 3600 + int(m) * 60 + int(s) + int(ms.ljust(3, "0")) / 1000
+    text = Path(path).read_text(encoding="utf-8-sig", errors="replace")
+    return [(sec(*m.groups()[:4]), sec(*m.groups()[4:])) for m in _SRT_TIME.finditer(text)]
+
+
+@tool(EDIT_RESOLVE, title="Add subtitles to the timeline")
+def add_subtitles(
+    srt_path: Annotated[str | None, Field(description="An .srt file (e.g. from export_srt).")] = None,
+    transcript_id: Annotated[str | None, Field(description=(
+        "Or a transcript from transcribe_audio: written as SRT next to its source first."))] = None,
+    replace: Annotated[bool, Field(description=(
+        "Swap out captions already on subtitle track 1; otherwise that is refused."))] = False,
+    max_chars_per_line: Annotated[int, Field(ge=0, description="With transcript_id: wrap width (0 = off).")] = 42,
+    max_lines: Annotated[int, Field(ge=1, le=3)] = 2,
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """Put subtitles on the current timeline's subtitle track, timed from the timeline start.
+
+    Captions keep the SRT's own times, so use it when the timeline plays the transcribed
+    source from its start (a rough cut changes the times: export_srt from the cut's own
+    transcript then). Reads the captions back and warns when they do not match the file.
+    """
+    if transcript_id:
+        srt_path = export_srt(transcript_id=transcript_id, max_chars_per_line=max_chars_per_line,
+                              max_lines=max_lines)["path"]
+    if not srt_path:
+        raise ValueError("Pass srt_path or transcript_id.")
+    full = str(Path(srt_path).expanduser().resolve())
+    if not Path(full).is_file():
+        raise FileNotFoundError(full)
+    expected = _srt_times(full)
+    if not expected:
+        raise ValueError(f"No SRT cues found in {full}.")
+    out = control.perform(lua_lib.snippet_add_subtitles(full, replace),
+                          lambda: _studio().add_subtitles(full, replace), channel)
+    out["srt_path"] = full
+    if out.get("channel") == "manual" or not out.get("ok"):
+        return out
+    cues = out.pop("cues")
+    fps = out.get("fps") or 24
+    warnings = []
+    if len(cues) != len(expected):
+        warnings.append(f"the file has {len(expected)} cues but {len(cues)} landed on the track")
+    elif abs(cues[0]["start_seconds"] - expected[0][0]) > 1.5 / fps:
+        warnings.append(f"captions start at {cues[0]['start_seconds']:.2f}s, the file says "
+                        f"{expected[0][0]:.2f}s; check with get_resolve_state or timeline_frames")
+    out.update(cue_count=len(cues), first=cues[0], last=cues[-1], warnings=warnings)
+    return out
+
+
 class TimelinePosition(BaseModel):
     seconds: float | None = Field(None, ge=0, description="Offset from the timeline start.")
     frame: int | None = Field(None, ge=0, description="Frame offset from the timeline start.")

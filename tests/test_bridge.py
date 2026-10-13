@@ -400,3 +400,12 @@ def test_render_status_reports_jobs_and_progress(live_bridge):
     assert out["rendering"] is True and out["done"] is False
     assert out["jobs"][0]["status"] == "Rendering" and out["jobs"][0]["percent"] == 40
     assert out["jobs"][0]["seconds_left"] == 12
+
+
+@needs_luajit
+def test_failures_explain_a_bridge_started_without_a_project(live_bridge):
+    bridge.exec_lua("mock_saved = resolve.GetProjectManager; resolve.GetProjectManager = nil")
+    r = bridge.exec_lua(lua.snippet_get_state())
+    assert not r.ok and "started while no project was open" in r.error
+    bridge.exec_lua("resolve.GetProjectManager = mock_saved")
+    assert bridge.exec_lua(lua.snippet_get_state()).ok
