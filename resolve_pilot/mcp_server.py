@@ -16,6 +16,9 @@ Tool groups:
 - inspector / tracks: set_clip_properties, set_tracks, export_timeline
 - macOS UI: send_keystroke, menu_pick, open_ai_feature
 
+Resources: resolve://traps, resolve://capabilities, resolve://state and
+resolve://guide/{name} (read-only context that costs the agent no tool call).
+
 Run as:
     python -m resolve_pilot.mcp_server
 or via Claude Desktop config (see README).
@@ -48,7 +51,7 @@ except ImportError:  # mcp 1.x
     from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 
-from resolve_pilot import __version__, analyzers, bridge, control, luts
+from resolve_pilot import __version__, analyzers, bridge, control, luts, traps
 from resolve_pilot.analyzers import frames as frame_grab
 from resolve_pilot._paths import state_dir
 from resolve_pilot.editorial import ops as plan_ops
@@ -117,8 +120,13 @@ Safety: run_lua executes code inside the user's Resolve. Prefer the dedicated to
 anything destructive (deleting clips, markers or timelines, replacing grades, rendering over \
 files) ask the user and suggest saving the project first.
 Playbooks: get_workflow_guide() lists step-by-step guides (rough cut, subtitles, music video, \
-color grade, markers, live control with a Resolve Lua API cheat sheet). Read the matching one \
-before a multi-step job.
+color grade, markers, live control with a Resolve Lua API cheat sheet, traps). Read the matching \
+one before a multi-step job.
+Resources (read-only, no tool call): resolve://traps (known Resolve traps and what resolve-pilot \
+does about them; read it before risky edits or run_lua code), resolve://capabilities (which tools \
+work on which channel, edition and OS), resolve://state (live project summary, or how to \
+connect), resolve://guide/{name} (the playbooks). Results and errors may name a known trap \
+(`known_traps`, "known_trap: <id>"); heed it.
 """
 
 mcp = _Server("resolve-pilot", instructions=INSTRUCTIONS)
@@ -158,6 +166,11 @@ def _explain(e: BaseException) -> str:
     return str(e) or type(e).__name__
 
 
+# Every tool registered through @tool, in order: name -> (function, annotations).
+# resolve://capabilities is built from this, so it cannot drift from the server.
+_TOOLS: dict[str, tuple[Any, ToolAnnotations]] = {}
+
+
 def tool(annotations: ToolAnnotations, title: str | None = None):
     """Register a tool whose exceptions reach the agent as readable ToolErrors.
 
@@ -165,6 +178,8 @@ def tool(annotations: ToolAnnotations, title: str | None = None):
     leaves the agent guessing; here every failure carries its explanation.
     """
     def decorator(fn):
+        _TOOLS[fn.__name__] = (fn, annotations)
+
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             try:
@@ -1547,7 +1562,11 @@ def run_lua(
     if (code is None) == (snippet is None):
         raise ValueError("Pass exactly one of code or snippet.")
     lua = code if code is not None else lua_lib.render_snippet(snippet, args or {})
-    return bridge.exec_lua(lua, timeout=timeout_seconds).to_dict()
+    out = bridge.exec_lua(lua, timeout=timeout_seconds).to_dict()
+    hints = traps.hints_for_lua(lua) if code is not None else []
+    if hints:
+        out["known_traps"] = hints
+    return out
 
 
 @tool(READ, title="List Lua snippets")
@@ -1980,11 +1999,181 @@ def open_ai_feature(
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Resources: read-only context an agent can load without a tool call
+# ────────────────────────────────────────────────────────────────────────────
+
+_LIVE = ["studio", "bridge", "manual"]
+# How each tool reaches Resolve, where the `channel` parameter does not say it all.
+# Tools with a `channel` parameter default to _LIVE; tools without one need no Resolve.
+_TOOL_CHANNELS: dict[str, list[str]] = {
+    "run_lua": ["bridge"],
+    "timeline_frames": ["studio", "bridge"],
+    "add_title": ["bridge", "manual"],  # Lua only, no Studio Python path
+    "checkpoint": ["bridge", "manual"],
+    "open_page": _LIVE + ["macos_ui"],
+    "screenshot_resolve": ["macos_ui"],
+    "send_keystroke": ["macos_ui"],
+    "menu_pick": ["macos_ui"],
+    "open_ai_feature": ["macos_ui"],
+}
+_MACOS_ONLY = {"screenshot_resolve", "send_keystroke", "menu_pick", "open_ai_feature"}
+
+_CHANNEL_NOTES = {
+    "studio": "Resolve Studio's Python scripting API: direct control. Studio only.",
+    "bridge": "The resolve-pilot Lua bridge running inside Resolve (Free and Studio). The user "
+              "starts it once per session (setup_bridge installs it into Workspace > Scripts).",
+    "manual": "Nothing live: the tool returns lua_code + instructions for the user to paste into "
+              "Workspace > Console. Nothing changes until they do.",
+    "macos_ui": "macOS Accessibility / screen capture of the Resolve window. macOS only; needs "
+                "the permissions below.",
+}
+
+_EDITION_NOTES = {
+    "free": "No external scripting API. resolve-pilot reaches Free through the Lua bridge "
+            "(bridge channel) or paste-able Lua (manual channel). Studio-only features (some AI "
+            "tools) may answer with an upgrade dialog, which blocks script calls until closed.",
+    "studio": "The Python scripting API (studio channel) is used first; run_lua still needs the "
+              "bridge.",
+    "resolve_21_1_free": "From Resolve 21.1, Python scripting (and Resolve's own MCP server) are "
+                         "Studio-only, and Free's Lua loses io, os.execute, package and debug. The "
+                         "bridge is written for that (ffi file access) but not yet tried on a 21.1 "
+                         "install. If Workspace > Scripts > ResolvePilotBridge does nothing, paste "
+                         "setup_bridge's console_command into Workspace > Console (Lua tab).",
+    "verified": "Bridge tools verified live on Resolve 20.3 Free (macOS); see resolve://traps for "
+                "what each measurement turned up.",
+}
+
+_PLATFORM_NOTES = {
+    "macos_only_tools": sorted(_MACOS_ONLY),
+    "windows_linux": "No UI automation; the bridge covers live control on every OS.",
+    "macos_permissions": "Accessibility (send_keystroke, menu_pick, open_ai_feature, page "
+                         "shortcuts) and Screen Recording (screenshot_resolve). macOS checks them "
+                         "against the app responsible for this server: under Claude Desktop that is "
+                         "the Python interpreter (Python.app), not Claude. The tools' errors name "
+                         "the app to allow.",
+}
+
+
+def capabilities() -> dict[str, Any]:
+    """Which tool works on which channel, plus edition and OS notes (resolve://capabilities)."""
+    import inspect
+
+    tools: dict[str, Any] = {}
+    for name, (fn, ann) in _TOOLS.items():
+        hints = ann.model_dump(by_alias=True)
+        if name in _TOOL_CHANNELS:
+            channels = _TOOL_CHANNELS[name]
+        else:
+            channels = list(_LIVE) if "channel" in inspect.signature(fn).parameters else []
+        tools[name] = {
+            "channels": channels,
+            "needs_resolve": bool(channels),
+            "macos_only": name in _MACOS_ONLY,
+            "read_only": bool(hints.get("readOnlyHint")),
+            "destructive": bool(hints.get("destructiveHint")),
+        }
+    return {
+        "server_version": __version__,
+        "platform": platform.system(),
+        "channel_order": "studio, then bridge, then manual (channel='auto'); "
+                         "resolve_pilot_status says which one is live",
+        "channels": _CHANNEL_NOTES,
+        "editions": _EDITION_NOTES,
+        "platforms": _PLATFORM_NOTES,
+        "tools": tools,
+        "known_traps": "resolve://traps",
+    }
+
+
+STATE_TIMEOUT_SECONDS = 5.0  # the bridge / Studio call itself
+STATE_DEADLINE_SECONDS = 8.0  # the whole read, channel probing included
+
+
+def _state_snapshot(timeout: float = STATE_TIMEOUT_SECONDS) -> dict[str, Any]:
+    """get_resolve_state() without clips, or why there is nothing live; bounded by `timeout`."""
+    not_connected = {
+        "connected": False,
+        "next_steps": [
+            "Call resolve_pilot_status for the full picture.",
+            "For live control (works in Resolve Free): setup_bridge(action='install'), then ask the "
+            "user to click Workspace > Scripts > ResolvePilotBridge in Resolve.",
+            "Without it, Resolve tools return Lua for the user to paste into Workspace > Console.",
+        ],
+    }
+    try:
+        channel = control.choose_channel("auto")
+        if channel == "manual":
+            return {**not_connected, "channel": "manual", "bridge": bridge.status().detail}
+        args = dict(include_clips=False, track_type="video", track_index=1, include_markers=False)
+        out = control.perform(lua_lib.snippet_get_state(**args),
+                              lambda: _studio().resolve_state(**args), channel, timeout=timeout)
+        return {"connected": True, **out}
+    except Exception as e:
+        return {**not_connected, "error": _explain(e)}
+
+
+async def _bounded_state() -> str:
+    import asyncio
+
+    try:
+        data = await asyncio.wait_for(asyncio.to_thread(_state_snapshot), STATE_DEADLINE_SECONDS)
+    except asyncio.TimeoutError:
+        data = {"connected": False,
+                "error": f"Resolve did not answer within {STATE_DEADLINE_SECONDS:g}s. "
+                         + bridge.MODAL_HINT,
+                "next_steps": ["Call resolve_pilot_status."]}
+    return json.dumps(data, ensure_ascii=False, indent=2)
+
+
+def _register_resources() -> None:
+    mcp.resource("resolve://traps", name="known-traps", title="Known Resolve traps",
+                 description="Resolve behaviour that surprises scripts (measured or reported) and "
+                             "what resolve-pilot does about each. Read before risky edits.",
+                 mime_type="text/markdown")(traps.to_markdown)
+    mcp.resource("resolve://capabilities", name="capabilities", title="Capability matrix",
+                 description="Which tools work on which channel (studio / bridge / manual / "
+                             "macos_ui), Free vs Studio and Resolve 21.1+ notes, OS and "
+                             "permission notes.",
+                 mime_type="application/json")(
+        lambda: json.dumps(capabilities(), ensure_ascii=False, indent=2))
+    mcp.resource("resolve://state", name="resolve-state", title="Resolve state (live)",
+                 description="The open project and current timeline (get_resolve_state without "
+                             "clips) when a channel is live; otherwise how to connect. Answers "
+                             "within a few seconds.",
+                 mime_type="application/json")(_bounded_state)
+
+    for wf in list_workflows():
+        if wf["name"] == "traps":  # already resolve://traps
+            continue
+
+        short = wf["name"].removeprefix("resolve-")
+
+        def make(name: str):
+            return lambda: get_workflow(name)
+        mcp.resource(f"resolve://guide/{short}", name=f"guide-{short}",
+                     title=f"Guide: {short}", description=wf["description"],
+                     mime_type="text/markdown")(make(wf["name"]))
+
+    def guide(name: str) -> str:
+        return get_workflow(name)
+    mcp.resource("resolve://guide/{name}", name="guide",
+                 title="Workflow guide",
+                 description="A workflow guide by name (short names work: rough-cut, subtitle, "
+                             "live-control, traps, ...).",
+                 mime_type="text/markdown")(guide)
+
+
+_register_resources()
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Prompts: each workflow guide as a ready-to-use prompt
 # ────────────────────────────────────────────────────────────────────────────
 
 def _register_prompts() -> None:
     for wf in list_workflows():
+        if wf["name"] == "traps":  # reference, not a workflow; served as resolve://traps
+            continue
         def make(name: str):
             def prompt(task: str = "") -> str:
                 body = f"Follow this resolve-pilot workflow.\n\n{get_workflow(name)}"

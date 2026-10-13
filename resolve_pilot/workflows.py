@@ -1,7 +1,8 @@
 """Workflow guides (the SKILL.md playbooks shipped in ``resolve_pilot/skills``).
 
 They are served over MCP — as the ``get_workflow_guide`` tool and as prompts —
-so any client gets them, not only clients that install Claude skills.
+so any client gets them, not only clients that install Claude skills. The known-traps
+ledger (``resolve_pilot.traps``) is served as one more guide, ``traps``.
 """
 from __future__ import annotations
 
@@ -9,6 +10,11 @@ import re
 from pathlib import Path
 
 SKILLS_DIR = Path(__file__).parent / "skills"
+TRAPS_GUIDE = {
+    "name": "traps",
+    "description": "Known Resolve traps (measured or reported) and what resolve-pilot does about "
+                   "each. Read before risky edits or run_lua code.",
+}
 _FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.S)
 
 
@@ -30,11 +36,15 @@ def list_workflows() -> list[dict[str, str]]:
     for path in sorted(SKILLS_DIR.glob("*/SKILL.md")):
         meta, _ = _parse(path)
         out.append({"name": meta.get("name", path.parent.name), "description": meta.get("description", "")})
+    out.append(dict(TRAPS_GUIDE))
     return out
 
 
 def get_workflow(name: str) -> str:
     key = name.strip().lower()
+    if key in ("traps", "known-traps"):
+        from resolve_pilot import traps
+        return traps.to_markdown()
     for path in SKILLS_DIR.glob("*/SKILL.md"):
         meta, body = _parse(path)
         names = {path.parent.name, meta.get("name", ""), path.parent.name.removeprefix("resolve-")}
