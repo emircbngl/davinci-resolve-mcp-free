@@ -21,7 +21,7 @@ def test_tool_hints_match_what_the_tools_do():
                  "export_fcpxml", "export_srt"):
         assert ann[name]["idempotentHint"] is False, name
         assert ann[name]["readOnlyHint"] is False, name
-    for name in ("run_lua", "send_keystroke", "menu_pick", "apply_lut"):
+    for name in ("run_lua", "send_keystroke", "menu_pick", "apply_lut", "remove_clips"):
         assert ann[name]["destructiveHint"] is True, name
     for name in ("probe_media", "get_plan", "get_resolve_state", "list_lua_snippets"):
         assert ann[name]["readOnlyHint"] is True, name
@@ -43,6 +43,8 @@ EXPECTED_TOOLS = {
     # resolve
     "get_resolve_state", "import_timeline", "add_markers", "add_quality_markers", "set_clip_color",
     "apply_lut", "queue_render", "render_status", "open_page", "run_lua", "list_lua_snippets", "render_lua_snippet",
+    # live timeline building
+    "import_media", "append_clips", "remove_clips",
     # macOS UI
     "send_keystroke", "menu_pick", "open_ai_feature",
 }
@@ -50,7 +52,7 @@ EXPECTED_TOOLS = {
 
 def test_server_registers_exactly_the_expected_tools():
     names = set(_annotations())
-    assert len(EXPECTED_TOOLS) == 35
+    assert len(EXPECTED_TOOLS) == 38
     assert names == EXPECTED_TOOLS, (sorted(EXPECTED_TOOLS - names), sorted(names - EXPECTED_TOOLS))
 
 
@@ -59,6 +61,13 @@ def test_vision_tools_are_read_only_and_markers_are_not():
     for name in ("grab_frames", "scene_frames", "read_video", "screenshot_resolve", "analyze_quality"):
         assert ann[name]["readOnlyHint"] is True, name
     assert ann["add_quality_markers"]["readOnlyHint"] is False
+
+
+def test_timeline_building_hints():
+    ann = _annotations()
+    assert ann["import_media"]["idempotentHint"] is True and ann["import_media"]["destructiveHint"] is False
+    assert ann["append_clips"]["idempotentHint"] is False and ann["append_clips"]["destructiveHint"] is False
+    assert ann["remove_clips"]["destructiveHint"] is True
 
 
 def test_inverted_segments_are_rejected():
