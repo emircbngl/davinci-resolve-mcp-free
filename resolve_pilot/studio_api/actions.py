@@ -774,7 +774,13 @@ def add_subtitles(srt_path: str, replace: bool = False) -> dict[str, Any]:
         if page and page != "edit":
             resolve.OpenPage(page)
         removed = len(existing) - len(tl.GetItemListInTrack("subtitle", 1) or [])
-    mp.AppendToTimeline([{"mediaPoolItem": item}])  # never with frame ranges: crashes 20.3
+    # Subtitles land at the playhead: park it on the first frame, then put it back.
+    # Never pass frame ranges for a subtitle item: that crashes Resolve 20.3.
+    playhead = tl.GetCurrentTimecode()
+    tl.SetCurrentTimecode(tl.GetStartTimecode())
+    mp.AppendToTimeline([{"mediaPoolItem": item}])
+    if playhead:
+        tl.SetCurrentTimecode(playhead)
     start = tl.GetStartFrame()
     cues = [{"start_seconds": (it.GetStart() - start) / fps, "end_seconds": (it.GetEnd() - start) / fps,
              "text": it.GetName()} for it in tl.GetItemListInTrack("subtitle", 1) or []]

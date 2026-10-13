@@ -359,9 +359,13 @@ if #existing > 0 then
   if page and page ~= "edit" then resolve:OpenPage(page) end
   removed = before - #(timeline:GetItemListInTrack("subtitle", 1) or {{}})
 end
--- Only mediaPoolItem: adding startFrame/endFrame/mediaType for a subtitle item crashes
--- Resolve 20.3 (measured twice). Captions land at the SRT's own times from the start.
+-- Subtitles are appended at the PLAYHEAD (measured on 20.3), so park it on the first
+-- frame and put it back afterwards. Only mediaPoolItem: adding startFrame/endFrame/
+-- mediaType for a subtitle item crashes Resolve 20.3 (measured twice).
+local playhead = timeline:GetCurrentTimecode()
+timeline:SetCurrentTimecode(timeline:GetStartTimecode())
 mp:AppendToTimeline({{{{mediaPoolItem = item}}}})
+if playhead then timeline:SetCurrentTimecode(playhead) end
 local start = timeline:GetStartFrame()
 local cues = {{}}
 for _, it in ipairs(timeline:GetItemListInTrack("subtitle", 1) or {{}}) do

@@ -323,8 +323,12 @@ function MediaPool:AppendToTimeline(infos)
       end
       local track = tl.tracks.subtitle[1]
       if not track then return {} end -- no subtitle track: nothing is added
+      -- Captions land at the playhead (measured on 20.3), not at the timeline start.
+      local at = tl.start
+      local h, mi, sec, ff = (tl.playhead or ""):match("^(%d+):(%d+):(%d+)[:;](%d+)$")
+      if h then at = ((h * 60 + mi) * 60 + sec) * math.floor(fps + 0.5) + ff end
       for _, cue in ipairs(mpi.cues) do
-        local it = Item.new(cue[3], tl.start + math.floor(cue[1] * fps + 0.5),
+        local it = Item.new(cue[3], at + math.floor(cue[1] * fps + 0.5),
           math.floor((cue[2] - cue[1]) * fps + 0.5), mpi.path, mpi)
         it.track_type, it.track_index = "subtitle", 1
         table.insert(track, it)

@@ -458,3 +458,15 @@ def test_mock_crashes_like_resolve_on_ranged_subtitle_append(live_bridge, tmp_pa
 def test_append_clips_refuses_subtitle_files_before_reaching_resolve():
     with pytest.raises(ValueError, match="use add_subtitles"):
         lua.snippet_append_clips([{"path": "/x/captions.SRT", "in_seconds": 0, "duration_seconds": 2}])
+
+
+@needs_luajit
+def test_add_subtitles_ignores_where_the_playhead_is(live_bridge, tmp_path):
+    # Resolve appends subtitles at the playhead; the tool parks it on frame 0 and back.
+    from resolve_pilot import mcp_server
+    srt = tmp_path / "a.srt"
+    srt.write_text(_SRT, encoding="utf-8")
+    bridge.exec_lua('rp.timeline():SetCurrentTimecode("01:00:05:00")')
+    out = mcp_server.add_subtitles(srt_path=str(srt))
+    assert out["first"]["start_seconds"] == 0.5 and out["warnings"] == []
+    assert bridge.exec_lua("return rp.timeline():GetCurrentTimecode()").result == "01:00:05:00"
