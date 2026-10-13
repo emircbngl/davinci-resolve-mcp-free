@@ -152,6 +152,7 @@ def build_fcpxml(spec: TimelineSpec) -> str:
     for c in spec.clips:
         t += c.duration_seconds
         bounds.append(_frames(t, fps))
+    fade_in_frames = bounds[0]
     fade_out_frames = _frames(spec.fade_out_seconds, fps)
     total_frames = bounds[-1] + fade_out_frames
 
@@ -185,14 +186,16 @@ def build_fcpxml(spec: TimelineSpec) -> str:
         asset_for(clip.source_path)
 
     bed_xml = ""
-    if spec.audio_bed:
-        bed = spec.audio_bed
-        bed_ref = asset_for(bed.source_path)
-        bed_offset = _frames(bed.offset_seconds, fps)
+    bed = spec.audio_bed
+    bed_offset = _frames(bed.offset_seconds, fps) if bed else 0
+    bed_frames = 0
+    if bed:
         bed_frames = (_frames(bed.duration_seconds, fps) if bed.duration_seconds
                       else max(0, total_frames - bed_offset))
+    if bed and bed_frames > 0:  # a zero-length bed would import as nothing; validate_plan flags it
+        bed_ref = asset_for(bed.source_path)
         # A connected clip's offset is measured in its parent's source time.
-        if spec.fade_in_seconds > 0 or not spec.clips:
+        if fade_in_frames > 0 or not spec.clips:
             parent_start_frames = 0
         else:
             parent_start_frames = _frames(spec.clips[0].in_seconds, fps)
@@ -201,7 +204,7 @@ def build_fcpxml(spec: TimelineSpec) -> str:
             f'<asset-clip name="{html.escape(bed_name)}" ref="{bed_ref}" lane="-1" '
             f'offset="{_rt(parent_start_frames + bed_offset, fps)}" '
             f'start="{_rational(bed.in_seconds, fps)}" '
-            f'duration="{_rt(bed_frames, fps)}"/>'
+            f'duration="{_rt(bed_frames, fps)}" srcEnable="audio"/>'
         )
 
     def transition(boundary: int, seconds: float) -> str:
@@ -212,11 +215,11 @@ def build_fcpxml(spec: TimelineSpec) -> str:
 
     spine_elements: list[str] = []
 
-    if spec.fade_in_seconds > 0 or (bed_xml and not spec.clips):
+    if fade_in_frames > 0 or (bed_xml and not spec.clips):
         gap = f'<gap name="Gap" offset="{_rt(0, fps)}" duration="{_rt(bounds[0], fps)}" start="0/1s"'
         spine_elements.append(f"{gap}>{bed_xml}</gap>" if bed_xml else f"{gap}/>")
         bed_xml = ""
-        if spec.fade_in_seconds > 0:
+        if fade_in_frames > 0:
             spine_elements.append(transition(bounds[0], spec.fade_in_seconds))
 
     last_index = len(spec.clips) - 1
@@ -237,10 +240,10 @@ def build_fcpxml(spec: TimelineSpec) -> str:
             spine_elements.append(f"{attrs}/>")
         if i < last_index:
             trans = _transition_duration_for(clip, spec.default_transition_seconds)
-            if trans > 0:
+            if _frames(trans, fps) > 0:
                 spine_elements.append(transition(bounds[i + 1], trans))
 
-    if spec.fade_out_seconds > 0:
+    if fade_out_frames > 0:
         spine_elements.append(transition(bounds[-1], spec.fade_out_seconds))
         spine_elements.append(
             f'<gap name="Gap" offset="{_rt(bounds[-1], fps)}" '

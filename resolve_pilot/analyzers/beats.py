@@ -67,15 +67,19 @@ def detect_beats(
     if len(samples) < 3 * hop:
         return []
 
-    # Energy per 10 ms block, then RMS over a 30 ms window (3 blocks).
+    # Energy per 10 ms block, then RMS over the 30 ms window ending at each block.
+    # Two silent blocks are prepended so an onset in the very first block counts,
+    # and each window is stamped with its newest block: that is where the energy
+    # rise (the onset) is, not 20 ms earlier at the window start.
     block = [sum(map(operator.mul, seg, seg))
              for seg in (samples[i:i + hop] for i in range(0, len(samples) - hop + 1, hop))]
+    padded = [0.0, 0.0] + block
     scale = 1.0 / (3 * hop * 32768.0 * 32768.0)
-    rms = [math.sqrt(sum(block[i:i + 3]) * scale) or 1e-12 for i in range(len(block) - 2)]
-    times = [i * hop / sr for i in range(len(rms))]
+    rms = [math.sqrt(sum(padded[j:j + 3]) * scale) for j in range(len(block))]
+    times = [j * hop / sr for j in range(len(rms))]
 
-    # Onset envelope: half-wave rectified diff
-    env = [0.0] + [max(0.0, rms[i] - rms[i - 1]) for i in range(1, len(rms))]
+    # Onset envelope: half-wave rectified diff against the previous window (silence before 0)
+    env = [rms[0]] + [max(0.0, rms[i] - rms[i - 1]) for i in range(1, len(rms))]
 
     peak_max = max(env) or 1e-12
     threshold_lin = 10 ** (energy_threshold_db / 20.0) * peak_max

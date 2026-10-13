@@ -250,3 +250,13 @@ def test_wrap_cues_short_text_and_disabled():
     assert wrap_cues([cue])[0].text == "short line"
     long = SrtCue(0.0, 1.0, "x " * 50)
     assert wrap_cues([long], max_chars_per_line=0) == [long]
+
+
+def test_audio_bed_is_audio_only_and_zero_length_elements_are_skipped():
+    spec = _two_clip_spec(audio_bed=AudioBed(source_path="/tmp/song.wav"), fade_in_seconds=0.01)
+    xml = build_fcpxml(spec)
+    bed = [c for c in ET.fromstring(xml.encode()).iter("asset-clip") if c.get("lane") == "-1"]
+    assert bed[0].get("srcEnable") == "audio"
+    assert "<gap" not in xml  # 0.01 s fade rounds to 0 frames at 24 fps
+    late = _two_clip_spec(audio_bed=AudioBed(source_path="/tmp/song.wav", offset_seconds=10))
+    assert 'lane="-1"' not in build_fcpxml(late)

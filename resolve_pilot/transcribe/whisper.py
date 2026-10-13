@@ -2,15 +2,16 @@
 
 Two engines, lazy-imported so the package loads without either:
 
-- ``mlx`` — mlx-whisper, fast on Apple Silicon (``pip install '.[transcribe]'``).
+- ``mlx`` — mlx-whisper, fast on Apple Silicon (``pip install -e '.[transcribe]'``).
 - ``faster-whisper`` — CTranslate2, runs on Windows / Linux / Intel Macs, CPU or
-  CUDA (``pip install '.[transcribe-cpu]'``).
+  CUDA (``pip install -e '.[transcribe-cpu]'``).
 
 ``engine="auto"`` picks mlx when it is installed, otherwise faster-whisper.
 """
 from __future__ import annotations
 
 import importlib.util
+import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -64,9 +65,9 @@ def resolve_engine(engine: str = "auto") -> str:
         if found:
             return found[0]
         raise RuntimeError(
-            "No Whisper engine installed. Apple Silicon: pip install 'davinci-resolve-mcp-free[transcribe]' "
-            "(mlx-whisper). Windows/Linux/Intel: pip install 'davinci-resolve-mcp-free[transcribe-cpu]' "
-            "(faster-whisper)."
+            "No Whisper engine installed. In the resolve-pilot checkout run "
+            "pip install -e '.[transcribe]' on Apple Silicon (mlx-whisper), or "
+            "pip install -e '.[transcribe-cpu]' on Windows/Linux/Intel (faster-whisper)."
         )
     if engine not in ("mlx", "faster-whisper"):
         raise ValueError(f"engine must be 'auto', 'mlx' or 'faster-whisper', got {engine!r}")
@@ -87,6 +88,7 @@ def model_name_for(engine: str, model: str | None) -> str:
 
 
 _faster_models: dict[str, Any] = {}
+_faster_models_lock = threading.Lock()
 
 
 def transcribe(
@@ -122,9 +124,11 @@ def transcribe(
 
     from faster_whisper import WhisperModel  # type: ignore
 
-    if name not in _faster_models:
-        _faster_models[name] = WhisperModel(name, device="auto", compute_type="default")
-    segments, info = _faster_models[name].transcribe(
+    with _faster_models_lock:
+        if name not in _faster_models:
+            _faster_models[name] = WhisperModel(name, device="auto", compute_type="default")
+        whisper_model = _faster_models[name]
+    segments, info = whisper_model.transcribe(
         str(p), language=language, word_timestamps=word_timestamps,
     )
     segs = [Segment(start=float(s.start), end=float(s.end), text=s.text.strip()) for s in segments]

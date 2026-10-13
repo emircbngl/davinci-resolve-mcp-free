@@ -89,3 +89,47 @@ def test_missing_engine_explains_install(monkeypatch):
     monkeypatch.setattr(whisper, "available_engines", lambda: [])
     with pytest.raises(RuntimeError, match="transcribe-cpu"):
         whisper.resolve_engine("auto")
+
+
+def test_polling_with_refresh_collects_the_result_instead_of_restarting(tmp_path, fake_engine):
+    import time
+    calls, gate = fake_engine
+    f = tmp_path / "redo.mp4"
+    f.write_bytes(b"x")
+    store.get_or_start(f)  # an older cached transcript exists
+    gate.clear()
+    assert store.get_or_start(f, refresh=True, wait_seconds=0.05)["status"] == "running"
+    gate.set()
+    time.sleep(0.2)  # the job finishes between two polls
+    done = store.get_or_start(f, refresh=True, wait_seconds=0.05)
+    assert done["status"] == "done" and done["cached"] is False
+    assert len(calls) == 2  # the first run plus exactly one refresh
+
+
+def test_jobs_run_one_at_a_time(tmp_path, monkeypatch):
+    import threading
+    import time
+    active, peak = [0], [0]
+    lock = threading.Lock()
+
+    def slow(path, **kw):
+        with lock:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+        time.sleep(0.2)
+        with lock:
+            active[0] -= 1
+        return TranscriptionResult(language="en", text="", segments=[])
+
+    monkeypatch.setattr(store, "transcribe", slow)
+    monkeypatch.setattr(store, "resolve_engine", lambda engine="auto": "mlx")
+    files = []
+    for i in range(3):
+        f = tmp_path / f"cam{i}.mp4"
+        f.write_bytes(b"x")
+        files.append(f)
+    for f in files:
+        store.get_or_start(f, wait_seconds=0)
+    for f in files:
+        assert store.get_or_start(f, wait_seconds=5)["status"] == "done"
+    assert peak[0] == 1

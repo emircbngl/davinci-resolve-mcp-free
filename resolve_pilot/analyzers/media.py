@@ -54,7 +54,9 @@ def probe_media(path: str | Path) -> MediaInfo:
 
     fmt = data.get("format", {})
     streams = data.get("streams", [])
-    v = next((s for s in streams if s.get("codec_type") == "video"), None)
+    # Album art in MP3/M4A files shows up as a one-frame "video" stream; it is not footage.
+    v = next((s for s in streams if s.get("codec_type") == "video"
+              and (s.get("disposition") or {}).get("attached_pic") != 1), None)
     a = next((s for s in streams if s.get("codec_type") == "audio"), None)
 
     fps: float | None = None

@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from resolve_pilot.analyzers import MediaInfo, SceneCut, probe_media, probe_media_cached
-from resolve_pilot.exporters.fcpxml import AudioBed, Clip, TimelineSpec
+from resolve_pilot.exporters.fcpxml import AudioBed, Clip, TimelineSpec, _frames
 from resolve_pilot.transcribe import Segment
 
 
@@ -243,16 +243,16 @@ def validate_plan(plan: RoughCutPlan) -> dict[str, list[str]]:
                 f"{mi.duration_seconds:.2f}s long"
             )
 
+    flagged: set[int] = set()  # clips already reported for an oversized dissolve
     for i in range(len(plan.clips) - 1):
         a, b = plan.clips[i], plan.clips[i + 1]
         d = _transition_for(plan, a)
         if d <= 0:
             continue
         if d > min(a.duration_seconds, b.duration_seconds) + 1e-6:
-            errors.append(
-                f"transition {i}->{i + 1} is {d:.2f}s, longer than clip "
-                f"{i if a.duration_seconds < b.duration_seconds else i + 1}"
-            )
+            short = i if a.duration_seconds < b.duration_seconds else i + 1
+            flagged.add(short)
+            errors.append(f"transition {i}->{i + 1} is {d:.2f}s, longer than clip {short}")
             continue
         half = d / 2
         if b.in_seconds + tol < half:
@@ -267,16 +267,21 @@ def validate_plan(plan: RoughCutPlan) -> dict[str, list[str]]:
                 "point; Resolve will shorten or shift the dissolve"
             )
 
-    if plan.clips:
-        if plan.fade_in_seconds > plan.clips[0].duration_seconds:
-            warnings.append("fade_in_seconds is longer than the first clip")
-        if plan.fade_out_seconds > plan.clips[-1].duration_seconds:
-            warnings.append("fade_out_seconds is longer than the last clip")
+    if plan.clips and plan.fps > 0:
+        _check_frames(plan, errors, warnings, flagged)
 
     if plan.audio_bed:
         bed = plan.audio_bed
         mi = info(bed.source_path)
         want = bed.duration_seconds or max(0.0, plan.total_seconds - bed.offset_seconds)
+        if bed.offset_seconds >= plan.total_seconds and plan.clips:
+            errors.append(
+                f"audio bed starts at {bed.offset_seconds:.2f}s, after the timeline ends "
+                f"({plan.total_seconds:.2f}s). offset_seconds is the timeline position; the "
+                "position inside the song is in_seconds"
+            )
+        elif plan.fps > 0 and _frames(want, plan.fps) < 1:
+            errors.append("audio bed is shorter than one frame")
         if mi is None:
             if not Path(bed.source_path).expanduser().exists():
                 warnings.append(f"audio bed: file not found: {bed.source_path}")
@@ -311,6 +316,46 @@ def validate_plan(plan: RoughCutPlan) -> dict[str, list[str]]:
                     f"clips {i} and {j} reuse {overlap:.2f}s of the same footage from {Path(path).name}"
                 )
     return {"errors": errors, "warnings": warnings}
+
+
+def _check_frames(plan: RoughCutPlan, errors: list[str], warnings: list[str],
+                  flagged: set[int]) -> None:
+    """Check clips, dissolves and fades after the exporter's frame rounding.
+
+    Seconds that look fine can still collide once rounded: a dissolve as long as
+    its clip leaves no room for the next one, and a short fade rounds to nothing.
+    """
+    fps = plan.fps
+    bounds = [_frames(plan.fade_in_seconds, fps)]
+    t = plan.fade_in_seconds
+    for c in plan.clips:
+        t += c.duration_seconds
+        bounds.append(_frames(t, fps))
+    n = len(plan.clips)
+    # Dissolve length in frames at each clip edge: edges[i] sits before clip i.
+    edges = [_frames(plan.fade_in_seconds, fps)]
+    edges += [_frames(_transition_for(plan, plan.clips[i]), fps) for i in range(n - 1)]
+    edges.append(_frames(plan.fade_out_seconds, fps))
+    for i in range(n):
+        frames = bounds[i + 1] - bounds[i]
+        if frames <= 0:
+            if plan.clips[i].duration_seconds > 0:
+                errors.append(f"clip {i} is shorter than one frame at {fps:g} fps")
+            continue
+        need = (edges[i] - edges[i] // 2) + edges[i + 1] // 2
+        if need > frames and i not in flagged:
+            errors.append(
+                f"clip {i} is {frames} frames but the dissolves on its edges use {need}; "
+                "shorten the dissolves or lengthen the clip"
+            )
+    for label, seconds in [("fade_in_seconds", plan.fade_in_seconds),
+                           ("fade_out_seconds", plan.fade_out_seconds),
+                           ("default_transition_seconds", plan.default_transition_seconds)]:
+        if seconds > 0 and _frames(seconds, fps) == 0:
+            warnings.append(f"{label}={seconds:g} rounds to 0 frames at {fps:g} fps and is skipped")
+    for i, c in enumerate(plan.clips[:-1]):
+        if c.transition_out_seconds > 0 and _frames(c.transition_out_seconds, fps) == 0:
+            warnings.append(f"clip {i}: transition_out_seconds rounds to 0 frames and is skipped")
 
 
 def plan_to_timeline_spec(plan: RoughCutPlan) -> TimelineSpec:

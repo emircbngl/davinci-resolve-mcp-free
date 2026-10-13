@@ -114,7 +114,7 @@ resolve_pilot/
 └── mcp_server.py     MCP entry point (mcp SDK 1.x and 2.x)
 ```
 
-State (plans, transcripts, bridge files) lives in `~/.resolve-pilot`; set `RESOLVE_PILOT_HOME` to move it.
+State (plans, transcripts, bridge files) lives in `~/.resolve-pilot`; set `RESOLVE_PILOT_HOME` to move it, or `RESOLVE_PILOT_BRIDGE_DIR` to move only the bridge folder (re-run the bridge setup afterwards). On Windows, if your user folder has non-ASCII characters, the bridge uses `%PUBLIC%\resolve-pilot\bridge`, because Lua inside Resolve cannot open such paths.
 
 ## Development
 

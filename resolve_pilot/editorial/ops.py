@@ -88,6 +88,7 @@ class UpdateOp(BaseModel):
     """Change fields of one clip; omitted fields stay as they are.
 
     Changing only in_seconds keeps the out point (like trimming the head in an NLE).
+    Changing source_path without a new length keeps the clip's duration.
     """
     op: Literal["update"]
     index: int
@@ -169,6 +170,7 @@ def _apply(plan: RoughCutPlan, op: BaseModel) -> str:
         c = plan.clips[op.index]
         if op.duration_seconds is not None and op.out_seconds is not None:
             raise ValueError("update: give duration_seconds or out_seconds, not both")
+        source_changed = op.source_path is not None and op.source_path != c.source_path
         out = c.out_seconds
         for name in ("source_path", "in_seconds", "name", "rationale", "transition_out_seconds"):
             value = getattr(op, name)
@@ -176,9 +178,12 @@ def _apply(plan: RoughCutPlan, op: BaseModel) -> str:
                 setattr(c, name, value)
         if op.duration_seconds is not None:
             c.duration_seconds = op.duration_seconds
-        elif op.out_seconds is not None or op.in_seconds is not None:
-            # Moving the in point keeps the out point unless a new one is given.
-            c.duration_seconds = (op.out_seconds if op.out_seconds is not None else out) - c.in_seconds
+        elif op.out_seconds is not None:
+            c.duration_seconds = op.out_seconds - c.in_seconds
+        elif op.in_seconds is not None and not source_changed:
+            # Moving the in point keeps the out point, like trimming the head in an NLE.
+            c.duration_seconds = out - c.in_seconds
+        # Swapping in another source without a new length keeps the duration.
         if c.duration_seconds <= 0:
             raise ValueError(f"update: clip {op.index} would have no duration")
         return f"updated clip {op.index}"

@@ -104,7 +104,7 @@ def _hints(read_only: bool, destructive: bool = False, idempotent: bool = False)
 
 
 READ = _hints(read_only=True)
-WRITE_FILES = _hints(read_only=False, idempotent=True)
+WRITE_FILES = _hints(read_only=False)  # creates plans / files; repeating a call repeats its effect
 EDIT_RESOLVE = _hints(read_only=False)
 DESTRUCTIVE = _hints(read_only=False, destructive=True)
 
@@ -363,8 +363,9 @@ def transcribe_audio(
                                    word_timestamps=word_timestamps, engine=engine,
                                    wait_seconds=wait_seconds, refresh=refresh)
     if res["status"] != "done":
-        res["hint"] = ("Still transcribing. Call transcribe_audio again with the same arguments "
-                       "to wait for the result; it keeps running between calls.")
+        res["hint"] = ("Still transcribing in the background. Call transcribe_audio again with the "
+                       "same path, model and language to collect the result (refresh will not "
+                       "restart a job that is running).")
         return res
     segs = res["segments"]
     shown = transcripts.format_segments(segs, offset, limit)
@@ -393,6 +394,12 @@ class SegmentIn(BaseModel):
     start: float = Field(ge=0)
     end: float = Field(gt=0)
     text: str = ""
+
+    @model_validator(mode="after")
+    def _ordered(self) -> "SegmentIn":
+        if self.end <= self.start:
+            raise ValueError(f"segment end ({self.end}) must be after start ({self.start})")
+        return self
 
 
 def _store_and_summarize(plan: roughcut.RoughCutPlan, include_clips: bool | None = None,
@@ -513,8 +520,9 @@ def edit_plan(
     - set {title?, fps?, width?, height?, default_transition_seconds?, fade_in_seconds?,
       fade_out_seconds?, audio_bed?, notes?}: audio_bed=null removes the music bed
     """
-    plan, log = plan_ops.apply_ops(store.load_plan(plan_id), operations)
-    out = _store_and_summarize(plan, include_clips=include_clips, plan_id=plan_id)
+    with store.plan_lock(plan_id):
+        plan, log = plan_ops.apply_ops(store.load_plan(plan_id), operations)
+        out = _store_and_summarize(plan, include_clips=include_clips, plan_id=plan_id)
     out["changes"] = log
     return out
 
@@ -523,19 +531,33 @@ def edit_plan(
 # Export
 # ────────────────────────────────────────────────────────────────────────────
 
+def _free_path(p: Path) -> Path:
+    """``p``, or ``name (2).ext``, ``name (3).ext``... if it already exists."""
+    n = 2
+    candidate = p
+    while candidate.exists():
+        candidate = p.with_name(f"{p.stem} ({n}){p.suffix}")
+        n += 1
+    return candidate
+
+
 def _default_output(stem_source: str | None, title: str, suffix: str) -> Path:
+    """Default export location; never an existing file (the user's own subtitles, say)."""
     slug = re.sub(r"[^\w\-]+", "_", title).strip("_") or "resolve_pilot"
+    target = state_dir("exports") / f"{slug}{suffix}"
     if stem_source:
         d = Path(stem_source).expanduser().parent
         if d.is_dir() and os.access(d, os.W_OK):
-            return d / f"{slug}{suffix}"
-    return state_dir("exports") / f"{slug}{suffix}"
+            target = d / f"{slug}{suffix}"
+    return _free_path(target)
 
 
 @tool(WRITE_FILES, title="Export FCPXML")
 def export_fcpxml(
     plan_id: str,
-    out_path: Annotated[str | None, Field(description="Defaults to <title>.fcpxml next to the first source.")] = None,
+    out_path: Annotated[str | None, Field(description=(
+        "Defaults to <title>.fcpxml next to the first source, numbered if that file exists. "
+        "An explicit path is overwritten."))] = None,
 ) -> dict[str, Any]:
     """Write a stored plan as FCPXML 1.10 (Resolve Free & Studio: File > Import > Timeline).
 
@@ -563,7 +585,9 @@ def export_fcpxml(
 def export_srt(
     transcript_id: Annotated[str | None, Field(description="From transcribe_audio.")] = None,
     segments: Annotated[list[SegmentIn] | None, Field(description="Inline cues instead, e.g. a translation you wrote.")] = None,
-    out_path: Annotated[str | None, Field(description="Defaults to <source>.<language>.srt.")] = None,
+    out_path: Annotated[str | None, Field(description=(
+        "Defaults to <source>.<language>.srt, numbered if that file exists. "
+        "An explicit path is overwritten."))] = None,
     max_chars_per_line: Annotated[int, Field(ge=0, description="Wrap lines; 0 disables. 42 broadcast, ~32 vertical video.")] = 42,
     max_lines: Annotated[int, Field(ge=1, le=3)] = 2,
 ) -> dict[str, Any]:
@@ -578,7 +602,7 @@ def export_srt(
         if not out_path:
             src = Path(data["source_path"])
             lang = f".{data['language']}" if data.get("language") else ""
-            out_path = str(src.with_name(f"{src.stem}{lang}.srt"))
+            out_path = str(_free_path(src.with_name(f"{src.stem}{lang}.srt")))
     elif segments:
         raw = [srt_export.SrtCue(s.start, s.end, s.text) for s in segments]
         if not out_path:
@@ -810,18 +834,20 @@ def _require_macos(what: str) -> None:
 
 
 def _ui_call(fn, *args) -> dict[str, Any]:
-    from resolve_pilot.ui_automation.applescript import UIAutomationError
+    from resolve_pilot.ui_automation.applescript import StudioOnlyFeature, UIAutomationError
     try:
         out = fn(*args)
+    except StudioOnlyFeature as e:
+        return {"ok": False, "error": str(e),
+                "hint": "This needs DaVinci Resolve Studio. Tell the user, or do it another way."}
     except UIAutomationError as e:
-        # Includes Resolve Free's "Studio only" upsell and missing Accessibility permission.
         return {"ok": False, "error": str(e),
                 "hint": "If this is a permission error, allow the MCP host app under System "
                         "Settings > Privacy & Security > Accessibility."}
     return out if isinstance(out, dict) else {"ok": True}
 
 
-@tool(EDIT_RESOLVE, title="Send keystroke (macOS)")
+@tool(DESTRUCTIVE, title="Send keystroke (macOS)")
 def send_keystroke(
     key: Annotated[str, Field(description="One character, or return/tab/space/delete/escape/left/right/up/down/f1-f12.")],
     modifiers: Annotated[str, Field(description="e.g. 'command', 'shift+command'.")] = "",
@@ -837,7 +863,7 @@ def send_keystroke(
     return {**res, "key": key, "modifiers": modifiers}
 
 
-@tool(EDIT_RESOLVE, title="Click menu item (macOS)")
+@tool(DESTRUCTIVE, title="Click menu item (macOS)")
 def menu_pick(
     menu_path: Annotated[list[str], Field(min_length=2, description='e.g. ["File", "Import", "Timeline…"].')],
 ) -> dict[str, Any]:

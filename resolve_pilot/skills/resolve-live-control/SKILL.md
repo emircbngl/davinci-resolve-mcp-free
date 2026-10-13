@@ -72,7 +72,7 @@ return out
 - `GetRootFolder()`, `GetCurrentFolder()`, `SetCurrentFolder(folder)`, `AddSubFolder(parent, name)`
 - `ImportMedia({"/abs/a.mov", "/abs/b.wav"})` → list of MediaPoolItems
 - `CreateEmptyTimeline(name)`, `CreateTimelineFromClips(name, {item1, item2})`
-- `AppendToTimeline({{mediaPoolItem = item, startFrame = 0, endFrame = 47}})` — source frames, appended to the current timeline
+- `AppendToTimeline({{mediaPoolItem = item, startFrame = 0, endFrame = 47}})` — frames of the source clip at its own fps, appended to the current timeline
 - `ImportTimelineFromFile(path, {timelineName = "Cut", importSourceClips = true})`
 - `DeleteClips({items})`, `DeleteTimelines({tl})` — destructive
 
@@ -97,13 +97,13 @@ Colors — markers: Blue, Cyan, Green, Yellow, Red, Pink, Purple, Fuchsia, Rose,
 
 ## 6. Recipes
 
-Append source ranges to the current timeline (frames in source time):
+Append source ranges to the current timeline. `startFrame`/`endFrame` count frames of the *source clip*, at the clip's own frame rate (not the timeline's):
 ```lua
 local mp = rp.media_pool()
 local items = mp:ImportMedia({"/abs/interview.mov"})
-local fps = rp.fps()
+local sfps = tonumber(items[1]:GetClipProperty("FPS")) or rp.fps()
 local ok = mp:AppendToTimeline({
-  {mediaPoolItem = items[1], startFrame = math.floor(12.0 * fps), endFrame = math.floor(18.5 * fps)},
+  {mediaPoolItem = items[1], startFrame = math.floor(12.0 * sfps), endFrame = math.floor(18.5 * sfps)},
 })
 return ok and #ok or 0
 ```

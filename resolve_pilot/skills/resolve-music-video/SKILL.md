@@ -50,13 +50,15 @@ create_plan(
 ```
 The first clip starts at the first grid beat, so set the bed's `in_seconds` to that beat time. The bed becomes its own audio track under the picture.
 
+With a fade-in, the first clip starts `fade_in_seconds` into the timeline, so also set the bed's `offset_seconds` to `fade_in_seconds`; otherwise every cut lands that much off the beat. (`offset_seconds` is the timeline position, `in_seconds` the position inside the song.)
+
 Check `warnings`: "reuse … of the same footage" means repeated shots; "audio bed … ends early" means the song is shorter than the cut.
 
 ### 5. Export and deliver
 `export_fcpxml(plan_id)` → `import_timeline(path)` when live (studio / bridge), otherwise File › Import › Timeline. The footage's own audio sits on A1 — suggest muting A1 if it should not play.
 
 ### 6. Beat markers (optional)
-After importing, mark the grid on the timeline (timeline time = song time − bed `in_seconds`):
+After importing, mark the grid on the timeline (timeline time = song time − bed `in_seconds` + bed `offset_seconds`):
 ```
 add_markers(markers=[{"seconds": 0.0, "color": "Purple", "name": "Beat 1"}, ...])
 ```

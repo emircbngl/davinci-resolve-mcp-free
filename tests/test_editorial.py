@@ -96,7 +96,7 @@ def test_validate_reports_errors_and_warnings(fake_media):
         RoughCutClip("/src/0.mov", 10.0, 0.5),   # overlaps clip 0; shorter than the dissolve
     ])
     report = roughcut.validate_plan(plan)
-    assert any("transition 0->1" in e and "longer than clip 1" in e for e in report["errors"])
+    assert report["errors"] == ["transition 0->1 is 1.00s, longer than clip 1"]
     warnings = " | ".join(report["warnings"])
     assert "source file not found" not in warnings
     assert "25.000 fps" in warnings
@@ -187,3 +187,52 @@ def test_long_plans_omit_clip_lists_unless_asked():
     assert "clips" not in auto and "get_plan" in auto["clips_omitted"]
     assert len(store.plan_summary("x", plan)["clips"]) == 61
     assert "clips" in store.plan_summary("x", _plan(3), include_clips=None)
+
+
+def test_dissolves_are_checked_after_frame_rounding():
+    # 30 fps: clip 1 rounds to 7 frames, each 0.25 s dissolve to 8 frames -> they collide.
+    plan = RoughCutPlan(title="T", fps=30.0, default_transition_seconds=0.25, clips=[
+        RoughCutClip("/a.mov", 10, 0.5), RoughCutClip("/a.mov", 20, 0.25), RoughCutClip("/a.mov", 30, 1.0)])
+    errors = roughcut.validate_plan(plan)["errors"]
+    assert errors == ["clip 1 is 7 frames but the dissolves on its edges use 8; "
+                      "shorten the dissolves or lengthen the clip"]
+
+
+def test_sub_frame_values_are_flagged():
+    plan = _plan(2, fade_in_seconds=0.01)
+    plan.clips.append(RoughCutClip("/x.mov", 0, 0.01))
+    report = roughcut.validate_plan(plan)
+    assert "clip 2 is shorter than one frame at 24 fps" in report["errors"]
+    assert any("fade_in_seconds=0.01 rounds to 0 frames" in w for w in report["warnings"])
+
+
+def test_audio_bed_after_the_end_is_an_error():
+    plan = _plan(2, audio_bed=RoughCutAudioBed("/song.wav", offset_seconds=10))
+    assert any("after the timeline ends" in e for e in roughcut.validate_plan(plan)["errors"])
+
+
+def test_update_with_a_new_source_keeps_the_duration():
+    new, _ = _apply(_plan(), [{"op": "update", "index": 0, "source_path": "/b.mov", "in_seconds": 3.0}])
+    assert new.clips[0].source_path == "/b.mov"
+    assert new.clips[0].in_seconds == 3.0 and new.clips[0].duration_seconds == 2.0
+
+
+def test_parallel_edits_do_not_lose_updates():
+    import threading
+    pid = store.save_plan(_plan(40))
+    barrier = threading.Barrier(8)
+
+    def worker(i):
+        barrier.wait()
+        with store.plan_lock(pid):
+            plan, _ = ops.apply_ops(store.load_plan(pid), OPS.validate_python(
+                [{"op": "trim", "index": i, "tail_seconds": 0.5}]))
+            store.save_plan(plan, pid)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    durations = [c.duration_seconds for c in store.load_plan(pid).clips[:8]]
+    assert durations == [1.5] * 8

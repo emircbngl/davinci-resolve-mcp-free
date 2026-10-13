@@ -23,6 +23,9 @@ from resolve_pilot.transcribe.whisper import Segment, model_name_for, resolve_en
 _ID_RE = re.compile(r"^t-[0-9a-f]{12}$")
 _jobs: dict[str, dict[str, Any]] = {}
 _jobs_lock = threading.Lock()
+# One transcription at a time: Whisper saturates the GPU/CPU, and parallel jobs
+# would each load their own copy of the model.
+_run_lock = threading.Lock()
 
 
 def transcripts_dir() -> Path:
@@ -59,8 +62,9 @@ def transcript_segments(data: dict[str, Any]) -> list[Segment]:
 def _run(tid: str, path: Path, model: str, language: str | None, word_timestamps: bool, engine: str) -> None:
     job = _jobs[tid]
     try:
-        result = transcribe(path, model=model, language=language,
-                            word_timestamps=word_timestamps, engine=engine)
+        with _run_lock:
+            result = transcribe(path, model=model, language=language,
+                                word_timestamps=word_timestamps, engine=engine)
         data = {
             "transcript_id": tid,
             "source_path": str(path),
@@ -102,14 +106,19 @@ def get_or_start(
     name = model_name_for(eng, model)
     tid = transcript_id(p, eng, name, language, word_timestamps)
 
-    if not refresh:
+    with _jobs_lock:
+        job = _jobs.get(tid)
+    # A job that is running, or finished but not yet collected, is always reused:
+    # `refresh` only decides whether a cached result may be returned before a new
+    # job starts. Otherwise polling with refresh=True would restart it forever.
+    if job is None and not refresh:
         cached = load_transcript(tid)
         if cached is not None:
             return {"status": "done", "cached": True, **cached}
 
     with _jobs_lock:
         job = _jobs.get(tid)
-        if job is None or (refresh and job["done"].is_set()):
+        if job is None:
             job = {"done": threading.Event(), "error": None, "started": time.monotonic()}
             _jobs[tid] = job
             threading.Thread(

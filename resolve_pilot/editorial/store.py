@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +19,8 @@ from resolve_pilot._paths import state_dir
 from resolve_pilot.editorial.roughcut import RoughCutPlan, validate_plan
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+_locks: dict[str, threading.Lock] = {}
+_locks_guard = threading.Lock()
 
 
 def plans_dir() -> Path:
@@ -33,10 +38,23 @@ def _path(plan_id: str) -> Path:
     return plans_dir() / f"{plan_id}.json"
 
 
+@contextmanager
+def plan_lock(plan_id: str) -> Iterator[None]:
+    """Hold while reading, changing and saving one plan.
+
+    mcp 2.x runs tool calls in parallel threads; without this, two edit_plan
+    calls on the same plan lose one edit or interleave their writes.
+    """
+    with _locks_guard:
+        lock = _locks.setdefault(plan_id, threading.Lock())
+    with lock:
+        yield
+
+
 def save_plan(plan: RoughCutPlan, plan_id: str | None = None) -> str:
     pid = plan_id or new_plan_id(plan.title)
     path = _path(pid)
-    tmp = path.with_suffix(".tmp")
+    tmp = path.with_name(f"{pid}.{uuid.uuid4().hex[:8]}.tmp")
     tmp.write_text(json.dumps(plan.to_dict(), indent=1), encoding="utf-8")
     tmp.replace(path)
     return pid
