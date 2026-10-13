@@ -489,3 +489,72 @@ def set_clip_properties(track_type: str = "video", track: int = 1, indices: list
         out["error"] = ("Some values did not stick: Resolve's read-back differs from what was "
                         "requested (see clips[].mismatched), or indices are missing.")
     return out
+
+
+_TRACK_FIELDS = (("name", "SetTrackName", "GetTrackName", "string"),
+                 ("enabled", "SetTrackEnable", "GetIsTrackEnabled", "bool"),
+                 ("locked", "SetTrackLock", "GetIsTrackLocked", "bool"))
+
+
+def set_tracks(changes: list[dict] | None = None, add: list[dict] | None = None) -> dict[str, Any]:
+    """Studio twin of snippet_set_tracks (same result shape, read-back `ok`)."""
+    from resolve_pilot.lua_snippets.library import normalize_track_changes, values_match
+
+    rows, adds = normalize_track_changes(changes, add)
+    tl = _current_timeline()
+
+    def count(kind: str) -> int:
+        done, n = _call(tl, "GetTrackCount", kind)
+        try:
+            return int(n) if done and n is not None else 0
+        except (TypeError, ValueError):
+            return 0
+
+    added, all_ok = [], True
+    for a in adds:
+        before = count(a["track_type"])
+        done, said = _call(tl, "AddTrack", a["track_type"], *([a["sub_type"]] if a.get("sub_type") else []))
+        after = count(a["track_type"])
+        row: dict[str, Any] = {"track_type": a["track_type"], "before": before, "after": after,
+                               "ok": after == before + 1}
+        if a.get("sub_type"):
+            row["sub_type"] = a["sub_type"]
+        if row["ok"]:
+            row["index"] = after
+        if not done:
+            row["error"] = str(said)
+        elif not row["ok"]:
+            row["error"] = f"AddTrack returned {said} but the track count did not grow"
+        all_ok = all_ok and row["ok"]
+        added.append(row)
+    results = []
+    for c in rows:
+        row = {"track_type": c["track_type"], "index": c["index"], "requested": {}, "actual": {},
+               "mismatched": [], "contradicted": [], "ok": True}
+        n = count(c["track_type"])
+        if c["index"] > n:
+            row.update(ok=False, error=f"There is no {c['track_type']} track {c['index']} ({n} tracks).")
+        else:
+            for key, setter, getter, kind in _TRACK_FIELDS:
+                if key not in c:
+                    continue
+                row["requested"][key] = c[key]
+                done, said = _call(tl, setter, c["track_type"], c["index"], c[key])
+                read, got = _call(tl, getter, c["track_type"], c["index"])
+                if read and got is not None:
+                    row["actual"][key] = got
+                same = read and (got == c[key] if kind == "string" else values_match("bool", c[key], got))
+                if not (done and same):
+                    row["ok"] = False
+                    row["mismatched"].append(key)
+                    if not done:
+                        row["error"] = str(said)
+                    elif said is True:
+                        row["contradicted"].append(key)
+        all_ok = all_ok and row["ok"]
+        results.append(row)
+    out: dict[str, Any] = {"ok": all_ok, "added": added, "changes": results, "timeline": tl.GetName(),
+                           "track_counts": {k: count(k) for k in ("video", "audio", "subtitle")}}
+    if not all_ok:
+        out["error"] = "Some track changes did not stick (see added[].error and changes[].mismatched)."
+    return out

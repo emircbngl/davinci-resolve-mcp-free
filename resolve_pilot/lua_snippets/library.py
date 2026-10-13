@@ -778,6 +778,117 @@ return out
 """
 
 
+def normalize_track_changes(changes: list[dict] | None, add: list[dict] | None
+                            ) -> tuple[list[dict], list[dict]]:
+    """Validate set_tracks input; shared by the Lua and Studio paths."""
+    out_changes, out_add = [], []
+    for i, a in enumerate(add or []):
+        kind = _pick(str(a.get("track_type") or ""), TRACK_TYPES, "track type")
+        row: dict[str, Any] = {"track_type": kind}
+        if a.get("sub_type"):
+            if kind != "audio":
+                raise ValueError(f"add #{i}: sub_type is only for audio tracks")
+            row["sub_type"] = _pick(str(a["sub_type"]), AUDIO_TRACK_SUBTYPES, "audio track sub_type")
+        out_add.append(row)
+    for i, c in enumerate(changes or []):
+        kind = _pick(str(c.get("track_type") or ""), TRACK_TYPES, "track type")
+        index = c.get("index")
+        if isinstance(index, bool) or not isinstance(index, int) or index < 1:
+            raise ValueError(f"change #{i}: index must be a track number >= 1")
+        row = {"track_type": kind, "index": index}
+        if c.get("name") is not None:
+            row["name"] = str(c["name"])
+        for key in ("enabled", "locked"):
+            if c.get(key) is not None:
+                if not isinstance(c[key], bool):
+                    raise ValueError(f"change #{i}: {key} must be true or false")
+                row[key] = c[key]
+        if len(row) == 2:
+            raise ValueError(f"change #{i}: give name, enabled and/or locked")
+        out_changes.append(row)
+    if not out_changes and not out_add:
+        raise ValueError("Nothing to do: pass changes and/or add.")
+    return out_changes, out_add
+
+
+@_snippet
+def snippet_set_tracks(changes: list[dict] | None = None, add: list[dict] | None = None) -> str:
+    """Add tracks, and rename / enable / disable / lock / unlock tracks, with read-back.
+
+    add: [{track_type, sub_type?}] runs first (audio sub_type: mono, stereo, 5.1, ...).
+    changes: [{track_type, index, name?, enabled?, locked?}]; each reports
+    {requested, actual, ok} read back with GetTrackName / GetIsTrackEnabled / GetIsTrackLocked.
+    """
+    rows, adds = normalize_track_changes(changes, add)
+    return f"""-- resolve-pilot: set_tracks
+{_TIMELINE_PREAMBLE}{_SAME_VALUE_FN}local adds, changes = {to_lua(adds)}, {to_lua(rows)}
+local function call(method, ...)
+  if type(timeline[method]) ~= "function" then return false, method .. " is not available" end
+  return pcall(timeline[method], timeline, ...)
+end
+local function count(kind)
+  local done, n = call("GetTrackCount", kind)
+  return done and tonumber(n) or 0
+end
+local added, all_ok = {{}}, true
+for _, a in ipairs(adds) do
+  local before = count(a.track_type)
+  local done, said
+  if a.sub_type then done, said = call("AddTrack", a.track_type, a.sub_type)
+  else done, said = call("AddTrack", a.track_type) end
+  local after = count(a.track_type)
+  local row = {{track_type = a.track_type, sub_type = a.sub_type, before = before, after = after,
+    ok = after == before + 1}}
+  if row.ok then row.index = after end
+  if not done then row.error = tostring(said)
+  elseif not row.ok then row.error = "AddTrack returned " .. tostring(said) .. " but the track count did not grow" end
+  all_ok = all_ok and row.ok
+  added[#added + 1] = row
+end
+local fields = {{
+  {{"name", "SetTrackName", "GetTrackName", "string"}},
+  {{"enabled", "SetTrackEnable", "GetIsTrackEnabled", "bool"}},
+  {{"locked", "SetTrackLock", "GetIsTrackLocked", "bool"}},
+}}
+local results = {{}}
+for _, c in ipairs(changes) do
+  local row = {{track_type = c.track_type, index = c.index, requested = {{}}, actual = {{}},
+    mismatched = {{}}, contradicted = {{}}, ok = true}}
+  local n = count(c.track_type)
+  if c.index > n then
+    row.ok = false
+    row.error = "There is no " .. c.track_type .. " track " .. c.index .. " (" .. n .. " tracks)."
+  else
+    for _, f in ipairs(fields) do
+      local key, setter, getter, kind = f[1], f[2], f[3], f[4]
+      if c[key] ~= nil then
+        row.requested[key] = c[key]
+        local done, said = call(setter, c.track_type, c.index, c[key])
+        local read, got = call(getter, c.track_type, c.index)
+        if read then row.actual[key] = got end
+        local same = read and (kind == "string" and got == c[key] or kind == "bool" and same_value("bool", c[key], got))
+        if not (done and same) then
+          row.ok = false
+          row.mismatched[#row.mismatched + 1] = key
+          if not done then row.error = tostring(said)
+          elseif said == true then row.contradicted[#row.contradicted + 1] = key end
+        end
+      end
+    end
+  end
+  all_ok = all_ok and row.ok
+  results[#results + 1] = row
+end
+local out = {{ok = all_ok, added = added, changes = results, timeline = timeline:GetName(),
+  track_counts = {{video = count("video"), audio = count("audio"), subtitle = count("subtitle")}}}}
+if not all_ok then
+  out.error = "Some track changes did not stick (see added[].error and changes[].mismatched)."
+end
+print(string.format("[resolve-pilot] Tracks: %d added, %d changed, ok=%s", #added, #results, tostring(all_ok)))
+return out
+"""
+
+
 @_snippet
 def snippet_create_compound_from_selection(name: str = "Compound") -> str:
     """Wrap the timeline's current video item into a compound clip."""

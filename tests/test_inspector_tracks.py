@@ -174,3 +174,89 @@ def test_studio_twin_mirrors_the_lua(monkeypatch):
     assert b["mismatched"] == ["Scaling", "ZoomX"] and b["contradicted"] == ["Scaling", "ZoomX"]
     out = actions.set_clip_properties(indices=[5], properties={"Opacity": 1})
     assert out["ok"] is False and out["missing_indices"] == [5] and "No clips" in out["error"]
+
+
+# ── Tracks ───────────────────────────────────────────────────────────────────
+
+
+def test_track_validation():
+    with pytest.raises(ValueError, match="Nothing"):
+        lua.normalize_track_changes([], [])
+    with pytest.raises(ValueError, match="give name"):
+        lua.normalize_track_changes([{"track_type": "video", "index": 1}], None)
+    with pytest.raises(ValueError, match="only for audio"):
+        lua.normalize_track_changes(None, [{"track_type": "video", "sub_type": "stereo"}])
+    with pytest.raises(ValueError, match="sub_type"):
+        lua.normalize_track_changes(None, [{"track_type": "audio", "sub_type": "quad"}])
+    with pytest.raises(ValueError, match="index"):
+        lua.normalize_track_changes([{"track_type": "audio", "index": 0, "locked": True}], None)
+
+
+@needs_luajit
+@pytest.mark.parametrize("live_bridge", [None, "21.1"], indirect=True)
+def test_set_tracks_adds_then_changes_with_read_back(live_bridge):
+    res = bridge.exec_lua(lua.snippet_set_tracks(
+        add=[{"track_type": "video"}, {"track_type": "audio", "sub_type": "Stereo"}],
+        changes=[{"track_type": "video", "index": 2, "name": "B-roll", "enabled": False},
+                 {"track_type": "audio", "index": 1, "locked": True},
+                 {"track_type": "audio", "index": 9, "name": "nope"}])).result
+    assert res["added"] == [{"track_type": "video", "before": 1, "after": 2, "index": 2, "ok": True},
+                            {"track_type": "audio", "sub_type": "stereo", "before": 1, "after": 2,
+                             "index": 2, "ok": True}]
+    broll, a1, missing = res["changes"]
+    assert broll["ok"] and broll["actual"] == {"name": "B-roll", "enabled": False}
+    assert a1["ok"] and a1["requested"] == {"locked": True} and a1["actual"] == {"locked": True}
+    assert missing["ok"] is False and "no audio track 9" in missing["error"]
+    assert res["ok"] is False and res["track_counts"] == {"video": 2, "audio": 2, "subtitle": 0}
+
+
+@needs_luajit
+def test_set_tracks_catches_a_lying_setter_and_a_refused_add(live_bridge, no_studio):
+    from resolve_pilot import mcp_server
+    bridge.exec_lua("local tl = mock.project:GetCurrentTimeline() "
+                    "tl.SetTrackLock = function() return true end "
+                    "tl.AddTrack = function() return true end")
+    out = mcp_server.set_tracks(changes=[mcp_server.TrackChange(track_type="video", index=1, locked=True)],
+                                add=[mcp_server.TrackAdd(track_type="subtitle")])
+    assert out["channel"] == "bridge" and out["ok"] is False
+    assert out["added"][0]["ok"] is False and "did not grow" in out["added"][0]["error"]
+    assert out["changes"][0]["contradicted"] == ["locked"] and out["changes"][0]["actual"] == {"locked": False}
+
+
+def test_set_tracks_studio_twin(monkeypatch):
+    class TL:
+        def __init__(self):
+            self.n = {"video": 1, "audio": 1, "subtitle": 0}
+            self.names = {}
+
+        def GetTrackCount(self, kind):
+            return self.n[kind]
+
+        def AddTrack(self, kind, sub=None):
+            self.n[kind] += 1
+            return True
+
+        def SetTrackName(self, kind, i, name):
+            self.names[(kind, i)] = name
+            return True
+
+        def GetTrackName(self, kind, i):
+            return self.names.get((kind, i), f"{kind} {i}")
+
+        def SetTrackEnable(self, kind, i, on):
+            return False
+
+        def GetIsTrackEnabled(self, kind, i):
+            return True
+
+        def GetName(self):
+            return "Main"
+
+    monkeypatch.setattr(actions, "_current_timeline", lambda: TL())
+    out = actions.set_tracks(changes=[{"track_type": "video", "index": 2, "name": "Titles", "enabled": False}],
+                             add=[{"track_type": "video"}])
+    assert out["added"] == [{"track_type": "video", "before": 1, "after": 2, "ok": True, "index": 2}]
+    ch = out["changes"][0]
+    assert ch["actual"] == {"name": "Titles", "enabled": True} and ch["mismatched"] == ["enabled"]
+    assert ch["contradicted"] == [] and out["ok"] is False
+    assert out["track_counts"] == {"video": 2, "audio": 1, "subtitle": 0}

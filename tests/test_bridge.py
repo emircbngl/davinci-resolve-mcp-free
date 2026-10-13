@@ -123,6 +123,8 @@ _SNIPPET_SAMPLES = {
     "export_timeline_stills": {"positions": [{"seconds": 1}, {"frame": 3}], "out_dir": "/x"},
     "set_clip_properties": {"indices": [0], "properties": {"Scaling": "fill", "Pan": -200.0,
                                                            "FlipX": True}, "enabled": False},
+    "set_tracks": {"changes": [{"track_type": "video", "index": 1, "name": "A", "locked": True}],
+                   "add": [{"track_type": "audio", "sub_type": "stereo"}]},
 }
 
 

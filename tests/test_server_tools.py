@@ -46,13 +46,13 @@ EXPECTED_TOOLS = {
     # macOS UI
     "send_keystroke", "menu_pick", "open_ai_feature",
     # inspector / tracks
-    "set_clip_properties",
+    "set_clip_properties", "set_tracks",
 }
 
 
 def test_server_registers_exactly_the_expected_tools():
     names = set(_annotations())
-    assert len(EXPECTED_TOOLS) == 36
+    assert len(EXPECTED_TOOLS) == 37
     assert names == EXPECTED_TOOLS, (sorted(EXPECTED_TOOLS - names), sorted(names - EXPECTED_TOOLS))
 
 

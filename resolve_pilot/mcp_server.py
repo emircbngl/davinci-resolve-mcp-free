@@ -1217,6 +1217,41 @@ def set_clip_properties(
                            lambda: _studio().set_clip_properties(**args), channel)
 
 
+class TrackChange(BaseModel):
+    track_type: Literal["video", "audio", "subtitle"]
+    index: int = Field(ge=1, description="Track number (V1 / A1 = 1).")
+    name: str | None = None
+    enabled: bool | None = Field(None, description="false hides a video track / mutes an audio track.")
+    locked: bool | None = None
+
+
+class TrackAdd(BaseModel):
+    track_type: Literal["video", "audio", "subtitle"]
+    sub_type: str | None = Field(None, description=(
+        "Audio only: mono, stereo, 5.1, 5.1film, 7.1, 7.1film, adaptive1-adaptive24."))
+
+
+@tool(EDIT_RESOLVE, title="Set tracks")
+def set_tracks(
+    changes: Annotated[list[TrackChange] | None, Field(description=(
+        "Rename, enable/disable or lock/unlock existing tracks."))] = None,
+    add: Annotated[list[TrackAdd] | None, Field(description=(
+        "Tracks to append (done before `changes`, so a change can name a track added here)."))] = None,
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """Add tracks and rename, enable/disable (mute a B-roll or music track) or lock tracks of
+    the current timeline.
+
+    Every change is read back from Resolve: each comes back as {requested, actual, ok,
+    mismatched}, and added tracks report the track count before and after.
+    """
+    args = dict(changes=[c.model_dump(exclude_none=True) for c in changes or []],
+                add=[a.model_dump(exclude_none=True) for a in add or []])
+    lua_lib.normalize_track_changes(**args)  # fail fast, before any channel
+    return control.perform(lua_lib.snippet_set_tracks(**args),
+                           lambda: _studio().set_tracks(**args), channel)
+
+
 @tool(DESTRUCTIVE, title="Apply LUT")
 def apply_lut(
     lut_path: Annotated[str, Field(description="Absolute path of a .cube / .dat LUT.")],

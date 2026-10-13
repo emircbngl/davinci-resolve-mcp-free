@@ -94,6 +94,44 @@ function Timeline:GetEndFrame()
 end
 function Timeline:GetSetting(key) return "" end -- "" = follows the project settings
 function Timeline:GetTrackCount(kind) return #self.tracks[kind] end
+-- Track name / enable / lock, kept per track; out-of-range indices are refused.
+local TRACK_PREFIX = { video = "Video", audio = "Audio", subtitle = "Subtitle" }
+function Timeline:_track(kind, i)
+  if not (self.tracks[kind] and self.tracks[kind][i]) then return nil end
+  self.track_meta = self.track_meta or {}
+  local key = kind .. i
+  self.track_meta[key] = self.track_meta[key] or { name = TRACK_PREFIX[kind] .. " " .. i,
+    enabled = true, locked = false }
+  return self.track_meta[key]
+end
+function Timeline:GetTrackName(kind, i) local t = self:_track(kind, i); return t and t.name end
+function Timeline:GetIsTrackEnabled(kind, i) local t = self:_track(kind, i); return t and t.enabled end
+function Timeline:GetIsTrackLocked(kind, i) local t = self:_track(kind, i); return t and t.locked end
+function Timeline:SetTrackName(kind, i, name)
+  local t = self:_track(kind, i)
+  if not t or type(name) ~= "string" then return false end
+  t.name = name
+  return true
+end
+function Timeline:SetTrackEnable(kind, i, on)
+  local t = self:_track(kind, i)
+  if not t or type(on) ~= "boolean" then return false end
+  t.enabled = on
+  return true
+end
+function Timeline:SetTrackLock(kind, i, on)
+  local t = self:_track(kind, i)
+  if not t or type(on) ~= "boolean" then return false end
+  t.locked = on
+  return true
+end
+local AUDIO_SUBTYPES = { mono = true, stereo = true, ["5.1"] = true, ["7.1"] = true }
+function Timeline:AddTrack(kind, sub)
+  if not self.tracks[kind] then return false end
+  if kind == "audio" and sub ~= nil and not AUDIO_SUBTYPES[sub] then return false end
+  table.insert(self.tracks[kind], {})
+  return true
+end
 function Timeline:GetItemListInTrack(kind, index) return (self.tracks[kind] or {})[index] or {} end
 function Timeline:AddMarker(frame, color, name, note, duration, data)
   if self.markers[frame] then return false end
