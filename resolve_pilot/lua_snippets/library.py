@@ -772,6 +772,426 @@ return {{ok = ok and true or false}}
 """
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# Live timeline building: media pool imports, appends, deletes
+# ────────────────────────────────────────────────────────────────────────────
+#
+# Behaviour these rely on was measured by another project with Python on Resolve
+# 21.0.4 Free and is not yet confirmed from Lua: ImportMedia wants plain path strings
+# (a {FilePath = ...} table returns an empty list), AppendToTimeline's endFrame is
+# exclusive and counts frames of the source clip at its own fps. Every snippet reads
+# back what actually landed and reports a mismatch instead of trusting the call.
+
+MEDIA_KINDS = ("both", "video", "audio")
+
+# Needs `project`. Defines mp, try, clip_path, same_path, find_item, open_bin,
+# describe_mpi, import_into.
+_MEDIA_POOL_FNS = """\
+local mp = project:GetMediaPool()
+local function try(obj, method, ...)
+  local f = obj and obj[method]
+  if type(f) ~= "function" then return nil end
+  local ok, v = pcall(f, obj, ...)
+  if ok then return v end
+  return nil
+end
+local function clip_path(mpi) return try(mpi, "GetClipProperty", "File Path") end
+local function same_path(a, b)
+  if type(a) ~= "string" or type(b) ~= "string" or a == "" then return false end
+  return a == b or a:gsub("\\\\", "/") == b:gsub("\\\\", "/")
+end
+local function find_item(folder, pred, recursive)
+  for _, mpi in ipairs(try(folder, "GetClipList") or {}) do
+    if pred(mpi) then return mpi end
+  end
+  if recursive then
+    for _, sub in ipairs(try(folder, "GetSubFolderList") or {}) do
+      local hit = find_item(sub, pred, true)
+      if hit then return hit end
+    end
+  end
+  return nil
+end
+-- "B-roll/Day 1" below the root bin; missing bins are created.
+local function open_bin(path)
+  local folder, created = mp:GetRootFolder(), {}
+  for name in path:gmatch("[^/]+") do
+    local nxt
+    for _, sub in ipairs(try(folder, "GetSubFolderList") or {}) do
+      if try(sub, "GetName") == name then nxt = sub; break end
+    end
+    if not nxt then
+      nxt = mp:AddSubFolder(folder, name)
+      if not nxt then return nil, "Resolve could not create the bin '" .. name .. "'", created end
+      created[#created + 1] = name
+    end
+    folder = nxt
+  end
+  return folder, nil, created
+end
+local function num(v) return tonumber(type(v) == "string" and v:match("[%d%.]+") or v) end
+local function describe_mpi(mpi)
+  return {name = try(mpi, "GetName"), media_pool_id = try(mpi, "GetUniqueId"), path = clip_path(mpi),
+    fps = num(try(mpi, "GetClipProperty", "FPS")), frames = num(try(mpi, "GetClipProperty", "Frames"))}
+end
+-- Import `path` into `folder` (made current for the import) unless it is already there.
+local function import_into(path, folder)
+  local hit = find_item(folder, function(m) return same_path(clip_path(m), path) end, false)
+  if hit then return hit, true end
+  if folder then mp:SetCurrentFolder(folder) end
+  local got = mp:ImportMedia({path})
+  if type(got) ~= "table" or not got[1] then
+    return nil, false, "Resolve imported nothing from " .. path .. " (unsupported or unreadable file?)"
+  end
+  return got[1], false
+end
+"""
+
+# Needs `try`, `fps` (timeline) and `start` (timeline start frame).
+_DESCRIBE_ITEM = """\
+local function describe_item(it)
+  local tt = try(it, "GetTrackTypeAndIndex")
+  local s, e = it:GetStart(), it:GetEnd()
+  local out = {name = try(it, "GetName"), start_frame = s, end_frame = e, duration_frames = e - s,
+    start_seconds = (s - start) / fps, end_seconds = (e - start) / fps, duration_seconds = (e - s) / fps,
+    source_in_frame = try(it, "GetLeftOffset")}
+  if type(tt) == "table" and tt[1] then
+    out.track_type, out.track_index = tt[1], tt[2]
+    out.track = tostring(tt[1]) .. " " .. tostring(tt[2])
+  end
+  return out
+end
+"""
+
+
+def normalize_bin(bin_path: str | None) -> str | None:
+    """'B-roll/Day 1' -> validated bin path below the root bin, or None."""
+    if bin_path is None:
+        return None
+    parts = [p.strip() for p in str(bin_path).replace("\\", "/").split("/") if p.strip()]
+    if not parts:
+        raise ValueError("bin must name a bin, e.g. 'B-roll' or 'B-roll/Day 1'")
+    return "/".join(parts)
+
+
+def normalize_clips(clips: list[dict]) -> list[dict]:
+    """Validate clip specs for append_clips; shared by the Lua and Studio paths.
+
+    Each clip: ``path`` (absolute) or ``media_pool_id``; ``in_seconds`` (default 0);
+    ``out_seconds`` or ``duration_seconds`` (source seconds; omit both for "to the end");
+    ``track`` (1-based); ``media`` both|video|audio; ``record_seconds`` (timeline offset).
+    """
+    rows = []
+    for i, c in enumerate(clips):
+        path, mid = c.get("path"), c.get("media_pool_id")
+        if bool(path) == bool(mid):
+            raise ValueError(f"clip #{i} needs exactly one of path or media_pool_id")
+        row: dict[str, Any] = {"index": i, "media": _pick(c.get("media") or "both", MEDIA_KINDS, "media")}
+        if path:
+            row["path"] = os.path.expanduser(str(path))
+        else:
+            row["media_pool_id"] = str(mid)
+        start = float(c.get("in_seconds") or 0.0)
+        if not math.isfinite(start) or start < 0:
+            raise ValueError(f"clip #{i} has an invalid in_seconds {c.get('in_seconds')!r}")
+        row["in_seconds"] = start
+        out, dur = c.get("out_seconds"), c.get("duration_seconds")
+        if out is not None and dur is not None:
+            raise ValueError(f"clip #{i}: give out_seconds or duration_seconds, not both")
+        if dur is not None:
+            out = start + float(dur)
+        if out is not None:
+            out = float(out)
+            if not math.isfinite(out) or out <= start:
+                raise ValueError(f"clip #{i}: the out point must be after in_seconds ({start})")
+            row["out_seconds"] = out
+        if c.get("track") is not None:
+            if int(c["track"]) < 1:
+                raise ValueError(f"clip #{i}: track numbers start at 1")
+            row["track"] = int(c["track"])
+        if c.get("record_seconds") is not None:
+            rec = float(c["record_seconds"])
+            if not math.isfinite(rec) or rec < 0:
+                raise ValueError(f"clip #{i} has an invalid record_seconds {rec!r}")
+            row["record_seconds"] = rec
+        rows.append(row)
+    return rows
+
+
+@_snippet
+def snippet_import_media(paths: list[str], bin: str | None = None) -> str:
+    """Import media files into the media pool (optionally into a bin), skipping files already there.
+
+    paths: absolute file paths. bin: "B-roll" or "B-roll/Day 1" below the root bin, created
+    when missing; omit for the current bin. Files whose File Path is already in that bin
+    are reused, not imported twice.
+    """
+    if not paths:
+        raise ValueError("paths is empty")
+    full = [os.path.expanduser(str(p)) for p in paths]
+    return f"""-- resolve-pilot: import_media
+{_PROJECT_PREAMBLE}{_MEDIA_POOL_FNS}local paths, bin_path = {to_lua(full)}, {to_lua(normalize_bin(bin))}
+local before = mp:GetCurrentFolder()
+local folder, err, created = before, nil, {{}}
+if bin_path then
+  folder, err, created = open_bin(bin_path)
+  if not folder then return {{ok = false, error = err, bins_created = created}} end
+end
+local items, imported, reused, failed = {{}}, 0, 0, 0
+for i, path in ipairs(paths) do
+  local mpi, already, e = import_into(path, folder)
+  local row = {{index = i - 1, path = path, ok = mpi ~= nil}}
+  if mpi then
+    for k, v in pairs(describe_mpi(mpi)) do row[k] = v end
+    row.path = path
+    row.pool_path = clip_path(mpi)
+    row.already_in_pool = already
+    row.in_bin = find_item(folder, function(m) return try(m, "GetUniqueId") == row.media_pool_id
+      and same_path(clip_path(m), row.pool_path) end, false) ~= nil
+    if already then reused = reused + 1 else imported = imported + 1 end
+  else
+    row.error = e
+    failed = failed + 1
+  end
+  items[#items + 1] = row
+end
+if before and folder ~= before then mp:SetCurrentFolder(before) end
+print(string.format("[resolve-pilot] Imported %d, reused %d, failed %d into bin '%s'", imported, reused,
+  failed, tostring(try(folder, "GetName"))))
+return {{ok = failed == 0, bin = try(folder, "GetName"), bins_created = created, imported = imported,
+  reused = reused, failed = failed, items = items}}
+"""
+
+
+@_snippet
+def snippet_append_clips(
+    clips: list[dict],
+    timeline: str | None = None,
+    new_timeline: str | None = None,
+    new_timeline_fps: float | None = None,
+) -> str:
+    """Append source ranges to a timeline (the current one, a named one, or a new empty one).
+
+    clips: [{path | media_pool_id, in_seconds=0, out_seconds | duration_seconds,
+    track?, media="both"|"video"|"audio", record_seconds?}, ...]. Source seconds are
+    converted with the source clip's own fps; record_seconds (offset from the timeline
+    start) with the timeline fps. Files not in the media pool are imported into the
+    current bin. Returns the timeline items that actually landed.
+    """
+    rows = normalize_clips(clips)
+    if timeline and new_timeline:
+        raise ValueError("give timeline (an existing one) or new_timeline, not both")
+    if not rows and not new_timeline:
+        raise ValueError("clips is empty")
+    if new_timeline_fps is not None and not new_timeline:
+        raise ValueError("new_timeline_fps only applies with new_timeline")
+    return f"""-- resolve-pilot: append_clips
+{_PROJECT_PREAMBLE}{_MEDIA_POOL_FNS}local clips = {to_lua(rows)}
+local want_name, new_name, new_fps = {to_lua(timeline)}, {to_lua(new_timeline)}, {to_lua(new_timeline_fps)}
+local function round(x) return math.floor(x + 0.5) end
+local function find_timeline(name)
+  for i = 1, (project:GetTimelineCount() or 0) do
+    local t = project:GetTimelineByIndex(i)
+    if t and t:GetName() == name then return t end
+  end
+  return nil
+end
+local timeline, created, fps_applied
+if new_name then
+  if find_timeline(new_name) then
+    return {{ok = false, error = "A timeline named '" .. new_name .. "' already exists. Pick another name, " ..
+      "or append to it with timeline='" .. new_name .. "'."}}
+  end
+  timeline = mp:CreateEmptyTimeline(new_name)
+  if not timeline then
+    return {{ok = false, error = "Resolve did not create the timeline '" .. new_name .. "' (CreateEmptyTimeline returned nil)."}}
+  end
+  created = true
+  if new_fps then
+    -- A timeline's own frame rate can only be set while it is empty.
+    try(timeline, "SetSetting", "useCustomSettings", "1")
+    fps_applied = try(timeline, "SetSetting", "timelineFrameRate", tostring(new_fps)) and true or false
+  end
+elseif want_name then
+  timeline = find_timeline(want_name)
+  if not timeline then return {{ok = false, error = "No timeline named '" .. want_name .. "' in this project."}} end
+else
+  timeline = project:GetCurrentTimeline()
+  if not timeline then return {{ok = false, error = "No active timeline. Pass timeline or new_timeline."}} end
+end
+-- AppendToTimeline always targets the current timeline.
+project:SetCurrentTimeline(timeline)
+local cur = project:GetCurrentTimeline()
+if not cur or cur:GetName() ~= timeline:GetName() then
+  return {{ok = false, error = "Resolve did not switch to timeline '" .. timeline:GetName() .. "'; nothing was appended."}}
+end
+local fps = tonumber(timeline:GetSetting("timelineFrameRate")) or tonumber(project:GetSetting("timelineFrameRate")) or 24
+local start = timeline:GetStartFrame()
+{_DESCRIBE_ITEM}local root = mp:GetRootFolder()
+local results, appended, failed, tracks_added = {{}}, 0, 0, {{}}
+local function ensure_track(kind, index)
+  local n = timeline:GetTrackCount(kind) or 0
+  while n < index do
+    if not timeline:AddTrack(kind) then return false end
+    local m = timeline:GetTrackCount(kind) or 0
+    if m <= n then return false end
+    n = m
+    tracks_added[#tracks_added + 1] = kind .. " " .. n
+  end
+  return true
+end
+for _, c in ipairs(clips) do
+  local row, warnings = {{index = c.index, ok = false}}, {{}}
+  local mpi, e
+  if c.media_pool_id then
+    mpi = find_item(root, function(m) return try(m, "GetUniqueId") == c.media_pool_id end, true)
+    if not mpi then e = "No media pool item with id " .. c.media_pool_id end
+  else
+    mpi = find_item(root, function(m) return same_path(clip_path(m), c.path) end, true)
+    if not mpi then
+      local imported
+      mpi, imported, e = import_into(c.path, mp:GetCurrentFolder())
+      row.imported = mpi ~= nil and not imported
+    end
+  end
+  if mpi then
+    local src = describe_mpi(mpi)
+    row.source = src
+    local sfps = src.fps
+    if not sfps or sfps <= 0 then
+      sfps = fps
+      warnings[#warnings + 1] = "Resolve reported no FPS for the source; used the timeline fps " .. fps
+    end
+    local s = round(c.in_seconds * sfps)
+    local en = c.out_seconds and round(c.out_seconds * sfps) or src.frames
+    if not en then
+      e = "Resolve did not report the clip length; give out_seconds or duration_seconds"
+    elseif src.frames and en > src.frames then
+      warnings[#warnings + 1] = string.format("out point %d is past the end of the source (%d frames); used the end", en, src.frames)
+      en = src.frames
+    end
+    if not e and en <= s then e = string.format("empty range: source frames %d-%d", s, en) end
+    local kinds = c.media == "video" and {{"video"}} or c.media == "audio" and {{"audio"}} or {{"video", "audio"}}
+    if not e and c.track then
+      for _, k in ipairs(kinds) do
+        if not ensure_track(k, c.track) then e = "Resolve could not add " .. k .. " track " .. c.track end
+      end
+    end
+    if not e then
+      local info = {{mediaPoolItem = mpi, startFrame = s, endFrame = en}}
+      if c.media == "video" then info.mediaType = 1 elseif c.media == "audio" then info.mediaType = 2 end
+      if c.track then info.trackIndex = c.track end
+      if c.record_seconds then info.recordFrame = start + round(c.record_seconds * fps) end
+      local expected = round((en - s) / sfps * fps)
+      row.requested = {{source_start_frame = s, source_end_frame = en, source_fps = sfps, track = c.track,
+        media = c.media, record_frame = info.recordFrame, expected_duration_frames = expected}}
+      local got = mp:AppendToTimeline({{info}})
+      if type(got) ~= "table" or not got[1] then
+        e = "Resolve appended nothing (AppendToTimeline returned " .. tostring(got) .. ")"
+      else
+        row.items = {{}}
+        for _, it in ipairs(got) do
+          local d = describe_item(it)
+          row.items[#row.items + 1] = d
+          local where = d.track or "item"
+          if d.duration_frames ~= expected then
+            warnings[#warnings + 1] = string.format("%s landed with %d frames, expected %d", where, d.duration_frames, expected)
+          end
+          if info.recordFrame and d.start_frame ~= info.recordFrame then
+            warnings[#warnings + 1] = string.format("%s starts at frame %d, asked for %d", where, d.start_frame, info.recordFrame)
+          end
+          if c.track and d.track_index and d.track_index ~= c.track then
+            warnings[#warnings + 1] = string.format("%s landed on track %d, asked for %d", where, d.track_index, c.track)
+          end
+        end
+        row.ok = true
+      end
+    end
+  end
+  if e then row.error = e end
+  if #warnings > 0 then row.warnings = warnings end
+  if row.ok then appended = appended + 1 else failed = failed + 1 end
+  results[#results + 1] = row
+end
+local tl_info = {{name = timeline:GetName(), created = created or false, fps = fps, start_frame = start,
+  end_frame = timeline:GetEndFrame(), duration_seconds = (timeline:GetEndFrame() - start) / fps,
+  video_tracks = timeline:GetTrackCount("video"), audio_tracks = timeline:GetTrackCount("audio")}}
+if new_fps then tl_info.requested_fps, tl_info.fps_applied = new_fps, fps_applied end
+print(string.format("[resolve-pilot] Appended %d / %d clips to '%s'", appended, #clips, timeline:GetName()))
+return {{ok = failed == 0, timeline = tl_info, appended = appended, failed = failed,
+  tracks_added = tracks_added, clips = results}}
+"""
+
+
+@_snippet
+def snippet_remove_clips(
+    indices: list[int],
+    track_type: str = "video",
+    track_index: int = 1,
+    names: list[str] | None = None,
+    ripple: bool = False,
+) -> str:
+    """Delete clips from a track of the current timeline by index (as get_state lists them).
+
+    indices are 0-based positions among the track's clips (transitions not counted).
+    names, when given, must match the clips at those indices or nothing is deleted.
+    ripple closes the gaps. Destructive.
+    """
+    track_type = _pick(track_type, ("video", "audio"), "track type")
+    idx = [int(i) for i in indices]
+    if not idx:
+        raise ValueError("indices is empty")
+    if len(set(idx)) != len(idx) or min(idx) < 0:
+        raise ValueError("indices must be distinct and >= 0")
+    if names is not None and len(names) != len(idx):
+        raise ValueError("names must have one entry per index")
+    return f"""-- resolve-pilot: remove_clips
+{_TIMELINE_PREAMBLE}{_CLIP_ITEMS}{_TIMELINE_FPS}local indices, names = {to_lua(idx)}, {to_lua(names)}
+local track_type, track_index, ripple = {to_lua(track_type)}, {int(track_index)}, {to_lua(bool(ripple))}
+local start = timeline:GetStartFrame()
+local function try(obj, method, ...)
+  local f = obj and obj[method]
+  if type(f) ~= "function" then return nil end
+  local ok, v = pcall(f, obj, ...)
+  if ok then return v end
+  return nil
+end
+local items = clip_items(timeline, track_type, track_index)
+local targets, removed = {{}}, {{}}
+for n, i in ipairs(indices) do
+  local it = items[i + 1]
+  if not it then
+    return {{ok = false, error = string.format("%s %d has %d clips (indices 0-%d); index %d does not exist. " ..
+      "Nothing was deleted.", track_type, track_index, #items, #items - 1, i)}}
+  end
+  if names and names[n] ~= it:GetName() then
+    return {{ok = false, error = string.format("clip %d is '%s', not '%s'; the timeline changed. Read it again " ..
+      "with get_resolve_state. Nothing was deleted.", i, tostring(it:GetName()), names[n])}}
+  end
+  targets[#targets + 1] = it
+  removed[#removed + 1] = {{index = i, name = it:GetName(), start_seconds = (it:GetStart() - start) / fps,
+    end_seconds = (it:GetEnd() - start) / fps}}
+end
+-- DeleteClips only works on the Edit page (measured on 21.0.4).
+local page = try(resolve, "GetCurrentPage")
+if page ~= "edit" then resolve:OpenPage("edit") end
+local ok = timeline:DeleteClips(targets, ripple)
+if page and page ~= "edit" then resolve:OpenPage(page) end
+local after = clip_items(timeline, track_type, track_index)
+local deleted = #items - #after
+print(string.format("[resolve-pilot] Deleted %d / %d clips from %s %d", deleted, #targets, track_type, track_index))
+local out = {{ok = (ok and deleted == #targets) and true or false, deleted = deleted, requested = #targets,
+  removed = removed, ripple = ripple, track = track_type .. " " .. track_index, clips_before = #items,
+  clips_after = #after, timeline = timeline:GetName(),
+  timeline_duration_seconds = (timeline:GetEndFrame() - start) / fps}}
+if not out.ok then
+  out.error = "DeleteClips returned " .. tostring(ok) .. " and " .. deleted .. " of " .. #targets ..
+    " clips are gone. Check the timeline with get_resolve_state."
+end
+return out
+"""
+
+
 @_snippet
 def snippet_open_page(page: str) -> str:
     """Switch Resolve to a page: media, cut, edit, fusion, color, fairlight, deliver."""

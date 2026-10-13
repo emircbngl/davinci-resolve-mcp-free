@@ -10,8 +10,9 @@ Tool groups:
 - plan:     plan_from_transcript, plan_from_scenes, create_plan, get_plan, edit_plan
 - export:   export_fcpxml, export_srt
 - resolve:  get_resolve_state, import_timeline, add_markers, add_quality_markers,
-            set_clip_color, apply_lut, queue_render, open_page, run_lua,
+            set_clip_color, apply_lut, queue_render, render_status, open_page, run_lua,
             list_lua_snippets, render_lua_snippet
+- timeline: import_media, append_clips, remove_clips (live building, no FCPXML)
 - macOS UI: send_keystroke, menu_pick, open_ai_feature
 
 Run as:
@@ -69,9 +70,9 @@ it once per session; setup_bridge installs it into Workspace > Scripts.
 - manual: nothing live. Resolve actions return `lua_code` + `instructions`; relay them to the \
 user verbatim and ask them to paste it into Workspace > Console. Offer setup_bridge if they \
 want hands-free control.
-Resolve actions (get_resolve_state, import_timeline, add_markers, add_quality_markers, \
-set_clip_color, apply_lut, queue_render, open_page) choose the channel automatically and report \
-it in `channel`.
+Resolve actions (get_resolve_state, import_timeline, import_media, append_clips, remove_clips, \
+add_markers, add_quality_markers, set_clip_color, apply_lut, queue_render, open_page) choose the \
+channel automatically and report it in `channel`.
 
 Seeing: grab_frames (frames at given times), scene_frames (one frame per scene) and read_video \
 (speech next to the matching frames) return images you can look at; layout="grid" packs them \
@@ -90,7 +91,11 @@ resending the plan. Every plan response lists `errors` and `warnings`; resolve t
 4. export_fcpxml(plan_id), then import_timeline(path) when live, or tell the user \
 File > Import > Timeline.
 5. Verify with get_resolve_state(include_clips=true) and timeline_frames (look at the result), \
-and iterate. After queue_render(start=true), render_status(wait_seconds=...) says when it is done.
+and iterate. When live, change the open timeline directly instead of re-importing (each import \
+makes a new timeline): append_clips adds source ranges (source seconds; a B-roll shot on track 2 \
+at record_seconds; new_timeline creates one), import_media fills bins, remove_clips deletes by \
+index from get_resolve_state (pass names; ask first). Read their `warnings`.
+6. After queue_render(start=true), render_status(wait_seconds=...) says when it is done.
 
 Conventions: times are seconds unless a parameter says frames. Marker positions can be given \
 in seconds; Resolve converts them with the timeline's real frame rate. Paths must be absolute \
@@ -1008,6 +1013,115 @@ def import_timeline(
         channel,
         timeout=180.0,
     )
+
+
+def _existing_file(path: str) -> str:
+    full = Path(path).expanduser().resolve()
+    if not full.is_file():
+        raise FileNotFoundError(str(full))
+    return str(full)
+
+
+@tool(_hints(read_only=False, idempotent=True), title="Import media")
+def import_media(
+    paths: Annotated[list[str], Field(min_length=1, max_length=200, description="Absolute media file paths.")],
+    bin: Annotated[str | None, Field(description=(
+        "Bin to import into, e.g. 'B-roll' or 'B-roll/Day 1' below the root bin; created when "
+        "missing. Omit for the current bin."))] = None,
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """Add media files to the open project's media pool, without a timeline.
+
+    Files already in that bin (same File Path) are reused, not imported twice. Each item
+    comes back with its media pool name and `media_pool_id` (use it in append_clips) and
+    `already_in_pool`. append_clips imports by itself, so call this only to organize
+    bins or check what Resolve accepts.
+    """
+    full = [_existing_file(p) for p in paths]
+    rows_bin = lua_lib.normalize_bin(bin)
+    return control.perform(lua_lib.snippet_import_media(full, rows_bin),
+                           lambda: _studio().import_media(full, rows_bin),
+                           channel, timeout=60.0 + 5.0 * len(full))
+
+
+class ClipIn(BaseModel):
+    source: str | None = Field(None, description=(
+        "Absolute media file path. Imported into the current bin if it is not in the media pool yet."))
+    media_pool_id: str | None = Field(None, description="media_pool_id from import_media, instead of source.")
+    in_seconds: float = Field(0.0, ge=0, description="Source in point, seconds into the file.")
+    out_seconds: float | None = Field(None, gt=0, description="Source out point (exclusive), seconds into the file.")
+    duration_seconds: float | None = Field(None, gt=0, description="Instead of out_seconds. Omit both for 'to the end'.")
+    track: int | None = Field(None, ge=1, description=(
+        "Track number (V2/A2 = 2); missing tracks are added. Default: track 1."))
+    media: Literal["both", "video", "audio"] = Field("both", description="Which part of the clip to use.")
+    record_seconds: float | None = Field(None, ge=0, description=(
+        "Timeline position (from the timeline start). Omit to append after the track's last clip."))
+
+    @model_validator(mode="after")
+    def _check(self) -> "ClipIn":
+        if (self.source is None) == (self.media_pool_id is None):
+            raise ValueError("give exactly one of source or media_pool_id")
+        if self.out_seconds is not None and self.duration_seconds is not None:
+            raise ValueError("give out_seconds or duration_seconds, not both")
+        if self.out_seconds is not None and self.out_seconds <= self.in_seconds:
+            raise ValueError("out_seconds must be after in_seconds")
+        return self
+
+
+@tool(EDIT_RESOLVE, title="Append clips / new timeline")
+def append_clips(
+    clips: Annotated[list[ClipIn] | None, Field(max_length=200, description=(
+        "Source ranges in playback order, in SOURCE seconds."))] = None,
+    timeline: Annotated[str | None, Field(description=(
+        "Existing timeline to append to (made current). Default: the current timeline."))] = None,
+    new_timeline: Annotated[str | None, Field(description=(
+        "Create an empty timeline with this name first (refused if the name exists), make it "
+        "current and append there. clips may be empty."))] = None,
+    new_timeline_fps: Annotated[float | None, Field(gt=0, le=120, description=(
+        "Frame rate for the new timeline; default: the project's. Read back in timeline.fps."))] = None,
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """Build or extend a timeline live: append source ranges to the current, a named or a new
+    timeline, without an FCPXML round trip.
+
+    Seconds are converted with the source clip's own fps (source range) and the timeline's
+    fps (record position) inside Resolve. Returns the timeline items that actually landed
+    (track, start/end seconds) plus `warnings` wherever Resolve did something other than
+    asked; check them. Verify with get_resolve_state(include_clips=true) or timeline_frames.
+    """
+    rows = lua_lib.normalize_clips([
+        {"path": _existing_file(c.source) if c.source else None, "media_pool_id": c.media_pool_id,
+         "in_seconds": c.in_seconds, "out_seconds": c.out_seconds, "duration_seconds": c.duration_seconds,
+         "track": c.track, "media": c.media, "record_seconds": c.record_seconds}
+        for c in clips or []])
+    code = lua_lib.snippet_append_clips(rows, timeline, new_timeline, new_timeline_fps)
+    return control.perform(
+        code, lambda: _studio().append_clips(rows, timeline, new_timeline, new_timeline_fps),
+        channel, timeout=60.0 + 10.0 * len(rows))
+
+
+@tool(DESTRUCTIVE, title="Remove clips")
+def remove_clips(
+    indices: Annotated[list[int], Field(min_length=1, description=(
+        "0-based clip indices on the track, exactly as get_resolve_state(include_clips=true) lists "
+        "them for the same track (transitions are not counted)."))],
+    track_type: Literal["video", "audio"] = "video",
+    track_index: Annotated[int, Field(ge=1)] = 1,
+    names: Annotated[list[str] | None, Field(description=(
+        "The clip names get_resolve_state showed at those indices. If any differs (the timeline "
+        "changed), nothing is deleted. Strongly recommended."))] = None,
+    ripple: Annotated[bool, Field(description="Close the gaps by moving later clips left.")] = False,
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """Delete clips from one track of the current timeline. Destructive: confirm with the
+    user first. Read the track with get_resolve_state(include_clips=true) right before and
+    pass `names` so a changed timeline cannot delete the wrong clips. Only this track is
+    read back: whether Resolve also removes linked audio is not verified, so check the
+    audio track afterwards.
+    """
+    code = lua_lib.snippet_remove_clips(indices, track_type, track_index, names, ripple)
+    return control.perform(
+        code, lambda: _studio().remove_clips(indices, track_type, track_index, names, ripple), channel)
 
 
 class MarkerSpec(BaseModel):

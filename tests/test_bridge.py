@@ -121,6 +121,11 @@ _SNIPPET_SAMPLES = {
     "grade_from_drx": {"drx_path": "/x.drx"},
     "open_page": {"page": "edit"},
     "export_timeline_stills": {"positions": [{"seconds": 1}, {"frame": 3}], "out_dir": "/x"},
+    "import_media": {"paths": ["/x.mov"], "bin": "B-roll/Day 1"},
+    "append_clips": {"clips": [{"path": "/x.mov", "duration_seconds": 2, "track": 2, "record_seconds": 1},
+                               {"media_pool_id": "id", "media": "audio"}],
+                     "new_timeline": "Cut", "new_timeline_fps": 25},
+    "remove_clips": {"indices": [0, 2], "names": ["a", "b"], "ripple": True},
 }
 
 

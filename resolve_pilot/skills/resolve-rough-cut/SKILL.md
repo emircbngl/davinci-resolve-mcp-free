@@ -38,7 +38,8 @@ Builds a first-pass timeline from raw footage, deciding what to keep from the tr
 8. **Deliver**
    - studio / bridge: `import_timeline(path, timeline_name="...")`, then `get_resolve_state(include_clips=true)` and check clip count and duration against the plan.
    - manual: "In Resolve: File › Import › Timeline… and pick `<path>`."
-9. **Reply** with a short table — #, source in–out, duration, rationale — and the total length.
+9. **Iterate live** (studio / bridge) on the imported timeline instead of exporting again, which would create another timeline: `append_clips` adds a missed line or a B-roll shot (`track=2`, `record_seconds=...`), `remove_clips` drops one (read the indices with `get_resolve_state(include_clips=true)` and ask first). Keep the plan in step with what you changed if you may export again.
+10. **Reply** with a short table — #, source in–out, duration, rationale — and the total length.
 
 ## Conventions
 

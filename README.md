@@ -6,7 +6,7 @@
 
 | Channel | What it does | Free | Studio |
 |---|---|:---:|:---:|
-| **Live Lua bridge** | Claude reads and changes the open project directly: import timelines, add markers, color clips, apply LUTs, queue renders, run any Lua | ✅ | ✅ |
+| **Live Lua bridge** | Claude reads and changes the open project directly: import media, build and change timelines clip by clip, import timelines, add markers, color clips, apply LUTs, queue renders, run any Lua | ✅ | ✅ |
 | **FCPXML export** | Build a rough cut outside Resolve, import via `File > Import > Timeline` (or automatically through the bridge) | ✅ | ✅ |
 | **Lua snippets** | Ready-to-paste Console snippets when nothing live is connected | ✅ | ✅ |
 | **UI automation** (macOS) | Page switching, menu items, Magic Mask & other AI tools via the Accessibility API; screenshots of the Resolve window | ✅ | ✅ |
@@ -78,6 +78,7 @@ After connecting, ask Claude things like:
 - *"Make a vertical 9:16 rough cut from this 30-min talk."*
 - *"Show me what's in this B-roll folder before we pick shots."* (Claude looks at a frame per scene)
 - *"Find the dead air and black frames in this recording and mark them on the timeline."*
+- *"Drop the drone shot from 0:12 to 0:17 on V2 at the 30-second mark."* (straight into the open timeline)
 
 ## Tools
 
@@ -89,6 +90,7 @@ After connecting, ask Claude things like:
 | Plan | `plan_from_transcript` · `plan_from_scenes` · `create_plan` · `get_plan` · `edit_plan` |
 | Export | `export_fcpxml` · `export_srt` |
 | Resolve (auto-routed) | `get_resolve_state` · `import_timeline` · `add_markers` · `add_quality_markers` · `set_clip_color` · `apply_lut` · `queue_render` · `render_status` · `open_page` |
+| Build timelines (auto-routed) | `import_media` (into bins, no duplicates) · `append_clips` (source ranges onto the current, a named or a new timeline, any track) · `remove_clips` (by index, name-checked) |
 | Lua | `run_lua` (live) · `list_lua_snippets` · `render_lua_snippet` (paste) |
 | macOS UI | `send_keystroke` · `menu_pick` · `open_ai_feature` |
 
@@ -96,6 +98,7 @@ Designed for agents:
 - **Plans live on the server.** Claude gets a `plan_id` and refines the cut with small operations (`keep`, `trim`, `move`, `insert`, `set`, …) instead of re-sending a whole timeline as JSON.
 - **Every plan is validated** — clips past the end of their source, dissolves without handles, reused footage, fps mismatches, a music bed that ends early — and the warnings come back with each response.
 - **Transcripts are cached** and numbered; Claude picks segments by index. Long transcriptions keep running in the background instead of timing out.
+- **Edit the open timeline live.** `append_clips` adds a shot or B-roll where it belongs instead of re-importing a whole FCPXML as a new timeline, and returns the items that actually landed, with a warning wherever Resolve did something other than asked.
 - **Read → act → verify.** `get_resolve_state` shows what actually landed in Resolve; `timeline_frames` shows the edit as rendered (grades, titles, transitions); on macOS `screenshot_resolve` shows what the user sees.
 - **Claude can look at footage.** Frames come back as images (one per timestamp, or a single contact sheet to save tokens), so shot choices are made on what is actually in the picture.
 - **Errors explain themselves** — what failed and what to do next.
