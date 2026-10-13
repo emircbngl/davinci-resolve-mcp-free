@@ -45,9 +45,22 @@ Builds a first-pass timeline from raw footage, deciding what to keep from the tr
 - Always fill `rationale`; it is how the user audits your choices.
 - `pad_seconds=0.2` keeps natural breaths; use 0.05 for punchy social cuts.
 - The timeline fps follows the source unless the user asks otherwise.
-- Vertical / social: `edit_plan` with `{"op": "set", "width": 1080, "height": 1920}` and tell the user the reframing happens in Resolve (Smart Reframe in Studio, or manual).
+- Vertical / social: `edit_plan` with `{"op": "set", "width": 1080, "height": 1920}`, then reframe in Resolve (below; Smart Reframe in Studio does it automatically).
 - Ask before transcribing anything over an hour and quote the expected time (turbo runs many times faster than real time on Apple Silicon, slower on CPU).
 - Multi-camera or several files: `create_plan` takes clips from any number of sources.
+
+## Vertical 9:16 delivery (reframe live)
+
+After importing a 1080x1920 timeline built from 16:9 footage, the picture is letterboxed (Resolve fits the whole image by default). With a live channel:
+
+1. `get_resolve_state(include_clips=true)` for the clip indices.
+2. `set_clip_properties(properties={"Scaling": "fill"})` fills the frame and crops the sides, on every clip of V1 (or pass `indices`).
+3. Put the subject in frame per clip: `set_clip_properties(indices=[2], properties={"Pan": -300})`; punch in with `{"ZoomX": 1.2, "ZoomY": 1.2}`.
+4. `timeline_frames` at each changed clip and look; adjust and repeat. Report what you checked.
+
+What is verified and what is not: keys, ranges and value kinds come from Resolve's scripting documentation, and every write is read back, so `ok: false` / `mismatched` is trustworthy. How a value *looks* is not verified yet: Pan/Tilt are documented in pixels of the timeline, but their sign (which way positive moves the picture), whether ZoomX alone moves ZoomY when ZoomGang is on, and how Scaling interacts with zoom are assumptions. Always confirm with `timeline_frames`.
+
+Before big changes to an existing timeline, `export_timeline(format="drt")` makes a backup the user can bring back with `import_timeline`.
 
 ## Example
 

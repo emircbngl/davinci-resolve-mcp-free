@@ -11,7 +11,8 @@ Tool groups:
 - export:   export_fcpxml, export_srt
 - resolve:  get_resolve_state, import_timeline, add_markers, add_quality_markers,
             set_clip_color, apply_lut, queue_render, open_page, run_lua,
-            list_lua_snippets, render_lua_snippet
+            list_lua_snippets, render_lua_snippet, timeline_frames, render_status
+- inspector / tracks: set_clip_properties, set_tracks, export_timeline
 - macOS UI: send_keystroke, menu_pick, open_ai_feature
 
 Run as:
@@ -70,8 +71,13 @@ it once per session; setup_bridge installs it into Workspace > Scripts.
 user verbatim and ask them to paste it into Workspace > Console. Offer setup_bridge if they \
 want hands-free control.
 Resolve actions (get_resolve_state, import_timeline, add_markers, add_quality_markers, \
-set_clip_color, apply_lut, queue_render, open_page) choose the channel automatically and report \
-it in `channel`.
+set_clip_color, apply_lut, queue_render, open_page, set_clip_properties, set_tracks, \
+export_timeline) choose the channel automatically and report it in `channel`.
+Changing clips and tracks: set_clip_properties (zoom, pan, crop, opacity, scaling, enable / \
+disable; a 9:16 reframe) and set_tracks (add, rename, mute / hide, lock) read every value back \
+from Resolve; trust `ok` and `mismatched`, not the request. After a visual change, look at it \
+with timeline_frames. export_timeline writes FCPXML / EDL / AAF / OTIO / DRT for other NLEs \
+or as a backup (drt) before large edits.
 
 Seeing: grab_frames (frames at given times), scene_frames (one frame per scene) and read_video \
 (speech next to the matching frames) return images you can look at; layout="grid" packs them \

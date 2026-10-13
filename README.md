@@ -89,6 +89,7 @@ After connecting, ask Claude things like:
 | Plan | `plan_from_transcript` · `plan_from_scenes` · `create_plan` · `get_plan` · `edit_plan` |
 | Export | `export_fcpxml` · `export_srt` |
 | Resolve (auto-routed) | `get_resolve_state` · `import_timeline` · `add_markers` · `add_quality_markers` · `set_clip_color` · `apply_lut` · `queue_render` · `render_status` · `open_page` |
+| Inspector & tracks (auto-routed) | `set_clip_properties` (zoom, pan, crop, opacity, scaling, enable; read back) · `set_tracks` (add, rename, mute/hide, lock) · `export_timeline` (FCPXML, EDL, AAF, OTIO, DRT, CSV) |
 | Lua | `run_lua` (live) · `list_lua_snippets` · `render_lua_snippet` (paste) |
 | macOS UI | `send_keystroke` · `menu_pick` · `open_ai_feature` |
 
