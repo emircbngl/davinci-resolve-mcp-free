@@ -28,6 +28,7 @@ or via Claude Desktop config (see README).
 import base64
 import functools
 import hashlib
+import inspect
 import json
 import math
 import os
@@ -167,6 +168,31 @@ def _explain(e: BaseException) -> str:
     return str(e) or type(e).__name__
 
 
+def _compact_schema(node: Any, parent: str | None = None) -> Any:
+    """Drop pydantic's generated "title" entries ("in_seconds" -> "In Seconds").
+
+    They repeat the field names, and the tool list is loaded into every session:
+    about a tenth of its tokens. Properties that are *named* title are kept.
+    """
+    if isinstance(node, dict):
+        return {k: _compact_schema(v, k) for k, v in node.items()
+                if not (k == "title" and isinstance(v, str) and parent != "properties")}
+    if isinstance(node, list):
+        return [_compact_schema(v) for v in node]
+    return node
+
+
+def _compact_registered(name: str) -> None:
+    # Both SDKs keep registered tools on a private _tool_manager; if that ever moves,
+    # the tool keeps its full schema, which is fine.
+    try:
+        registered = mcp._tool_manager.get_tool(name)
+        registered.parameters = _compact_schema(registered.parameters)
+        registered.description = inspect.cleandoc(registered.description or "")
+    except Exception:
+        pass
+
+
 # Every tool registered through @tool, in order: name -> (function, annotations).
 # resolve://capabilities is built from this, so it cannot drift from the server.
 _TOOLS: dict[str, tuple[Any, ToolAnnotations]] = {}
@@ -191,6 +217,7 @@ def tool(annotations: ToolAnnotations, title: str | None = None):
                 raise ToolError(_explain(e)) from e
 
         mcp.tool(title=title, annotations=annotations)(wrapper)
+        _compact_registered(fn.__name__)
         return fn
     return decorator
 
@@ -2187,7 +2214,6 @@ _PLATFORM_NOTES = {
 
 def capabilities() -> dict[str, Any]:
     """Which tool works on which channel, plus edition and OS notes (resolve://capabilities)."""
-    import inspect
 
     tools: dict[str, Any] = {}
     for name, (fn, ann) in _TOOLS.items():

@@ -50,6 +50,8 @@ Verified live on Resolve 20.3 (Free, macOS): screenshot_resolve, grab_frames, sc
 
 - **What has been run in a real Resolve**, per tool: `resolve://capabilities` gives each tool's `verified_live` (Resolve version and edition, OS, channel, what the run covered, or null), and the README's Status section shows the same matrix. Both come from one ledger (`resolve_pilot/verified.py`); a test fails when a tool that needs Resolve is in neither its "run live" nor its "not yet" list, or when the README matrix is out of date.
 
+- The tool list every session loads is about 13% smaller (~2.5k tokens): the input schemas no longer repeat each field name as a generated `title`, and descriptions lose their docstring indentation.
+
 ### Hardening (review rounds)
 - Bridge: request code that reassigns a global such as `type`, `table` or `os` can no longer break the bridge. Globals a request sets still persist for later requests, but in the bridge's own table, never in Resolve's real globals (which other scripts share).
 - Bridge results are capped at about 4 MB (`result_truncated`) besides the 256 KB output cap; output stays a prefix ending in `...<output truncated>`; a value or error whose `__tostring` raises no longer costs the whole result.

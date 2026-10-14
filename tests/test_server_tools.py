@@ -168,3 +168,28 @@ def test_paging_does_not_rerun_a_refresh(monkeypatch):
     mcp_server.transcribe_audio("/a.mp4", refresh=True, limit=2)
     mcp_server.transcribe_audio("/a.mp4", refresh=True, offset=2, limit=2)
     assert seen == [True, False]
+
+
+def test_advertised_schemas_carry_no_generated_titles():
+    import asyncio
+    import json as _json
+
+    # model_dump(by_alias=True): 1.x and 2.x name the attributes differently.
+    listed = {t.name: t.model_dump(by_alias=True) for t in asyncio.run(mcp_server.mcp.list_tools())}
+
+    def titles(node, parent=None):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k == "title" and isinstance(v, str) and parent != "properties":
+                    yield v
+                yield from titles(v, k)
+        elif isinstance(node, list):
+            for v in node:
+                yield from titles(v)
+
+    for name, t in listed.items():
+        assert not list(titles(t["inputSchema"])), name
+        assert "\n    " not in (t["description"] or ""), name  # docstring indentation removed
+    # A parameter that is itself called "title" survives.
+    assert "title" in listed["create_plan"]["inputSchema"]["properties"]
+    assert len(_json.dumps([t["inputSchema"] for t in listed.values()])) < 50_000
