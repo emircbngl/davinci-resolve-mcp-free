@@ -123,6 +123,7 @@ _SNIPPET_SAMPLES = {
     "export_timeline_stills": {"positions": [{"seconds": 1}, {"frame": 3}], "out_dir": "/x"},
     "add_subtitles": {"srt_path": "/x.srt"},
     "checkpoint": {"action": "save", "label": "before cut"},
+    "make_format_version": {"aspect": "4:5", "name": "Feed"},
     "grade_clips": {"indices": [0], "slope": [1.1, 1, 0.9], "saturation": 1.2, "still_dir": "/x"},
     "add_title": {"text": "Hi", "start_seconds": 1, "duration_seconds": 7, "position": (0.5, 0.2),
                   "color": (1, 1, 0), "size": 0.1, "font": "Open Sans"},
@@ -551,3 +552,22 @@ def test_grade_clips_sets_cdl_copies_grades_and_reports_no_visible_change(live_b
     assert cdls == ["1.1 1 0.9", "1.1 1 0.9"]
     with pytest.raises(ValueError, match="slope"):
         lua.snippet_grade_clips(slope=[9, 1, 1])
+
+
+@needs_luajit
+@pytest.mark.parametrize("live_bridge", [None, "21.1"], indirect=True)
+def test_vertical_version_and_custom_render(live_bridge):
+    from resolve_pilot import mcp_server
+    v = mcp_server.make_format_version("9:16")
+    assert v["ok"] and v["timeline"] == "Main 9x16" and v["current"] == "Main 9x16"
+    assert v["actual"] == {"width": 1080, "height": 1920, "behavior": "scaleToCrop"}
+    assert mcp_server.make_format_version("9:16", name="Main 9x16")["ok"] is False  # name clash
+    job = mcp_server.queue_render(preset=None, format="MP4", codec="H.264", width=1080, height=1920,
+                                  start_seconds=1, end_seconds=3, custom_name="short")
+    assert job["ok"] and job["settings"]["width"] == 1080 and job["settings"]["height"] == 1920
+    assert job["settings"]["start_seconds"] == 1 and job["settings"]["end_seconds"] == 3
+    assert job["settings"]["format"] == "MP4" and job["settings"]["output"].endswith("short.mp4")
+    bad = mcp_server.queue_render(preset=None, format="mp4", codec="Nope")
+    assert bad["ok"] is False and bad["available_codecs"] == ["H264", "H265"]
+    with pytest.raises(ValueError, match="together"):
+        lua.snippet_render_current_timeline(format="mp4")

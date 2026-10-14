@@ -1508,16 +1508,33 @@ def apply_lut(
 
 @tool(EDIT_RESOLVE, title="Queue render")
 def queue_render(
-    preset: Annotated[str, Field(description="Render preset name; a wrong name returns available_presets.")] = "H.264 Master",
+    preset: Annotated[str | None, Field(description=(
+        "Render preset loaded first; a wrong name returns available_presets. None keeps the "
+        "current Deliver settings."))] = "H.264 Master",
     target_dir: str = "~/Desktop/Renders",
     custom_name: Annotated[str | None, Field(description="Output file name without extension.")] = None,
-    start: Annotated[bool, Field(description="Start rendering right away.")] = False,
+    start: Annotated[bool, Field(description="Start rendering right away (then render_status).")] = False,
+    format: Annotated[str | None, Field(description="Container, e.g. mp4, mov (with codec).")] = None,
+    codec: Annotated[str | None, Field(description="e.g. H264, H265, ProRes422HQ; a wrong one returns available_codecs.")] = None,
+    width: Annotated[int | None, Field(ge=16, le=16384, description="Output width, e.g. 1080 for 9:16.")] = None,
+    height: Annotated[int | None, Field(ge=16, le=16384, description="Output height, e.g. 1920 for 9:16.")] = None,
+    start_seconds: Annotated[float | None, Field(ge=0, description="Render only from here (timeline seconds).")] = None,
+    end_seconds: Annotated[float | None, Field(gt=0, description="...to here.")] = None,
+    export_audio: bool | None = None,
     channel: Channel = "auto",
 ) -> dict[str, Any]:
-    """Add the current timeline to the render queue with a preset, optionally starting it."""
+    """Add the current timeline (or a part of it) to the render queue, optionally starting it.
+
+    Social delivery: make_format_version(aspect='9:16') first, then queue_render(format='mp4',
+    codec='H264', width=1080, height=1920). A 16:9 timeline rendered at 9:16 is letterboxed,
+    not cropped. The job's real settings come back in `settings`.
+    """
+    args = (preset, target_dir, custom_name, start, format, codec, width, height,
+            start_seconds, end_seconds, export_audio)
+    simple = all(v is None for v in args[4:])
     return control.perform(
-        lua_lib.snippet_render_current_timeline(preset, target_dir, custom_name, start),
-        lambda: _studio().render_current_timeline(preset, target_dir, custom_name, start),
+        lua_lib.snippet_render_current_timeline(*args),
+        (lambda: _studio().render_current_timeline(preset, target_dir, custom_name, start)) if simple else None,
         channel,
     )
 
@@ -1827,6 +1844,29 @@ def grade_clips(
     return out
 
 
+@tool(EDIT_RESOLVE, title="Make a format version (9:16, 1:1, 4:5)")
+def make_format_version(
+    aspect: Annotated[Literal[tuple(lua_lib.ASPECTS)], Field(description=(  # type: ignore[valid-type]
+        "9:16 Shorts/Reels/TikTok (1080x1920), 4:5 feed (1080x1350), 1:1 (1080x1080), 16:9."))] = "9:16",
+    name: Annotated[str | None, Field(description="New timeline name; default '<timeline> 9x16'.")] = None,
+    fill: Annotated[bool, Field(description=(
+        "True: scale clips to fill the frame (centre crop). False: fit (letterbox)."))] = True,
+    width: Annotated[int | None, Field(ge=16, le=16384, description="Custom size instead of the aspect preset.")] = None,
+    height: Annotated[int | None, Field(ge=16, le=16384)] = None,
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """Copy the current timeline at another frame size and switch to the copy; the original
+    is untouched.
+
+    Clips are centre-cropped to fill (fill=True). Then: look with timeline_frames, move
+    subjects into frame per clip with set_clip_properties (Pan / ZoomX / ZoomY), redo titles
+    listed in `recheck_graphics` with add_title (they were laid out for the old frame), and
+    render with queue_render(format='mp4', codec='H264', width=..., height=...).
+    """
+    return control.perform(lua_lib.snippet_make_format_version(aspect, name, fill, width, height),
+                           None, channel, timeout=60.0)
+
+
 class TimelinePosition(BaseModel):
     seconds: float | None = Field(None, ge=0, description="Offset from the timeline start.")
     frame: int | None = Field(None, ge=0, description="Frame offset from the timeline start.")
@@ -2011,6 +2051,7 @@ _TOOL_CHANNELS: dict[str, list[str]] = {
     "add_title": ["bridge", "manual"],  # Lua only, no Studio Python path
     "checkpoint": ["bridge", "manual"],
     "grade_clips": ["bridge", "manual"],
+    "make_format_version": ["bridge", "manual"],
     "open_page": _LIVE + ["macos_ui"],
     "screenshot_resolve": ["macos_ui"],
     "send_keystroke": ["macos_ui"],

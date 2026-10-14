@@ -88,7 +88,7 @@ def test_render_snippet_validates_arguments():
 
 def test_home_paths_are_expanded_before_reaching_resolve():
     code = lua.snippet_render_current_timeline(target_dir="~/Renders")
-    assert "~" not in code
+    assert "~/" not in code and "\"~" not in code  # "~=" is Lua's not-equal
 
 
 def test_export_timeline_passes_subtypes_for_aaf_and_edl():

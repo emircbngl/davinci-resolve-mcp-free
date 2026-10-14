@@ -389,10 +389,35 @@ function Project:LoadRenderPreset(name)
   end
   return false
 end
-function Project:SetRenderSettings(s) self.render_settings = s; return true end
+function Project:SetRenderSettings(s)
+  self.render_settings = self.render_settings or {}
+  for k, v in pairs(s) do self.render_settings[k] = v end
+  return true
+end
+-- Render formats map display name -> extension; codecs map name -> code (Resolve 20.3).
+function Project:GetRenderFormats() return { MP4 = "mp4", QuickTime = "mov", __flags = 1 } end
+function Project:GetRenderCodecs(ext)
+  if ext == "mp4" then return { ["H.264"] = "H264", ["H.265"] = "H265", __flags = 1 } end
+  if ext == "mov" then return { ["H.264"] = "H264", ["Apple ProRes 422 HQ"] = "ProRes422HQ" } end
+  return {}
+end
+function Project:SetCurrentRenderFormatAndCodec(f, c)
+  local ok = false
+  for _, code in pairs(self:GetRenderCodecs(f)) do if code == c then ok = true end end
+  if ok then self.render_fc = { format = f, codec = c } end
+  return ok
+end
 function Project:AddRenderJob()
   local id = "job-" .. (#self.render_jobs + 1)
   table.insert(self.render_jobs, id)
+  local s = self.render_settings or {}
+  local fc = self.render_fc or { format = "mov", codec = "H264" }
+  local tl = self.current
+  self.job_info = self.job_info or {}
+  self.job_info[id] = { VideoFormat = fc.format:upper(), VideoCodec = fc.codec, FormatWidth = s.FormatWidth or 1920,
+    FormatHeight = s.FormatHeight or 1080, FrameRate = "24", IsExportAudio = s.ExportAudio ~= false,
+    MarkIn = s.SelectAllFrames == false and s.MarkIn or tl.start, MarkOut = s.SelectAllFrames == false and s.MarkOut or tl:GetEndFrame() - 1,
+    TargetDir = s.TargetDir or "/out", OutputFilename = (s.CustomName or id) .. "." .. fc.format }
   return id
 end
 function Project:StartRendering() self.rendering = true; return true end
@@ -400,8 +425,9 @@ function Project:IsRenderingInProgress() return self.rendering == true end
 function Project:GetRenderJobList()
   local out = {}
   for _, id in ipairs(self.render_jobs) do
-    out[#out + 1] = { JobId = id, RenderJobName = id, TimelineName = "Main", TargetDir = "/out",
-      OutputFilename = id .. ".mov" }
+    local j = { JobId = id, RenderJobName = id, TimelineName = "Main" }
+    for k, v in pairs((self.job_info or {})[id] or { TargetDir = "/out", OutputFilename = id .. ".mov" }) do j[k] = v end
+    out[#out + 1] = j
   end
   return out
 end

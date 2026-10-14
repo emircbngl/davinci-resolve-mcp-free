@@ -670,6 +670,61 @@ return {{ok = true, timeline = timeline:GetName(), track = {int(track)}, cdl = c
 """
 
 
+ASPECTS = {"9:16": (1080, 1920), "4:5": (1080, 1350), "1:1": (1080, 1080), "16:9": (1920, 1080)}
+
+
+@_snippet
+def snippet_make_format_version(aspect: str = "9:16", name: str | None = None, fill: bool = True,
+                                width: int | None = None, height: int | None = None) -> str:
+    """Duplicate the current timeline at another frame size (e.g. 9:16 for Shorts/Reels)."""
+    aspect = _pick(aspect, tuple(ASPECTS), "aspect")
+    w, h = ASPECTS[aspect]
+    if width or height:
+        if not (width and height and 16 <= width <= 16384 and 16 <= height <= 16384):
+            raise ValueError("give both width and height, 16..16384")
+        w, h = int(width), int(height)
+    return f"""-- resolve-pilot: make_format_version
+{_TIMELINE_PREAMBLE}local aspect, name, w, h, behavior = {to_lua(aspect)}, {to_lua(name)}, {w}, {h}, {to_lua("scaleToCrop" if fill else "scaleToFit")}
+local src = timeline
+name = name or (src:GetName() .. " " .. aspect:gsub(":", "x"))
+for i = 1, project:GetTimelineCount() do
+  if project:GetTimelineByIndex(i):GetName() == name then
+    return {{ok = false, error = "A timeline named '" .. name .. "' already exists; pass another name."}}
+  end
+end
+local v = src:DuplicateTimeline(name)
+if not v then return {{ok = false, error = "Resolve could not duplicate the timeline."}} end
+project:SetCurrentTimeline(v) -- DuplicateTimeline usually does this already; be explicit
+local set = {{
+  custom = v:SetSetting("useCustomSettings", "1"),
+  width = v:SetSetting("timelineResolutionWidth", tostring(w)),
+  height = v:SetSetting("timelineResolutionHeight", tostring(h)),
+  behavior = v:SetSetting("timelineInputResMismatchBehavior", behavior),
+}}
+local got = {{width = tonumber(v:GetSetting("timelineResolutionWidth")),
+  height = tonumber(v:GetSetting("timelineResolutionHeight")),
+  behavior = v:GetSetting("timelineInputResMismatchBehavior")}}
+-- graphics laid out for the old frame (titles, compounds, generators) get cropped too
+local check = {{}}
+local start = v:GetStartFrame()
+local fps = tonumber(v:GetSetting("timelineFrameRate")) or tonumber(project:GetSetting("timelineFrameRate")) or 24
+for t = 1, v:GetTrackCount("video") do
+  for _, it in ipairs(v:GetItemListInTrack("video", t) or {{}}) do
+    local m = it:GetMediaPoolItem()
+    local kind = m and m:GetClipProperty("Type")
+    if not m or kind == "Compound" or kind == "Generator" or kind == "Fusion Title" then
+      if m or (it:GetProperty() or {{}}).Opacity ~= nil then
+        check[#check + 1] = {{track = t, name = it:GetName(), start_seconds = (it:GetStart() - start) / fps}}
+      end
+    end
+  end
+end
+return {{ok = got.width == w and got.height == h, timeline = v:GetName(), source = src:GetName(),
+  current = project:GetCurrentTimeline():GetName(), requested = {{width = w, height = h, behavior = behavior}},
+  actual = got, setters = set, recheck_graphics = check}}
+"""
+
+
 @_snippet
 def snippet_add_markers(markers: list[dict], replace_owned_prefix: str | None = None) -> str:
     """Add markers to the current timeline; positions in frames or seconds.
@@ -1325,32 +1380,105 @@ return {{ok = ok and true or false}}
 
 @_snippet
 def snippet_render_current_timeline(
-    preset: str = "H.264 Master",
+    preset: str | None = "H.264 Master",
     target_dir: str = "~/Desktop/Renders",
     custom_name: str | None = None,
     start: bool = False,
+    format: str | None = None,
+    codec: str | None = None,
+    width: int | None = None,
+    height: int | None = None,
+    start_seconds: float | None = None,
+    end_seconds: float | None = None,
+    export_audio: bool | None = None,
 ) -> str:
-    """Queue the current timeline for render with a preset; optionally start rendering."""
+    """Queue the current timeline (or a range of it) for render; optionally start rendering.
+
+    A preset is loaded first, then format/codec, size, range and audio override it. The
+    job's real settings are read back from the render queue.
+    """
     settings: dict[str, Any] = {"TargetDir": os.path.expanduser(target_dir)}
     if custom_name:
         settings["CustomName"] = custom_name
+    for name, v in (("width", width), ("height", height)):
+        if v is not None and not 16 <= int(v) <= 16384:
+            raise ValueError(f"{name} must be 16..16384 pixels")
+    if width is not None:
+        settings["FormatWidth"] = int(width)
+    if height is not None:
+        settings["FormatHeight"] = int(height)
+    if export_audio is not None:
+        settings["ExportAudio"] = bool(export_audio)
+    if (format is None) != (codec is None):
+        raise ValueError("give format and codec together (e.g. mp4 + H264, mov + H264, mov + ProRes422HQ)")
+    rng = None
+    if start_seconds is not None or end_seconds is not None:
+        a = float(start_seconds or 0.0)
+        if a < 0 or (end_seconds is not None and float(end_seconds) <= a):
+            raise ValueError("the render range needs 0 <= start_seconds < end_seconds")
+        rng = [a, None if end_seconds is None else float(end_seconds)]
     return f"""-- resolve-pilot: render_current_timeline
-{_TIMELINE_PREAMBLE}local preset = {to_lua(preset)}
-if not project:LoadRenderPreset(preset) then
-  print("[resolve-pilot] Unknown render preset: " .. preset)
-  return {{ok = false, error = "Unknown render preset: " .. preset,
-    available_presets = project:GetRenderPresetList()}}
+{_TIMELINE_PREAMBLE}{_TIMELINE_FPS}local preset, fmt, codec, rng = {to_lua(preset)}, {to_lua(format)}, {to_lua(codec)}, {to_lua(rng)}
+local settings = {to_lua(settings)}
+local page = resolve:GetCurrentPage()
+local function finish(r)
+  if page and resolve:GetCurrentPage() ~= page then resolve:OpenPage(page) end
+  return r
 end
-project:SetRenderSettings({to_lua(settings)})
+if preset and not project:LoadRenderPreset(preset) then
+  return finish({{ok = false, error = "Unknown render preset: " .. preset,
+    available_presets = project:GetRenderPresetList()}})
+end
+if fmt then
+  -- accept the extension ("mp4") or Resolve's name ("MP4", "QuickTime")
+  local ext
+  for name, e in pairs(project:GetRenderFormats() or {{}}) do
+    if name ~= "__flags" and (e:lower() == fmt:lower() or name:lower() == fmt:lower()) then ext = e end
+  end
+  if not ext then
+    local names = {{}}
+    for name, e in pairs(project:GetRenderFormats() or {{}}) do if name ~= "__flags" then names[#names + 1] = e end end
+    table.sort(names)
+    return finish({{ok = false, error = "Unknown render format: " .. fmt, available_formats = names}})
+  end
+  local code
+  for name, c in pairs(project:GetRenderCodecs(ext) or {{}}) do
+    if name ~= "__flags" and (c:lower() == codec:lower() or name:lower() == codec:lower()) then code = c end
+  end
+  if not (code and project:SetCurrentRenderFormatAndCodec(ext, code)) then
+    local names = {{}}
+    for name, c in pairs(project:GetRenderCodecs(ext) or {{}}) do if name ~= "__flags" then names[#names + 1] = c end end
+    table.sort(names)
+    return finish({{ok = false, error = "Codec " .. codec .. " is not available for " .. ext, available_codecs = names}})
+  end
+end
+local start = timeline:GetStartFrame()
+if rng then
+  settings.SelectAllFrames = false
+  settings.MarkIn = start + math.floor(rng[1] * fps + 0.5)
+  settings.MarkOut = rng[2] and (start + math.floor(rng[2] * fps + 0.5) - 1) or (timeline:GetEndFrame() - 1)
+else
+  settings.SelectAllFrames = true
+end
+if not project:SetRenderSettings(settings) then
+  return finish({{ok = false, error = "Resolve refused these render settings (check the size for this codec)."}})
+end
 local job = project:AddRenderJob()
 if not job then
-  return {{ok = false, error = "AddRenderJob failed. Check the Deliver page (the Free edition limits some formats)."}}
+  return finish({{ok = false, error = "AddRenderJob failed. Check the Deliver page (the Free edition limits some formats)."}})
 end
-local start = {to_lua(bool(start))}
-if start then project:StartRendering(job) end
-print(string.format("[resolve-pilot] Queued job %s for '%s'%s", tostring(job), timeline:GetName(),
-  start and " and started rendering" or ""))
-return {{ok = true, job_id = job, timeline = timeline:GetName(), preset = preset, rendering = start}}
+local got
+for _, j in ipairs(project:GetRenderJobList() or {{}}) do if j.JobId == job then got = j end end
+local go = {to_lua(bool(start))}
+if go then project:StartRendering(job) end
+local r = {{ok = true, job_id = job, timeline = timeline:GetName(), preset = preset, rendering = go}}
+if got then
+  r.settings = {{format = got.VideoFormat, codec = got.VideoCodec, width = got.FormatWidth,
+    height = got.FormatHeight, frame_rate = got.FrameRate, audio = got.IsExportAudio,
+    start_seconds = (got.MarkIn - start) / fps, end_seconds = (got.MarkOut + 1 - start) / fps,
+    output = (got.TargetDir or "") .. {to_lua(os.sep)} .. (got.OutputFilename or "")}}
+end
+return finish(r)
 """
 
 
