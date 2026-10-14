@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from resolve_pilot import __version__, bridge, mcp_server, traps, workflows
+from resolve_pilot import __version__, bridge, mcp_server, traps, verified, workflows
 from tests.conftest import LUAJIT, start_bridge, stop_bridge
 from tests.test_server_e2e import connect
 
@@ -155,3 +155,22 @@ def test_tools_without_a_studio_path_do_not_claim_studio():
     assert tools["checkpoint"]["channels"] == ["bridge", "manual"]
     assert traps.hints_for_lua('tl:InsertFusionTitleIntoTimeline("Text+")')[0].startswith(
         "Known trap (fusion-title-insert-edit)")
+
+
+def test_every_tool_that_needs_resolve_is_in_the_live_ledger():
+    tools = mcp_server.capabilities()["tools"]
+    assert not set(verified.LIVE) & set(verified.NOT_YET)
+    assert set(verified.LIVE) | set(verified.NOT_YET) <= set(tools)
+    needs = {name for name, info in tools.items() if info["needs_resolve"]}
+    assert needs <= set(verified.LIVE) | set(verified.NOT_YET), sorted(
+        needs - set(verified.LIVE) - set(verified.NOT_YET))
+    assert tools["run_lua"]["verified_live"]["resolve"] == "20.3 Free"
+    assert tools["send_keystroke"]["verified_live"] is None
+    assert tools["probe_media"]["verified_live"] is None
+
+
+def test_readme_matrix_is_up_to_date():
+    from pathlib import Path
+    readme = (Path(__file__).parents[1] / "README.md").read_text(encoding="utf-8")
+    block = verified.readme_block(mcp_server.capabilities()["tools"])
+    assert block in readme, "Run: python -m resolve_pilot.verified README.md"

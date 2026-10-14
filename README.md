@@ -127,7 +127,7 @@ resolve_pilot/
 └── mcp_server.py     MCP entry point (mcp SDK 1.x and 2.x)
 ```
 
-State (plans, transcripts, bridge files) lives in `~/.resolve-pilot`; set `RESOLVE_PILOT_HOME` to move it, or `RESOLVE_PILOT_BRIDGE_DIR` to move only the bridge folder (re-run the bridge setup afterwards). On Windows, if your user folder has non-ASCII characters, the bridge uses `%PUBLIC%\resolve-pilot\bridge`, because Lua inside Resolve cannot open such paths.
+State (plans, transcripts, bridge files) lives in `~/.resolve-pilot`; set `RESOLVE_PILOT_HOME` to move it, or `RESOLVE_PILOT_BRIDGE_DIR` to move only the bridge folder (re-run the bridge setup afterwards). On Windows, if your user folder has non-ASCII characters, the bridge reaches its folder through the folder's short (8.3) name, because Lua inside Resolve cannot open such paths; where short names are turned off, setup asks you to set `RESOLVE_PILOT_BRIDGE_DIR` to an ASCII folder of your own.
 
 ## Development
 
@@ -140,7 +140,45 @@ The bridge tests run the real `bridge.lua` under LuaJIT (the Lua inside Resolve)
 
 ## Status
 
-Works end-to-end for the documented flows; Resolve-side behavior is mocked in tests, so reports from real Resolve versions (Free and Studio, any OS) are very welcome. Linux/Windows UI automation is not planned — the live bridge covers those platforms.
+The test suite runs against a mock of Resolve's API, so this table records what has been run in a real Resolve, and what that covered. Agents read the same data from `resolve://capabilities` (`verified_live`).
+
+<!-- verified-matrix:start -->
+| Tool | Reaches Resolve through | Run in real Resolve | Covered |
+|---|---|---|---|
+| `resolve_pilot_status` | bridge heartbeat, Resolve's process | ✅ 20.3 Free, macOS (bridge) | channel switches from manual to bridge |
+| `setup_bridge` | Resolve's Scripts folder | ✅ 20.3 Free, macOS (bridge) | install into Workspace › Scripts, status |
+| `export_fcpxml` | a file you import | ✅ 20.3 Free, macOS (file import) | imported with import_timeline: clips, dissolves, the music bed on its own audio track |
+| `export_srt` | a file you import | ✅ 20.3 Free, macOS (file import) | non-ASCII captions |
+| `get_resolve_state` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) |  |
+| `import_timeline` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | FCPXML from export_fcpxml; paths with spaces, # and non-ASCII |
+| `import_media` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | bins, files already in the bin reused |
+| `append_clips` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | new timeline, exact source ranges, 23.976 into 24, audio on A2 at a record time |
+| `remove_clips` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | ripple delete |
+| `add_markers` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | seconds and frames on a 24 fps timeline; a second marker on the same frame is skipped. 23.976 / 29.97 DF not yet |
+| `add_quality_markers` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | re-runs replace only their own markers |
+| `set_clip_color` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | that run found transitions being colored too; fixed since, not re-run yet |
+| `set_clip_properties` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | zoom, pan, opacity, flip, scaling, clip enable; read back and checked with timeline_frames |
+| `set_tracks` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | rename, lock, add |
+| `export_timeline` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | FCPXML, EDL, OTIO, DRT, AAF, CSV |
+| `apply_lut` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | that run found LUTs outside Resolve's LUT folder rejected; they are copied in since, not re-run yet |
+| `queue_render` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | known preset queued; an unknown one lists the presets |
+| `open_page` | Studio API · bridge · paste Lua · macOS UI | ✅ 20.3 Free, macOS (bridge) | all seven pages |
+| `run_lua` | bridge | ✅ 20.3 Free, macOS (bridge) | results, print output, errors; `return _G` does not hang |
+| `send_keystroke` | macOS UI | not yet | keystrokes reach Resolve only when it is frontmost |
+| `menu_pick` | macOS UI | ✅ 20.3 Free, macOS (macOS UI) | Workspace › Scripts › ResolvePilotBridge |
+| `add_subtitles` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | timelines starting at 0 and at 01:00:00:00 |
+| `add_title` | bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | overlay above V1, the edit left alone |
+| `checkpoint` | bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | save, list, restore, .drp backup |
+| `grade_clips` | bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | CDL grade, copy, reset; change measured on exported frames |
+| `timeline_frames` | Studio API · bridge | ✅ 20.3 Free, macOS (bridge) | playhead and page put back |
+| `render_status` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) |  |
+| `screenshot_resolve` | macOS UI | ✅ 20.3 Free, macOS (macOS UI) |  |
+| `open_ai_feature` | macOS UI | not yet | Studio-only features in Free answer ok: false and leave no dialog open |
+
+Nothing has been run through Resolve Studio's Python API (the studio channel), on Windows or Linux, or on Resolve 21.x yet; the bridge's Resolve 21.1+ Free file access is only emulated in tests.
+<!-- verified-matrix:end -->
+
+Tools that don't touch Resolve (analysis, transcripts, frames from files, plans) behave the same everywhere; CI runs them on Linux and macOS. Reports from other Resolve versions, Studio, Windows and Linux are very welcome. Linux/Windows UI automation is not planned — the live bridge covers those platforms.
 
 ## License
 

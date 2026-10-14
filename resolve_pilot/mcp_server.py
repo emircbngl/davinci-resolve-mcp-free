@@ -52,7 +52,7 @@ except ImportError:  # mcp 1.x
     from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 
-from resolve_pilot import __version__, analyzers, bridge, control, luts, traps
+from resolve_pilot import __version__, analyzers, bridge, control, luts, traps, verified
 from resolve_pilot.analyzers import frames as frame_grab
 from resolve_pilot._paths import state_dir
 from resolve_pilot.editorial import ops as plan_ops
@@ -2202,6 +2202,7 @@ def capabilities() -> dict[str, Any]:
             "macos_only": name in _MACOS_ONLY,
             "read_only": bool(hints.get("readOnlyHint")),
             "destructive": bool(hints.get("destructiveHint")),
+            "verified_live": verified.entry(name),
         }
     return {
         "server_version": __version__,
@@ -2212,6 +2213,9 @@ def capabilities() -> dict[str, Any]:
         "editions": _EDITION_NOTES,
         "platforms": _PLATFORM_NOTES,
         "tools": tools,
+        "verification": "verified_live says where a tool was run in a real Resolve (version, "
+                        "edition, OS, channel) and what that covered; null means not yet. "
+                        + verified.UNTESTED,
         "known_traps": "resolve://traps",
     }
 
