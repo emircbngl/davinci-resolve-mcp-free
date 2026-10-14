@@ -55,7 +55,7 @@ return out
 - Output is capped at 256 KB (`output_truncated`) and the encoded result at about 4 MB (`result_truncated`); return summaries, not whole media pools.
 - Library snippets: `run_lua(snippet="relink_media", args={"folder": "/Volumes/Footage"})` (see `list_lua_snippets`).
 - Errors come back as `ok: false` with a Lua traceback; fix and retry.
-- Long jobs (big imports, renders): raise `timeout_seconds`. While one request runs, the bridge reports *busy*; other calls wait their turn within their own timeout and then fail with "still running a previous request" — wait and retry, don't restart the bridge.
+- Long jobs (big imports, renders): raise `timeout_seconds`. While one request runs, the bridge reports *busy*; other calls wait their turn within their own timeout and then fail with "still running a previous request" — wait and retry. Restart the bridge only when status says a request may be stuck (it has run for over 15 minutes); a newly started bridge takes over.
 
 **Safety.** `run_lua` can change or delete anything in the project. Read first, keep scripts small, and before destructive steps (DeleteClips, DeleteTimelines, DeleteMarkersByColor, replacing grades) ask the user and suggest saving: `rp.resolve():GetProjectManager():SaveProject()`.
 

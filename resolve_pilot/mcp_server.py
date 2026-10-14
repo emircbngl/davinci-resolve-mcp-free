@@ -37,6 +37,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -1509,7 +1510,10 @@ def export_timeline(
     else:
         target = None
         args = dict(export_type=export_type, export_subtype=subtype, timeline_name=timeline,
-                    out_dir=str(state_dir("exports")), stamp=time.strftime("%Y%m%d-%H%M%S"))
+                    out_dir=str(state_dir("exports")),
+                    # Unique per call: two exports in the same second (parallel calls,
+                    # edl + edl_cdl) must not land on, and overwrite, the same file.
+                    stamp=f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}")
     before = {c: _snapshot(c) for c in _export_candidates(target)} if target else {}
     out = control.perform(lua_lib.snippet_export_timeline(**args),
                           lambda: _studio().export_timeline(**args), channel, timeout=180.0)

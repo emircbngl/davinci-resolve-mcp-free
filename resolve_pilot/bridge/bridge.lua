@@ -10,8 +10,9 @@
 -- Protocol: plain files in DIR. Both sides write a temp file and rename it.
 --   request.lua    host -> bridge   line 1 "-- rp-id: <id>", then the Lua to run
 --   response.json  bridge -> host   {"id", "ok", "result", "error", "output", ...}
---   heartbeat      bridge -> host   "<epoch> <version> <token> <pid>", refreshed every ~2 s;
---                                   "... busy <start>" while a request is running
+--   heartbeat      bridge -> host   "<epoch> <version> <token> pid=<pid>", refreshed every ~2 s;
+--                                   "<epoch> <version> <token> busy <start> pid=<pid>" while
+--                                   a request is running (pid= is left out when unknown)
 --   stop           host -> bridge   its presence makes the bridge exit
 
 -- Everything the bridge itself uses is bound locally: request code writes to the
@@ -420,8 +421,9 @@ math.randomseed(os_time() + (tonumber(ADDR:sub(-6), 16) or 0))
 local TOKEN = os_time() .. "-" .. ADDR .. "-" .. math.random(100000, 999999)
 
 local function heartbeat(busy_since)
-  local s = os_time() .. " " .. VERSION .. " " .. TOKEN .. " " .. PID
+  local s = os_time() .. " " .. VERSION .. " " .. TOKEN
   if busy_since then s = s .. " busy " .. busy_since end
+  if PID > 0 then s = s .. " pid=" .. PID end
   return write_atomic(BEAT, s)
 end
 

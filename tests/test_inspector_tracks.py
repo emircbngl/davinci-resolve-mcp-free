@@ -389,3 +389,11 @@ def test_export_studio_twin(monkeypatch, tmp_path):
     out = actions.export_timeline(str(tmp_path / "a.otio"), "OTIO")
     assert calls[-1] == (str(tmp_path / "a.otio"), 10) and out["export_subtype"] is None
     assert actions.export_timeline("/x", "ALE")["ok"] is False
+
+
+@needs_luajit
+def test_default_export_names_never_collide(live_bridge, no_studio):
+    from resolve_pilot import mcp_server
+    a = mcp_server.export_timeline("edl")
+    b = mcp_server.export_timeline("edl")  # same second, same extension
+    assert a["ok"] and b["ok"] and a["path"] != b["path"]

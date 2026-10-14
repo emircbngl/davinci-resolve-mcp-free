@@ -70,8 +70,9 @@ def detect_beats(
     # Energy per 10 ms block, then RMS over the 30 ms window ending at each block,
     # stamped with that newest block: that is where the energy rise (the onset)
     # is, not 20 ms earlier at the window start. Only full windows are used, so
-    # sound that is already playing at t=0 is not mistaken for a beat (a beat in
-    # the first 30 ms is therefore not reported).
+    # sound that is already playing at t=0 does not count as a rise from silence
+    # (that would also dwarf every other onset's strength); a hit right at t=0 is
+    # handled separately below.
     block = [sum(map(operator.mul, seg, seg))
              for seg in (samples[i:i + hop] for i in range(0, len(samples) - hop + 1, hop))]
     scale = 1.0 / (3 * hop * 32768.0 * 32768.0)
@@ -100,6 +101,15 @@ def detect_beats(
             continue
         last_idx = i
         beats.append(Beat(pts_seconds=times[i], strength=v / peak_max))
+
+    # A hit at t=0 (a song cut to start on its downbeat) has no rise inside the file.
+    # Count it when the opening is clearly louder than 80-200 ms later, i.e. it
+    # decays like a hit rather than continuing like music already playing.
+    if len(rms) > 20 and (not beats or beats[0].pts_seconds >= min_seconds_between):
+        later = sum(rms[8:19]) / 11
+        rise = rms[0] - later
+        if rms[0] > 2 * later and rise >= threshold_lin:
+            beats.insert(0, Beat(pts_seconds=0.0, strength=min(1.0, rise / peak_max)))
     return beats
 
 

@@ -701,3 +701,68 @@ def test_a_bridge_that_dies_mid_request_is_reported_gone(tmp_path):
     assert not st.running and "gone" in st.detail
     with pytest.raises(bridge.BridgeNotRunning):
         bridge.exec_lua("return 1")
+
+
+def _heartbeat(text: str) -> None:
+    d = bridge.bridge_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "heartbeat").write_text(text, encoding="utf-8")
+
+
+def test_heartbeat_formats_and_a_pid_this_server_cannot_see(monkeypatch):
+    from resolve_pilot.bridge import client
+    now = int(time.time())
+    _heartbeat(f"{now} 0.2.0 tok-old busy {now - 5}")  # 0.2.0 bridges: no pid
+    st = bridge.status()
+    assert st.running and st.busy
+    monkeypatch.setattr(client, "_pid_alive", lambda pid: False)
+    _heartbeat(f"{now} 0.2.0 tok-dead busy {now - 5} pid=4242")
+    st = bridge.status()
+    assert not st.running and "gone" in st.detail
+    # Resolve in another PID namespace (Flatpak, container): a fresh heartbeat wins ...
+    _heartbeat(f"{now} 0.2.0 tok-ns pid=4242")
+    assert bridge.status().running
+    # ... and that bridge's pid is ignored from then on, also while it is busy.
+    _heartbeat(f"{now} 0.2.0 tok-ns busy {now - 5} pid=4242")
+    st = bridge.status()
+    assert st.running and st.busy
+
+
+def test_a_request_running_past_the_ceiling_is_reported_as_possibly_stuck(monkeypatch):
+    from resolve_pilot.bridge import client
+    now = int(time.time())
+    monkeypatch.setattr(client, "_pid_alive", lambda pid: True)
+    _heartbeat(f"{now} 0.2.0 tok-loop busy {now - 1000} pid=1")
+    st = bridge.status()
+    assert st.running and st.busy and "stuck" in st.detail and "Workspace > Scripts" in st.detail
+    with pytest.raises(bridge.BridgeBusy, match="takes over"):
+        bridge.exec_lua("return 1", timeout=0.3)
+    _heartbeat(f"{now} 0.2.0 tok-nopid busy {now - 1000}")  # no pid: presumed dead, as before
+    st = bridge.status()
+    assert not st.running and "died" in st.detail
+
+
+@needs_luajit
+def test_busy_heartbeat_keeps_the_old_layout_and_ends_with_the_pid(live_bridge):
+    import threading
+    t = threading.Thread(target=lambda: bridge.exec_lua('os.execute("sleep 1.5") return 1', timeout=10))
+    t.start()
+    time.sleep(0.7)
+    fields = (bridge.bridge_dir() / "heartbeat").read_text(encoding="utf-8").split()
+    t.join()
+    # Readers before the pid field look for "busy" right after the token.
+    assert fields[3] == "busy" and fields[-1] == f"pid={live_bridge.pid}"
+
+
+@needs_luajit
+def test_a_request_that_waited_its_turn_still_gets_its_full_timeout(live_bridge):
+    import threading
+    first = {}
+    t = threading.Thread(target=lambda: first.setdefault(
+        "r", bridge.exec_lua('os.execute("sleep 3") return 1', timeout=20)))
+    t.start()
+    time.sleep(0.3)
+    # Waits ~3 s for its turn, then needs 2 s: more than what is left of its 4 s.
+    r = bridge.exec_lua('os.execute("sleep 2") return 2', timeout=4)
+    t.join()
+    assert r.result == 2 and first["r"].result == 1

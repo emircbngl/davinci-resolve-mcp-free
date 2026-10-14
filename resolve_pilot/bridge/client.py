@@ -25,13 +25,11 @@ from resolve_pilot.lua_snippets.library import lua_string
 
 SCRIPT_NAME = "ResolvePilotBridge.lua"
 HEARTBEAT_STALE_SECONDS = 8.0
-# Without a process id to check, a "busy" heartbeat is trusted this long (run_lua's
-# maximum timeout plus slack); past it the bridge is presumed dead.
+# A request may legitimately run this long (run_lua's maximum timeout plus slack).
+# Past it, a busy bridge whose process is alive is probably stuck; without a
+# process id to check, it probably died mid-request.
 MAX_BUSY_SECONDS = 900.0
 DEFAULT_IDLE_MINUTES = 60
-# After waiting behind another request, don't start ours with less time left
-# than this (or half the caller's timeout, if that is smaller).
-MIN_REQUEST_SECONDS = 1.0
 _TEMPLATE = Path(__file__).with_name("bridge.lua")
 _lock = threading.Lock()
 
@@ -232,13 +230,37 @@ def _read_heartbeat(beat: Path) -> tuple[list[str], float] | None:
     return None
 
 
+# Bridges (by token) whose process id this server cannot check: the id looked dead
+# while the heartbeat was fresh, which happens when Resolve and this server run in
+# different PID namespaces (a Flatpak or container sharing the home folder). Their
+# process id is ignored from then on and the heartbeat alone counts.
+_unverifiable: set[str] = set()
+
+
+def _parse_heartbeat(fields: list[str]) -> tuple[str, int, int | None]:
+    """(token, pid, index of "busy" or None) from a heartbeat's fields.
+
+    Current bridges write "<epoch> <version> <token> [busy <start>] pid=<n>", so
+    readers that predate the pid still find "busy" right after the token; 0.2.0
+    bridges write no pid at all.
+    """
+    token = fields[2] if len(fields) > 2 else ""
+    pid = 0
+    for f in fields[3:]:
+        if f.startswith("pid="):
+            try:
+                pid = int(f[4:])
+            except ValueError:
+                pid = 0
+    busy_at = fields.index("busy", 3) if "busy" in fields[3:] else None
+    return token, pid, busy_at
+
+
 def status() -> BridgeStatus:
     d = bridge_dir()
     beat = _read_heartbeat(d / "heartbeat")
     if beat is None:
         return BridgeStatus(False, str(d), detail="Bridge is not running. " + START_HINT)
-    # "<epoch> <version> <token> <pid> [busy <start>]"; bridges before the pid field
-    # wrote "<epoch> <version> <token> [busy <start>]".
     fields, mtime = beat
     try:
         epoch = float(fields[0])
@@ -247,26 +269,35 @@ def status() -> BridgeStatus:
     now = time.time()
     age = round(max(0.0, now - epoch), 1)
     version = fields[1] if len(fields) > 1 else None
-    try:
-        pid = int(fields[3])
-    except (IndexError, ValueError):
-        pid = 0
-    busy_at = fields.index("busy", 3) if "busy" in fields[3:] else None
-    if _pid_alive(pid) is False:
-        return BridgeStatus(
-            False, str(d), age, version,
-            "The bridge's Resolve process is gone (Resolve quit or crashed). " + START_HINT,
-        )
+    token, pid, busy_at = _parse_heartbeat(fields)
+    alive = _pid_alive(pid) if pid > 0 and token not in _unverifiable else None
+    gone = BridgeStatus(
+        False, str(d), age, version,
+        "The bridge's Resolve process is gone (Resolve quit or crashed). " + START_HINT,
+    )
     if busy_at is not None:
+        # A busy bridge does not refresh its heartbeat, so only the process id can
+        # tell a long request from a bridge that died with Resolve.
         try:
             busy_for = round(max(0.0, now - float(fields[busy_at + 1])), 1)
         except (IndexError, ValueError):
             busy_for = age
-        if pid > 0 or busy_for <= MAX_BUSY_SECONDS:
+        if alive is False:
+            return gone
+        if busy_for <= MAX_BUSY_SECONDS:
             return BridgeStatus(
                 True, str(d), age, version,
                 f"Bridge is busy: Resolve has been running a request for {busy_for:.0f}s. "
                 "Wait for it to finish before sending more work.",
+                busy=True, busy_seconds=busy_for,
+            )
+        if alive:
+            return BridgeStatus(
+                True, str(d), age, version,
+                f"Bridge is busy: Resolve has been running one request for {busy_for:.0f}s, "
+                "longer than any tool call waits, so it may be stuck (an endless loop, or a "
+                f"dialog in Resolve). {START_HINT} A newly started bridge takes over from the "
+                "stuck one.",
                 busy=True, busy_seconds=busy_for,
             )
         return BridgeStatus(
@@ -275,11 +306,15 @@ def status() -> BridgeStatus:
             "with Resolve. " + START_HINT,
         )
     if age > HEARTBEAT_STALE_SECONDS:
+        if alive is False:
+            return gone
         return BridgeStatus(
             False, str(d), age, version,
             f"Bridge heartbeat is {age:.0f}s old: it stopped, or Resolve is busy. {MODAL_HINT} "
             + START_HINT,
         )
+    if alive is False:
+        _unverifiable.add(token)  # a fresh heartbeat outranks a process id we cannot see
     detail = "Bridge is running."
     if version != __version__:
         detail += (
@@ -303,6 +338,8 @@ def _remove(path: Path) -> None:
 
 
 def _busy_error(st: BridgeStatus) -> BridgeBusy:
+    if (st.busy_seconds or 0) > MAX_BUSY_SECONDS:
+        return BridgeBusy(st.detail)
     return BridgeBusy(
         f"Resolve is still running a previous request (started {st.busy_seconds or 0:.0f}s ago). "
         "Wait, then retry."
@@ -313,28 +350,30 @@ def exec_lua(code: str, timeout: float = 30.0) -> BridgeResult:
     """Run ``code`` inside Resolve and return what it printed and returned.
 
     A request that arrives while the bridge is working on another one (from this
-    session, a parallel tool call, or another MCP client) waits its turn within
-    ``timeout``. Raises BridgeNotRunning when no bridge is listening, BridgeBusy
-    when the turn did not come in time, and BridgeError when the bridge picked
-    the request up but did not answer in time.
+    session, a parallel tool call, or another MCP client) waits up to ``timeout``
+    for its turn, and once sent gets the full ``timeout`` to run, so it never starts
+    with only a sliver of time left. Raises BridgeNotRunning when no bridge is
+    listening, BridgeBusy when the turn did not come in time, and BridgeError when
+    the bridge picked the request up but did not answer in time.
     """
     st = status()
     if not st.running:
         raise BridgeNotRunning(st.detail)
     start = time.monotonic()
-    deadline = start + timeout
+    wait_deadline = start + timeout
 
-    def remaining() -> float:
-        return deadline - time.monotonic()
+    def wait_left() -> float:
+        return max(0.0, wait_deadline - time.monotonic())
 
     # One request at a time, in this process and across processes sharing the folder.
-    if not _lock.acquire(timeout=max(0.0, remaining())):
+    if not _lock.acquire(timeout=wait_left()):
         raise BridgeBusy("Another request from this session is still running; retry shortly.")
     try:
         d = bridge_dir()
         try:
-            with file_lock(d / "host.lock", remaining()):
-                return _exchange(d, code, start, remaining, timeout)
+            with file_lock(d / "host.lock", wait_left()):
+                _wait_for_turn(wait_left)
+                return _exchange(d, code, start, timeout)
         except LockTimeout:
             raise BridgeBusy(
                 "Another resolve-pilot session is using the bridge right now; retry shortly."
@@ -343,25 +382,27 @@ def exec_lua(code: str, timeout: float = 30.0) -> BridgeResult:
         _lock.release()
 
 
-def _exchange(d: Path, code: str, start: float, remaining, timeout: float) -> BridgeResult:
+def _wait_for_turn(wait_left) -> None:
     # A request we waited behind (or one another client abandoned) may still be
     # running inside Resolve, or may have taken the bridge down with it.
-    need = min(MIN_REQUEST_SECONDS, timeout / 2)
     while True:
         st = status()
         if not st.running:
             raise BridgeNotRunning(st.detail)
-        if not st.busy and remaining() >= need:
-            break
-        if remaining() < need:
-            raise _busy_error(st) if st.busy else BridgeBusy(
-                "Waited too long behind another request; retry shortly.")
+        if not st.busy:
+            return
+        if wait_left() <= 0:
+            raise _busy_error(st)
         time.sleep(0.1)
+
+
+def _exchange(d: Path, code: str, start: float, timeout: float) -> BridgeResult:
     req, resp = d / "request.lua", d / "response.json"
     rid = uuid.uuid4().hex[:12]
     _remove(resp)  # safe under the lock: only abandoned requests leave one behind
     _write_atomic(req, f"-- rp-id: {rid}\n{code}", rid)
-    while remaining() > 0:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         try:
             raw = resp.read_bytes()
         except (FileNotFoundError, PermissionError):
