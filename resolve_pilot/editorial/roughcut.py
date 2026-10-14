@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from resolve_pilot.analyzers import MediaInfo, SceneCut, probe_media, probe_media_cached
-from resolve_pilot.exporters.fcpxml import AudioBed, Clip, TimelineSpec, _frames
+from resolve_pilot.exporters.fcpxml import AudioBed, Clip, Layout, TimelineSpec, _frames, layout
 from resolve_pilot.transcribe import Segment
 
 
@@ -245,6 +245,8 @@ def validate_plan(plan: RoughCutPlan) -> dict[str, list[str]]:
                 f"{mi.duration_seconds:.2f}s long"
             )
 
+    # Frame positions exactly as the exporter will write them.
+    lay = layout(plan_to_timeline_spec(plan)) if plan.clips and plan.fps > 0 else None
     flagged: set[int] = set()  # clips already reported for an oversized dissolve
     for i in range(len(plan.clips) - 1):
         a, b = plan.clips[i], plan.clips[i + 1]
@@ -258,11 +260,14 @@ def validate_plan(plan: RoughCutPlan) -> dict[str, list[str]]:
             warnings.append(
                 f"transition {i}->{i + 1}: clip {i + 1} has no audio, so Resolve imports it as a "
                 f"compound clip; set transition_out_seconds=0 on clip {i} for a plain clip")
-        if d > min(a.duration_seconds, b.duration_seconds) + 1e-6:
-            short = i if a.duration_seconds < b.duration_seconds else i + 1
-            flagged.add(short)
-            errors.append(f"transition {i}->{i + 1} is {d:.2f}s, longer than clip {short}")
-            continue
+        if lay is not None:
+            frames, clip_frames = lay.edges[i + 1], lay.clip_frames
+            if frames > min(clip_frames[i], clip_frames[i + 1]):
+                short = i if clip_frames[i] < clip_frames[i + 1] else i + 1
+                flagged.add(short)
+                errors.append(f"transition {i}->{i + 1} is {d:.2f}s ({frames} frames), longer "
+                              f"than clip {short} ({clip_frames[short]} frames)")
+                continue
         half = d / 2
         if b.in_seconds + tol < half:
             warnings.append(
@@ -276,20 +281,20 @@ def validate_plan(plan: RoughCutPlan) -> dict[str, list[str]]:
                 "point; Resolve will shorten or shift the dissolve"
             )
 
-    if plan.clips and plan.fps > 0:
-        _check_frames(plan, errors, warnings, flagged)
+    if lay is not None:
+        _check_frames(plan, lay, errors, warnings, flagged)
 
     if plan.audio_bed:
         bed = plan.audio_bed
         mi = info(bed.source_path)
         want = bed.duration_seconds or max(0.0, plan.total_seconds - bed.offset_seconds)
-        if bed.offset_seconds >= plan.total_seconds and plan.clips:
+        if lay is not None and lay.bed_offset >= lay.total_frames:
             errors.append(
-                f"audio bed starts at {bed.offset_seconds:.2f}s, after the timeline ends "
+                f"audio bed starts at {bed.offset_seconds:.2f}s, at or after the end of the timeline "
                 f"({plan.total_seconds:.2f}s). offset_seconds is the timeline position; the "
                 "position inside the song is in_seconds"
             )
-        elif plan.fps > 0 and _frames(want, plan.fps) < 1:
+        elif lay is not None and lay.bed_frames < 1:
             errors.append("audio bed is shorter than one frame")
         if mi is None:
             if not Path(bed.source_path).expanduser().exists():
@@ -327,7 +332,7 @@ def validate_plan(plan: RoughCutPlan) -> dict[str, list[str]]:
     return {"errors": errors, "warnings": warnings}
 
 
-def _check_frames(plan: RoughCutPlan, errors: list[str], warnings: list[str],
+def _check_frames(plan: RoughCutPlan, lay: Layout, errors: list[str], warnings: list[str],
                   flagged: set[int]) -> None:
     """Check clips, dissolves and fades after the exporter's frame rounding.
 
@@ -335,18 +340,8 @@ def _check_frames(plan: RoughCutPlan, errors: list[str], warnings: list[str],
     its clip leaves no room for the next one, and a short fade rounds to nothing.
     """
     fps = plan.fps
-    bounds = [_frames(plan.fade_in_seconds, fps)]
-    t = plan.fade_in_seconds
-    for c in plan.clips:
-        t += c.duration_seconds
-        bounds.append(_frames(t, fps))
-    n = len(plan.clips)
-    # Dissolve length in frames at each clip edge: edges[i] sits before clip i.
-    edges = [_frames(plan.fade_in_seconds, fps)]
-    edges += [_frames(_transition_for(plan, plan.clips[i]), fps) for i in range(n - 1)]
-    edges.append(_frames(plan.fade_out_seconds, fps))
-    for i in range(n):
-        frames = bounds[i + 1] - bounds[i]
+    edges = lay.edges
+    for i, frames in enumerate(lay.clip_frames):
         if frames <= 0:
             if plan.clips[i].duration_seconds > 0:
                 errors.append(f"clip {i} is shorter than one frame at {fps:g} fps")

@@ -121,7 +121,8 @@ TRAPS: tuple[Trap, ...] = (
                 "lost.",
         cause="Script-environment globals are invisible to chunks compiled with loadstring.",
         handling="Each run_lua request gets an environment with rp and a capturing print; "
-                 "globals it sets still persist between requests.",
+                 "globals it sets still persist between requests, in the bridge's own table "
+                 "rather than Resolve's real globals.",
         source="measured",
         measured_on="Resolve 20.3 Free (macOS)",
         tools=("run_lua",),

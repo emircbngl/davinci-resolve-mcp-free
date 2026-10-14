@@ -22,8 +22,8 @@ Transcribes a video and produces an SRT ready for Resolve's subtitle track.
 4. **Write the SRT** with `export_srt(transcript_id=..., max_chars_per_line=42, max_lines=2)`.
    - Vertical / social video: `max_chars_per_line=32`.
    - Default output: next to the source as `<name>.<language>.srt`.
-5. **Translation**: read the segments, translate each one yourself keeping `start`/`end`, then `export_srt(segments=[{start, end, text}, ...], out_path=".../name.en.srt")`.
-6. **Into Resolve** (no scripting API for subtitle import): tell the user to drag the `.srt` onto the timeline, or File › Import › Subtitle. Styling: Inspector › Captions.
+5. **Translation**: read the segments, translate each one yourself keeping `start`/`end`, then `export_srt(segments=[{start, end, text}, ...], out_path=".../name.en.srt")`. An existing file is never replaced unless you pass `overwrite=true` — ask the user first, it may be their own subtitles.
+6. **Into Resolve**: `add_subtitles(srt_path=...)` (or `transcript_id=...`) puts the captions on the current timeline's subtitle track at the SRT's own times and reads them back; it refuses to stack on existing captions unless `replace=true`. The SRT times count from the timeline start, so use it when the timeline plays the transcribed source from its start; for a rough cut, transcribe the cut itself. Without the bridge or Studio: tell the user to drag the `.srt` onto the timeline, or File › Import › Subtitle. Styling: Inspector › Captions.
 
 ## Quality rules
 
@@ -38,7 +38,7 @@ User: *"Add Turkish subtitles to `~/Footage/talk.mp4`."*
 1. `probe_media` → 22 min, has audio.
 2. `transcribe_audio(path, language="tr")` → `status: running` → call again → 318 segments.
 3. `export_srt(transcript_id, max_chars_per_line=42)` → `~/Footage/talk.tr.srt`, 401 cues, average 3.1 s.
-4. Reply: "Drag `talk.tr.srt` onto the timeline in Resolve (or File › Import › Subtitle)."
+4. `add_subtitles(srt_path="~/Footage/talk.tr.srt")` → 401 captions on the subtitle track, read back OK.
 
 ## Burning in
 
@@ -48,5 +48,5 @@ User: *"Add Turkish subtitles to `~/Footage/talk.mp4`."*
 ## Failure modes
 
 - `audio_codec: null` → there is nothing to transcribe; tell the user.
-- "No Whisper engine installed" → Apple Silicon: `pip install '.[transcribe]'`; Windows/Linux/Intel: `pip install '.[transcribe-cpu]'`.
+- "No Whisper engine installed" → in the resolve-pilot checkout: `pip install -e '.[transcribe]'` on Apple Silicon, `pip install -e '.[transcribe-cpu]'` on Windows/Linux/Intel.
 - Over an hour of audio → ask before starting and quote the expected time.

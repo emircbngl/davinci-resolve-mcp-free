@@ -96,7 +96,7 @@ def test_validate_reports_errors_and_warnings(fake_media):
         RoughCutClip("/src/0.mov", 10.0, 0.5),   # overlaps clip 0; shorter than the dissolve
     ])
     report = roughcut.validate_plan(plan)
-    assert report["errors"] == ["transition 0->1 is 1.00s, longer than clip 1"]
+    assert report["errors"] == ["transition 0->1 is 1.00s (24 frames), longer than clip 1 (12 frames)"]
     warnings = " | ".join(report["warnings"])
     assert "source file not found" not in warnings
     assert "25.000 fps" in warnings
@@ -190,12 +190,22 @@ def test_long_plans_omit_clip_lists_unless_asked():
 
 
 def test_dissolves_are_checked_after_frame_rounding():
-    # 30 fps: clip 1 rounds to 7 frames, each 0.25 s dissolve to 8 frames -> they collide.
+    # 30 fps: clip 1 rounds to 7 frames, each 0.25 s dissolve to 8 frames.
     plan = RoughCutPlan(title="T", fps=30.0, default_transition_seconds=0.25, clips=[
         RoughCutClip("/a.mov", 10, 0.5), RoughCutClip("/a.mov", 20, 0.25), RoughCutClip("/a.mov", 30, 1.0)])
-    errors = roughcut.validate_plan(plan)["errors"]
-    assert errors == ["clip 1 is 7 frames but the dissolves on its edges use 8; "
-                      "shorten the dissolves or lengthen the clip"]
+    assert roughcut.validate_plan(plan)["errors"] == [
+        "transition 0->1 is 0.25s (8 frames), longer than clip 1 (7 frames)",
+        "transition 1->2 is 0.25s (8 frames), longer than clip 1 (7 frames)",
+    ]
+
+
+def test_a_long_fade_and_a_dissolve_colliding_in_one_clip():
+    # 24 fps: clip 0 is 10 frames; the 16-frame fade-in puts 8 into it, the 6-frame dissolve 3.
+    plan = RoughCutPlan(title="T", fps=24.0, fade_in_seconds=16 / 24, default_transition_seconds=0.25,
+                        clips=[RoughCutClip("/a.mov", 10, 10 / 24), RoughCutClip("/a.mov", 20, 2.0)])
+    assert roughcut.validate_plan(plan)["errors"] == [
+        "clip 0 is 10 frames but the dissolves on its edges use 11; "
+        "shorten the dissolves or lengthen the clip"]
 
 
 def test_sub_frame_values_are_flagged():
@@ -208,7 +218,7 @@ def test_sub_frame_values_are_flagged():
 
 def test_audio_bed_after_the_end_is_an_error():
     plan = _plan(2, audio_bed=RoughCutAudioBed("/song.wav", offset_seconds=10))
-    assert any("after the timeline ends" in e for e in roughcut.validate_plan(plan)["errors"])
+    assert any("after the end of the timeline" in e for e in roughcut.validate_plan(plan)["errors"])
 
 
 def test_update_with_a_new_source_keeps_the_duration():
@@ -251,3 +261,50 @@ def test_dissolve_into_a_clip_without_audio_warns_about_compound(media, tmp_path
     assert any("compound clip" in w for w in roughcut.validate_plan(plan)["warnings"])
     clips[0].transition_out_seconds = 0
     assert not any("compound clip" in w for w in roughcut.validate_plan(plan)["warnings"])
+
+
+def test_dissolve_check_uses_frames_not_seconds():
+    # 29.97 fps: a 0.4995 s clip and a 0.5 s dissolve are both 15 frames; it fits.
+    plan = RoughCutPlan(title="T", fps=29.97, default_transition_seconds=0.5, clips=[
+        RoughCutClip("/a.mov", 10, 2.0), RoughCutClip("/a.mov", 20, 0.4995)])
+    assert roughcut.validate_plan(plan)["errors"] == []
+
+
+@pytest.mark.parametrize("fps, clips, fade_in, offset, duration", [
+    (24.0, [2.808], 0.0, 2.78, None),        # validator used to pass, exporter dropped the bed
+    (24.0, [2.808], 0.0, 2.79, 30.0),        # bed starting on the last frame boundary
+    (24000 / 1001, [0.985], 0.173, 1.143, None),  # validator used to reject a 1-frame bed
+])
+def test_bed_checks_match_what_the_exporter_writes(fps, clips, fade_in, offset, duration):
+    from resolve_pilot.exporters.fcpxml import build_fcpxml
+    plan = RoughCutPlan(title="T", fps=fps, fade_in_seconds=fade_in,
+                        clips=[RoughCutClip("/a.mov", 0, d) for d in clips],
+                        audio_bed=RoughCutAudioBed("/s.wav", offset_seconds=offset,
+                                                   duration_seconds=duration))
+    bed_errors = [e for e in roughcut.validate_plan(plan)["errors"] if "audio bed" in e]
+    exported = 'lane="-1"' in build_fcpxml(roughcut.plan_to_timeline_spec(plan))
+    assert exported == (not bed_errors)
+
+
+def test_edits_from_two_processes_are_not_lost(tmp_path):
+    import os
+    import subprocess
+    import sys
+    pid = store.save_plan(_plan(20))
+    worker = tmp_path / "w.py"
+    worker.write_text(
+        "import sys\n"
+        "from pydantic import TypeAdapter\n"
+        "from resolve_pilot.editorial import ops, store\n"
+        "A = TypeAdapter(list[ops.PlanOp])\n"
+        "pid, start = sys.argv[1], int(sys.argv[2])\n"
+        "for i in range(start, 20, 2):\n"
+        "    with store.plan_lock(pid):\n"
+        "        plan, _ = ops.apply_ops(store.load_plan(pid), A.validate_python(\n"
+        "            [{'op': 'trim', 'index': i, 'tail_seconds': 0.5}]))\n"
+        "        store.save_plan(plan, pid)\n"
+    )
+    procs = [subprocess.Popen([sys.executable, str(worker), pid, str(k)], env=os.environ.copy())
+             for k in (0, 1)]
+    assert [p.wait(timeout=60) for p in procs] == [0, 0]
+    assert [c.duration_seconds for c in store.load_plan(pid).clips] == [1.5] * 20

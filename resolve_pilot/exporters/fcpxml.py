@@ -131,6 +131,54 @@ def _media_flags(src: Path) -> tuple[bool, bool, float | None]:
     return has_video, has_audio, info.duration_seconds or None
 
 
+@dataclass
+class Layout:
+    """Frame positions of a timeline exactly as the exporter writes them.
+
+    ``bounds[i]`` is where clip i starts (``bounds[-1]`` where the last ends);
+    ``edges[i]`` is the dissolve length in frames at the edge before clip i
+    (``edges[0]`` the fade-in, ``edges[-1]`` the fade-out). validate_plan uses
+    the same numbers, so what it accepts is what the FCPXML contains.
+    """
+    bounds: list[int]
+    edges: list[int]
+    total_frames: int
+    bed_offset: int = 0
+    bed_frames: int = 0
+
+    @property
+    def clip_frames(self) -> list[int]:
+        return [b - a for a, b in zip(self.bounds, self.bounds[1:])]
+
+    @property
+    def bed_fits(self) -> bool:
+        return self.bed_frames > 0 and self.bed_offset < self.total_frames
+
+
+def layout(spec: TimelineSpec) -> Layout:
+    fps = spec.fps
+    # Clip boundaries are rounded to frames cumulatively, so every clip starts
+    # exactly where the previous one ends — rounding each duration on its own
+    # left one-frame gaps/overlaps and drift across many short (beat) cuts.
+    bounds = [_frames(spec.fade_in_seconds, fps)]
+    t = spec.fade_in_seconds
+    for c in spec.clips:
+        t += c.duration_seconds
+        bounds.append(_frames(t, fps))
+    edges = [bounds[0]]
+    edges += [_frames(_transition_duration_for(c, spec.default_transition_seconds), fps)
+              for c in spec.clips[:-1]]
+    edges.append(_frames(spec.fade_out_seconds, fps))
+    total = bounds[-1] + edges[-1]
+    out = Layout(bounds=bounds, edges=edges, total_frames=total)
+    bed = spec.audio_bed
+    if bed:
+        out.bed_offset = _frames(bed.offset_seconds, fps)
+        out.bed_frames = (_frames(bed.duration_seconds, fps) if bed.duration_seconds
+                          else max(0, total - out.bed_offset))
+    return out
+
+
 def build_fcpxml(spec: TimelineSpec) -> str:
     """Return a complete FCPXML 1.10 string ready to write to disk.
 
@@ -146,17 +194,11 @@ def build_fcpxml(spec: TimelineSpec) -> str:
     fps = spec.fps
     frame_dur = _frame_duration(fps)
 
-    # Clip boundaries are rounded to frames cumulatively, so every clip starts
-    # exactly where the previous one ends — rounding each duration on its own
-    # left one-frame gaps/overlaps and drift across many short (beat) cuts.
-    bounds = [_frames(spec.fade_in_seconds, fps)]
-    t = spec.fade_in_seconds
-    for c in spec.clips:
-        t += c.duration_seconds
-        bounds.append(_frames(t, fps))
+    lay = layout(spec)
+    bounds = lay.bounds
     fade_in_frames = bounds[0]
-    fade_out_frames = _frames(spec.fade_out_seconds, fps)
-    total_frames = bounds[-1] + fade_out_frames
+    fade_out_frames = lay.edges[-1]
+    total_frames = lay.total_frames
 
     asset_lines: list[str] = []
     asset_ids: dict[str, str] = {}
@@ -189,12 +231,8 @@ def build_fcpxml(spec: TimelineSpec) -> str:
 
     bed_xml = ""
     bed = spec.audio_bed
-    bed_offset = _frames(bed.offset_seconds, fps) if bed else 0
-    bed_frames = 0
-    if bed:
-        bed_frames = (_frames(bed.duration_seconds, fps) if bed.duration_seconds
-                      else max(0, total_frames - bed_offset))
-    if bed and bed_frames > 0:  # a zero-length bed would import as nothing; validate_plan flags it
+    bed_offset, bed_frames = lay.bed_offset, lay.bed_frames
+    if bed and lay.bed_fits:  # a bed that would import as nothing; validate_plan flags it
         bed_ref = asset_for(bed.source_path)
         # A connected clip's offset is measured in its parent's source time.
         if fade_in_frames > 0 or not spec.clips:
@@ -209,9 +247,8 @@ def build_fcpxml(spec: TimelineSpec) -> str:
             f'duration="{_rt(bed_frames, fps)}" srcEnable="audio"/>'
         )
 
-    def transition(boundary: int, seconds: float) -> str:
+    def transition(boundary: int, d: int) -> str:
         # Centered on the cut: half the dissolve on each side of the boundary.
-        d = _frames(seconds, fps)
         return (f'<transition name="Cross Dissolve" offset="{_rt(boundary - d // 2, fps)}" '
                 f'duration="{_rt(d, fps)}"/>')
 
@@ -222,7 +259,7 @@ def build_fcpxml(spec: TimelineSpec) -> str:
         spine_elements.append(f"{gap}>{bed_xml}</gap>" if bed_xml else f"{gap}/>")
         bed_xml = ""
         if fade_in_frames > 0:
-            spine_elements.append(transition(bounds[0], spec.fade_in_seconds))
+            spine_elements.append(transition(bounds[0], fade_in_frames))
 
     last_index = len(spec.clips) - 1
     for i, clip in enumerate(spec.clips):
@@ -240,13 +277,11 @@ def build_fcpxml(spec: TimelineSpec) -> str:
             spine_elements.append(f"{attrs}>{bed_xml}</asset-clip>")
         else:
             spine_elements.append(f"{attrs}/>")
-        if i < last_index:
-            trans = _transition_duration_for(clip, spec.default_transition_seconds)
-            if _frames(trans, fps) > 0:
-                spine_elements.append(transition(bounds[i + 1], trans))
+        if i < last_index and lay.edges[i + 1] > 0:
+            spine_elements.append(transition(bounds[i + 1], lay.edges[i + 1]))
 
     if fade_out_frames > 0:
-        spine_elements.append(transition(bounds[-1], spec.fade_out_seconds))
+        spine_elements.append(transition(bounds[-1], fade_out_frames))
         spine_elements.append(
             f'<gap name="Gap" offset="{_rt(bounds[-1], fps)}" '
             f'duration="{_rt(fade_out_frames, fps)}" start="0/1s"/>'

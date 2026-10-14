@@ -325,7 +325,9 @@ def test_export_that_reports_success_without_a_file_is_not_ok(live_bridge, no_st
     assert out["error"].startswith("Resolve reported success, but") and "Nothing was written" in out["error"]
     stale = tmp_path / "old.aaf"
     stale.write_text("from yesterday")
-    out = mcp_server.export_timeline("aaf", out_path=str(stale))
+    with pytest.raises(ValueError, match="overwrite=true"):
+        mcp_server.export_timeline("aaf", out_path=str(stale))
+    out = mcp_server.export_timeline("aaf", out_path=str(stale), overwrite=True)
     assert out["ok"] is False and "not rewritten" in out["error"]
 
 

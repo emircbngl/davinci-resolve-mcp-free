@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from resolve_pilot._filelock import LockTimeout, file_lock
 from resolve_pilot._paths import state_dir
 from resolve_pilot.editorial.roughcut import RoughCutPlan, validate_plan
 
@@ -42,13 +43,21 @@ def _path(plan_id: str) -> Path:
 def plan_lock(plan_id: str) -> Iterator[None]:
     """Hold while reading, changing and saving one plan.
 
-    mcp 2.x runs tool calls in parallel threads; without this, two edit_plan
-    calls on the same plan lose one edit or interleave their writes.
+    mcp 2.x runs tool calls in parallel threads, and several MCP servers (Claude
+    Desktop + Claude Code) share the plan folder; without this, two edit_plan
+    calls on the same plan lose one edit.
     """
+    path = _path(plan_id).with_suffix(".lock")
     with _locks_guard:
         lock = _locks.setdefault(plan_id, threading.Lock())
     with lock:
-        yield
+        try:
+            with file_lock(path, timeout=30.0):
+                yield
+        except LockTimeout:
+            raise ValueError(
+                f"Plan {plan_id!r} is being edited by another session; retry shortly."
+            ) from None
 
 
 def save_plan(plan: RoughCutPlan, plan_id: str | None = None) -> str:

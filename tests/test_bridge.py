@@ -1,6 +1,7 @@
 """Live bridge: the real bridge.lua under LuaJIT, driven through the Python client."""
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import time
@@ -265,10 +266,10 @@ def test_cyclic_and_huge_results_do_not_hang_the_bridge(live_bridge):
 
 
 @needs_luajit
-def test_unencodable_result_is_reported_not_fatal(live_bridge):
+def test_a_key_whose_tostring_fails_still_encodes(live_bridge):
     r = bridge.exec_lua(
         'local k = setmetatable({}, {__tostring = function() error("bad") end}) return {[k] = 1}')
-    assert not r.ok and "could not be encoded" in r.error
+    assert r.ok and r.result == {"<table>": 1}
     assert bridge.exec_lua("return 2").result == 2
 
 
@@ -284,7 +285,8 @@ def test_error_line_numbers_match_the_callers_code(live_bridge):
 def test_output_is_capped(live_bridge):
     r = bridge.exec_lua('for i = 1, 30000 do print(i, "some clip name here") end return 1')
     assert r.ok and r.result == 1 and r.output_truncated
-    assert len(r.output) <= 256 * 1024
+    assert len(r.output) <= 256 * 1024 + 64 and r.output.endswith("...<output truncated>")
+    assert r.output.startswith("1\tsome clip name here\n2\t")
     assert "output_truncated" not in bridge.exec_lua("print(1)").to_dict()
 
 
@@ -297,7 +299,7 @@ def test_long_request_reports_busy_instead_of_not_running(live_bridge):
     st = bridge.status()
     assert st.running and st.busy and st.busy_seconds >= 8
     with pytest.raises(bridge.BridgeBusy):
-        bridge.exec_lua("return 1")
+        bridge.exec_lua("return 1", timeout=2)  # its turn does not come in time
     deadline = time.monotonic() + 15
     while bridge.status().busy and time.monotonic() < deadline:
         time.sleep(0.2)
@@ -341,13 +343,13 @@ def test_two_server_processes_share_one_bridge(live_bridge, tmp_path):
     assert outs == ["10", "10"]
 
 
-def test_windows_non_ascii_profile_falls_back_to_ascii_folder(monkeypatch, tmp_path):
+def test_windows_non_ascii_profile_uses_the_short_path(monkeypatch, tmp_path):
     from resolve_pilot.bridge import client
     monkeypatch.setattr(client.platform, "system", lambda: "Windows")
     monkeypatch.setattr(client, "home", lambda: tmp_path / "José" / ".resolve-pilot")
-    monkeypatch.setenv("PUBLIC", str(tmp_path / "Public"))
-    d = client.bridge_dir()
-    assert str(d).isascii() and d == tmp_path / "Public" / "resolve-pilot" / "bridge"
+    short = tmp_path / "JOSE~1" / "bridge"
+    monkeypatch.setattr(client, "_windows_short_path", lambda p: short)
+    assert client.bridge_dir() == short  # still inside the user's own profile
 
 
 @needs_luajit
@@ -607,3 +609,95 @@ def test_back_to_back_requests_never_see_a_stale_busy_flag(live_bridge):
     # next request right away could get BridgeBusy for a finished request.
     for i in range(40):
         assert bridge.exec_lua(f"return {i}").result == i
+
+
+def test_windows_without_short_names_refuses_instead_of_sharing(monkeypatch, tmp_path):
+    from resolve_pilot.bridge import client
+    monkeypatch.setattr(client.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(client, "home", lambda: tmp_path / "José" / ".resolve-pilot")
+    monkeypatch.setattr(client, "_windows_short_path", lambda p: None)
+    with pytest.raises(bridge.BridgeError, match="RESOLVE_PILOT_BRIDGE_DIR"):
+        client.render_script()
+
+
+@needs_luajit
+@pytest.mark.parametrize("code", [
+    'type = "Video" return {a = 1}',
+    "table = {} return {a = 1}",
+    "tostring = nil return {a = 1}",
+    "pairs, ipairs = nil, nil return {a = 1}",
+    "os = nil string = nil return {a = 1}",
+])
+def test_request_globals_cannot_break_the_bridge(live_bridge, code):
+    r = bridge.exec_lua(code)
+    assert r.ok and r.result == {"a": 1}
+    assert bridge.exec_lua("return {b = 2}").result == {"b": 2}
+    assert bridge.status().running
+
+
+@needs_luajit
+def test_request_globals_persist_without_touching_resolves_globals(live_bridge):
+    bridge.exec_lua('clip_kind = "Video" type = "Video"')
+    assert bridge.exec_lua("return clip_kind").result == "Video"
+    # The real globals (shared with Resolve's other scripts) are untouched.
+    real = bridge.exec_lua('return {leaked = rawget(_G, "clip_kind") ~= nil, t = _G.type(1)}').result
+    assert real == {"leaked": False, "t": "number"}
+    bridge.exec_lua("type = nil")
+    assert bridge.exec_lua("return type(1)").result == "number"
+
+
+@needs_luajit
+def test_error_object_with_a_failing_tostring(live_bridge):
+    r = bridge.exec_lua(
+        "local bad; bad = setmetatable({}, {__tostring = function() error(bad) end}) error(bad)")
+    assert r.ok is False
+    st = bridge.status()
+    assert st.running and not st.busy
+    assert bridge.exec_lua("return 1").result == 1
+
+
+@needs_luajit
+def test_output_stays_a_prefix(live_bridge):
+    r = bridge.exec_lua('print("a") print(string.rep("x", 300000)) print("b") return 1')
+    assert r.output.startswith("a\nxxx") and r.output.endswith("...<output truncated>")
+    assert "\nb" not in r.output
+
+
+@needs_luajit
+def test_result_size_is_capped(live_bridge):
+    r = bridge.exec_lua(
+        'local s = string.rep("x", 1024 * 1024) local t = {} for i = 1, 300 do t[i] = s end return t',
+        timeout=20)
+    assert r.ok and r.result_truncated and r.elapsed_seconds < 10
+    assert len(json.dumps(r.result)) < 6 * 1024 * 1024
+
+
+@needs_luajit
+def test_waiting_behind_another_request_reports_busy(live_bridge):
+    import threading
+    first = {}
+    t = threading.Thread(target=lambda: first.setdefault(
+        "r", bridge.exec_lua('os.execute("sleep 3") return 1', timeout=20)))
+    t.start()
+    time.sleep(0.3)
+    began = time.monotonic()
+    with pytest.raises(bridge.BridgeBusy):
+        bridge.exec_lua("return 2", timeout=1.5)
+    assert time.monotonic() - began < 2.5
+    assert bridge.exec_lua("return 3", timeout=30).result == 3  # waits its turn, then runs
+    t.join()
+    assert first["r"].result == 1
+
+
+@needs_luajit
+def test_a_bridge_that_dies_mid_request_is_reported_gone(tmp_path):
+    proc = start_bridge(tmp_path)
+    with pytest.raises(bridge.BridgeError):
+        bridge.exec_lua('os.execute("sleep 30") return 1', timeout=1)
+    assert bridge.status().busy
+    proc.kill()
+    proc.wait()
+    st = bridge.status()
+    assert not st.running and "gone" in st.detail
+    with pytest.raises(bridge.BridgeNotRunning):
+        bridge.exec_lua("return 1")

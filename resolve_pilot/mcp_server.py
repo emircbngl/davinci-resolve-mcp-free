@@ -315,8 +315,9 @@ def resolve_pilot_status() -> dict[str, Any]:
     else:
         next_steps.append("Call get_resolve_state to see the open project and timeline.")
     if not engines:
-        next_steps.append("Transcription is not installed: Apple Silicon pip install '.[transcribe]', "
-                          "otherwise pip install '.[transcribe-cpu]'.")
+        next_steps.append("Transcription is not installed. In the resolve-pilot checkout run "
+                          "pip install -e '.[transcribe]' on Apple Silicon, otherwise "
+                          "pip install -e '.[transcribe-cpu]'.")
 
     return {
         "version": __version__,
@@ -627,11 +628,13 @@ def transcribe_audio(
     """
     res = transcripts.get_or_start(path, model=model, language=language,
                                    word_timestamps=word_timestamps, engine=engine,
-                                   wait_seconds=wait_seconds, refresh=refresh)
+                                   wait_seconds=wait_seconds,
+                                   # Paging reads the cache; only the first page may re-run.
+                                   refresh=refresh and offset == 0)
     if res["status"] != "done":
         res["hint"] = ("Still transcribing in the background. Call transcribe_audio again with the "
-                       "same path, model and language to collect the result (refresh will not "
-                       "restart a job that is running).")
+                       "same arguments to collect the result (refresh will not restart a job that "
+                       "is running).")
         return res
     segs = res["segments"]
     shown = transcripts.format_segments(segs, offset, limit)
@@ -753,13 +756,13 @@ def _dropped_reason(dropped: list[dict[str, Any]], index: int) -> str:
 
 class SegmentIn(BaseModel):
     start: float = Field(ge=0)
-    end: float = Field(gt=0)
+    end: float = Field(ge=0)
     text: str = ""
 
     @model_validator(mode="after")
     def _ordered(self) -> "SegmentIn":
-        if self.end <= self.start:
-            raise ValueError(f"segment end ({self.end}) must be after start ({self.start})")
+        if self.end < self.start:
+            raise ValueError(f"segment end ({self.end}) must not be before start ({self.start})")
         return self
 
 
@@ -892,34 +895,59 @@ def edit_plan(
 # Export
 # ────────────────────────────────────────────────────────────────────────────
 
-def _free_path(p: Path) -> Path:
-    """``p``, or ``name (2).ext``, ``name (3).ext``... if it already exists."""
+def _reserve(p: Path) -> Path:
+    """Claim ``p``, or ``name (2).ext``, ``name (3).ext``..., by creating it empty.
+
+    Creating the file (O_EXCL) is what reserves the name, so parallel exports on
+    mcp 2.x can't pick the same one and overwrite each other.
+    """
+    p.parent.mkdir(parents=True, exist_ok=True)
     n = 2
     candidate = p
-    while candidate.exists():
-        candidate = p.with_name(f"{p.stem} ({n}){p.suffix}")
-        n += 1
-    return candidate
+    while True:
+        try:
+            with open(candidate, "x"):
+                return candidate
+        except FileExistsError:
+            candidate = p.with_name(f"{p.stem} ({n}){p.suffix}")
+            n += 1
 
 
 def _default_output(stem_source: str | None, title: str, suffix: str) -> Path:
-    """Default export location; never an existing file (the user's own subtitles, say)."""
+    """Default export location (reserved); never an existing file (the user's own subtitles, say)."""
     slug = re.sub(r"[^\w\-]+", "_", title).strip("_") or "resolve_pilot"
     target = state_dir("exports") / f"{slug}{suffix}"
     if stem_source:
         d = Path(stem_source).expanduser().parent
         if d.is_dir() and os.access(d, os.W_OK):
             target = d / f"{slug}{suffix}"
-    return _free_path(target)
+    return _reserve(target)
 
 
-@tool(WRITE_FILES, title="Export FCPXML")
-def export_fcpxml(
-    plan_id: str,
-    out_path: Annotated[str | None, Field(description=(
-        "Defaults to <title>.fcpxml next to the first source, numbered if that file exists. "
-        "An explicit path is overwritten."))] = None,
-) -> dict[str, Any]:
+def _explicit_output(out_path: str, overwrite: bool) -> Path:
+    p = Path(out_path).expanduser()
+    if p.exists() and not overwrite:
+        raise ValueError(f"{p} already exists. Pass overwrite=true to replace it, or another out_path.")
+    return p
+
+
+def _write_reserved(target: Path, reserved: bool, write) -> Path:
+    try:
+        return write(target)
+    except BaseException:
+        if reserved:
+            target.unlink(missing_ok=True)
+        raise
+
+
+OutPath = Annotated[str | None, Field(description=(
+    "Where to write. Omit for a default next to the source, numbered so it never replaces "
+    "an existing file."))]
+Overwrite = Annotated[bool, Field(description="Replace out_path if it already exists.")]
+
+
+@tool(DESTRUCTIVE, title="Export FCPXML")
+def export_fcpxml(plan_id: str, out_path: OutPath = None, overwrite: Overwrite = False) -> dict[str, Any]:
     """Write a stored plan as FCPXML 1.10 (Resolve Free & Studio: File > Import > Timeline).
 
     Refuses plans with errors. Afterwards call import_timeline(path) to load it into Resolve
@@ -929,9 +957,12 @@ def export_fcpxml(
     report = roughcut.validate_plan(plan)
     if report["errors"]:
         raise ValueError("Fix these plan errors first (edit_plan): " + "; ".join(report["errors"]))
-    target = Path(out_path).expanduser() if out_path else _default_output(
-        plan.clips[0].source_path, plan.title, ".fcpxml")
-    final = fcpxml_export.write_fcpxml(roughcut.plan_to_timeline_spec(plan), target)
+    spec = roughcut.plan_to_timeline_spec(plan)
+    if out_path:
+        target, reserved = _explicit_output(out_path, overwrite), False
+    else:
+        target, reserved = _default_output(plan.clips[0].source_path, plan.title, ".fcpxml"), True
+    final = _write_reserved(target, reserved, lambda t: fcpxml_export.write_fcpxml(spec, t))
     return {
         "path": str(final),
         "clip_count": len(plan.clips),
@@ -942,20 +973,24 @@ def export_fcpxml(
     }
 
 
-@tool(WRITE_FILES, title="Export SRT")
+@tool(DESTRUCTIVE, title="Export SRT")
 def export_srt(
     transcript_id: Annotated[str | None, Field(description="From transcribe_audio.")] = None,
     segments: Annotated[list[SegmentIn] | None, Field(description="Inline cues instead, e.g. a translation you wrote.")] = None,
     out_path: Annotated[str | None, Field(description=(
-        "Defaults to <source>.<language>.srt, numbered if that file exists. "
-        "An explicit path is overwritten."))] = None,
+        "Where to write. Defaults to <source>.<language>.srt next to the transcript's source, "
+        "numbered so it never replaces an existing file. Required with inline segments."))] = None,
+    overwrite: Overwrite = False,
     max_chars_per_line: Annotated[int, Field(ge=0, description="Wrap lines; 0 disables. 42 broadcast, ~32 vertical video.")] = 42,
     max_lines: Annotated[int, Field(ge=1, le=3)] = 2,
 ) -> dict[str, Any]:
     """Write subtitles as SRT; long cues are wrapped and split into readable chunks.
 
-    Import in Resolve by dragging the .srt onto the timeline or File > Import > Subtitle.
+    Zero-length cues are dropped. Import in Resolve by dragging the .srt onto the timeline
+    or File > Import > Subtitle.
     """
+    target: Path | None = None
+    reserved = False
     if transcript_id:
         data = transcripts.require_transcript(transcript_id)
         raw = [srt_export.SrtCue(float(s["start"]), float(s["end"]), str(s["text"]))
@@ -963,22 +998,28 @@ def export_srt(
         if not out_path:
             src = Path(data["source_path"])
             lang = f".{data['language']}" if data.get("language") else ""
-            out_path = str(_free_path(src.with_name(f"{src.stem}{lang}.srt")))
+            target, reserved = _reserve(src.with_name(f"{src.stem}{lang}.srt")), True
     elif segments:
         raw = [srt_export.SrtCue(s.start, s.end, s.text) for s in segments]
         if not out_path:
             raise ValueError("out_path is required with inline segments.")
     else:
         raise ValueError("Pass transcript_id or segments.")
-    cues = srt_export.wrap_cues(raw, max_chars_per_line=max_chars_per_line, max_lines=max_lines)
-    final = srt_export.write_srt(cues, out_path)
+    if target is None:
+        target = _explicit_output(out_path, overwrite)
+    kept = [c for c in raw if c.end > c.start]
+    cues = srt_export.wrap_cues(kept, max_chars_per_line=max_chars_per_line, max_lines=max_lines)
+    final = _write_reserved(target, reserved, lambda t: srt_export.write_srt(cues, t))
     durations = [c.end - c.start for c in cues] or [0.0]
-    return {
+    out = {
         "path": str(final),
         "cue_count": len(cues),
         "average_cue_seconds": _r(sum(durations) / len(durations), 2),
         "longest_cue_seconds": _r(max(durations), 2),
     }
+    if len(kept) < len(raw):
+        out["dropped_zero_length_cues"] = len(raw) - len(kept)
+    return out
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -1434,7 +1475,7 @@ def _verify_export(path: Path, before: dict[Path, tuple[int, int] | None]) -> di
     return {"verified": False, "error": f"Nothing was written at {path}."}
 
 
-@tool(WRITE_FILES, title="Export timeline")
+@tool(DESTRUCTIVE, title="Export timeline")
 def export_timeline(
     format: Annotated[Literal[tuple(lua_lib.EXPORT_FORMATS)], Field(description=(  # type: ignore[valid-type]
         "fcpxml (= 1.10, Final Cut / Premiere via FCPXML), fcpxml_1_9, fcpxml_1_8, fcp7_xml, "
@@ -1442,9 +1483,9 @@ def export_timeline(
         "otio (OpenTimelineIO), drt (Resolve's own timeline file, the best backup), "
         "csv / tab (edit list as text), ale / ale_cdl."))] = "fcpxml",
     out_path: Annotated[str | None, Field(description=(
-        "Defaults to <timeline name>_<date-time>.<ext> in resolve-pilot's exports folder. "
-        "An explicit path is overwritten."))] = None,
+        "Defaults to <timeline name>_<date-time>.<ext> in resolve-pilot's exports folder."))] = None,
     timeline: Annotated[str | None, Field(description="Timeline name; defaults to the current one.")] = None,
+    overwrite: Overwrite = False,
     channel: Channel = "auto",
 ) -> dict[str, Any]:
     """Export a Resolve timeline as FCPXML, EDL, AAF, OTIO, DRT, CSV and more.
@@ -1458,6 +1499,10 @@ def export_timeline(
     export_type, subtype, _ext = lua_lib.EXPORT_FORMATS[format]
     if out_path:
         target: Path | None = Path(out_path).expanduser().resolve()
+        existing = [c for c in _export_candidates(target) if c.exists()]
+        if existing and not overwrite:
+            raise ValueError(f"{existing[0]} already exists. Pass overwrite=true to replace it, "
+                             "or another out_path.")
         target.parent.mkdir(parents=True, exist_ok=True)
         args = dict(out_path=str(target), export_type=export_type, export_subtype=subtype,
                     timeline_name=timeline)
@@ -1626,7 +1671,12 @@ def _ui_call(fn, *args) -> dict[str, Any]:
         from resolve_pilot.ui_automation.permissions import permission_hint
         return {"ok": False, "error": str(e),
                 "hint": "If this is a permission error: " + permission_hint("Accessibility")}
-    return out if isinstance(out, dict) else {"ok": True}
+    if not isinstance(out, dict):
+        return {"ok": True}
+    if out.get("ok") is False and "Studio" in str(out.get("error", "")):
+        out = {**out, "studio_only": True,
+               "hint": "This needs DaVinci Resolve Studio. Tell the user, or do it another way."}
+    return out
 
 
 @tool(DESTRUCTIVE, title="Send keystroke (macOS)")

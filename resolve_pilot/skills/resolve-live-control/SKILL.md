@@ -51,9 +51,11 @@ return out
 ```
 - `return` a value: tables come back as JSON in `result`. `print()` output is in `output`.
 - Helpers: `rp.project()`, `rp.timeline()`, `rp.media_pool()`, `rp.fps()` (they raise clear errors when nothing is open), `rp.json(value)`.
+- Globals you assign (without `local`) are kept for later requests in the bridge's own table; they never replace Resolve's real globals. Prefer `local`.
+- Output is capped at 256 KB (`output_truncated`) and the encoded result at about 4 MB (`result_truncated`); return summaries, not whole media pools.
 - Library snippets: `run_lua(snippet="relink_media", args={"folder": "/Volumes/Footage"})` (see `list_lua_snippets`).
 - Errors come back as `ok: false` with a Lua traceback; fix and retry.
-- Long jobs (big imports, renders): raise `timeout_seconds`.
+- Long jobs (big imports, renders): raise `timeout_seconds`. While one request runs, the bridge reports *busy*; other calls wait their turn within their own timeout and then fail with "still running a previous request" — wait and retry, don't restart the bridge.
 
 **Safety.** `run_lua` can change or delete anything in the project. Read first, keep scripts small, and before destructive steps (DeleteClips, DeleteTimelines, DeleteMarkersByColor, replacing grades) ask the user and suggest saving: `rp.resolve():GetProjectManager():SaveProject()`.
 

@@ -21,7 +21,8 @@ def test_tool_hints_match_what_the_tools_do():
                  "export_fcpxml", "export_srt"):
         assert ann[name]["idempotentHint"] is False, name
         assert ann[name]["readOnlyHint"] is False, name
-    for name in ("run_lua", "send_keystroke", "menu_pick", "apply_lut", "remove_clips"):
+    for name in ("run_lua", "send_keystroke", "menu_pick", "apply_lut", "remove_clips",
+                 "export_fcpxml", "export_srt", "export_timeline"):
         assert ann[name]["destructiveHint"] is True, name
     for name in ("probe_media", "get_plan", "get_resolve_state", "list_lua_snippets"):
         assert ann[name]["readOnlyHint"] is True, name
@@ -72,9 +73,14 @@ def test_timeline_building_hints():
     assert ann["remove_clips"]["destructiveHint"] is True
 
 
-def test_inverted_segments_are_rejected():
-    with pytest.raises(ValidationError, match="must be after start"):
+def test_inverted_segments_are_rejected_but_zero_length_ones_are_dropped(tmp_path):
+    with pytest.raises(ValidationError, match="must not be before start"):
         mcp_server.SegmentIn(start=2, end=1, text="x")
+    out = mcp_server.export_srt(
+        segments=[mcp_server.SegmentIn(start=1.5, end=1.5, text="zero"),
+                  mcp_server.SegmentIn(start=2, end=3, text="real")],
+        out_path=str(tmp_path / "x.srt"))
+    assert out["cue_count"] == 1 and out["dropped_zero_length_cues"] == 1
 
 
 def test_default_exports_never_overwrite_user_files(tmp_path, monkeypatch):
@@ -112,3 +118,53 @@ def test_version_compare_for_the_21_1_note():
     assert mcp_server._version_at_least("22.0", 21, 1)
     assert not mcp_server._version_at_least("20.3.0", 21, 1)
     assert not mcp_server._version_at_least(None, 21, 1)
+
+
+def test_explicit_paths_are_not_overwritten_without_consent(tmp_path):
+    mine = tmp_path / "talk.en.srt"
+    mine.write_text("hand-made")
+    seg = [mcp_server.SegmentIn(start=0, end=1, text="machine")]
+    with pytest.raises(ValueError, match="overwrite=true"):
+        mcp_server.export_srt(segments=seg, out_path=str(mine))
+    assert mine.read_text() == "hand-made"
+    mcp_server.export_srt(segments=seg, out_path=str(mine), overwrite=True)
+    assert "machine" in mine.read_text()
+
+
+def test_parallel_default_exports_get_distinct_files(tmp_path):
+    import threading
+    target = tmp_path / "Scene_Roughcut.fcpxml"
+    got = []
+    barrier = threading.Barrier(6)
+
+    def worker():
+        barrier.wait()
+        got.append(mcp_server._reserve(target))
+
+    threads = [threading.Thread(target=worker) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(set(got)) == 6 and all(p.exists() for p in got)
+
+
+def test_studio_only_dict_results_get_the_hint_too():
+    out = mcp_server._ui_call(lambda: {"ok": False, "error": "'Timeline > Detect Scene Cuts' is a Studio-only feature"})
+    assert out["studio_only"] is True and "Studio" in out["hint"]
+    assert "hint" not in mcp_server._ui_call(lambda: {"ok": True})
+
+
+def test_paging_does_not_rerun_a_refresh(monkeypatch):
+    seen = []
+
+    def fake(path, **kw):
+        seen.append(kw["refresh"])
+        return {"status": "done", "cached": True, "transcript_id": "t-0123456789ab", "source_path": path,
+                "language": "en", "engine": "mlx", "model": "m",
+                "segments": [{"start": i, "end": i + 1, "text": "x"} for i in range(5)]}
+
+    monkeypatch.setattr(transcripts, "get_or_start", fake)
+    mcp_server.transcribe_audio("/a.mp4", refresh=True, limit=2)
+    mcp_server.transcribe_audio("/a.mp4", refresh=True, offset=2, limit=2)
+    assert seen == [True, False]

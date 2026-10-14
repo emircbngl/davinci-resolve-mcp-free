@@ -10,12 +10,24 @@ from tests.conftest import FFMPEG, needs_ffmpeg
 
 
 @needs_ffmpeg
-def test_beats_land_on_the_clicks_including_the_first(media):
+def test_beats_land_on_the_clicks(media):
     beats = detect_beats(media["song"])
     times = [b.pts_seconds for b in beats]
-    assert times[0] == 0.0
-    assert len(times) == 12
+    assert times[0] == pytest.approx(0.5, abs=0.011)  # a click at t=0 is inside the first window
+    assert len(times) == 11
     assert max(abs(t - round(t * 2) / 2) for t in times) < 0.011  # within one 10 ms block
+    assert estimate_tempo(beats) == pytest.approx(120, abs=2)
+
+
+@needs_ffmpeg
+def test_a_song_that_starts_loud_keeps_its_beat_strengths(tmp_path):
+    song = tmp_path / "loud_start.wav"
+    subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "aevalsrc='0.5*sin(2*PI*1000*t)+gte(t,0.25)*0.4*sin(2*PI*100*mod(t-0.25,0.5))"
+                    "*exp(-mod(t-0.25,0.5)*30)':s=44100:d=10", str(song)], check=True)
+    beats = detect_beats(song)
+    kicks = [b for b in beats if b.strength > 0.3]
+    assert len(kicks) >= 18 and kicks[0].pts_seconds == pytest.approx(0.25, abs=0.011)
     assert estimate_tempo(beats) == pytest.approx(120, abs=2)
 
 

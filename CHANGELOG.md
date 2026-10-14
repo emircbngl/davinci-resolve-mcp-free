@@ -48,6 +48,15 @@ Verified live on Resolve 20.3 (Free, macOS): screenshot_resolve, grab_frames, sc
   - `remove_clips(indices, track, names, ripple)`: destructive; deletes by the indices `get_resolve_state` lists, refusing when the `names` read beforehand no longer match.
   - Based on API behaviour measured with Python on Resolve 21.0.4 Free (plain path strings for ImportMedia, exclusive endFrame, DeleteClips only on the Edit page); not yet verified from Lua on a real install.
 
+### Hardening (review rounds)
+- Bridge: request code that reassigns a global such as `type`, `table` or `os` can no longer break the bridge. Globals a request sets still persist for later requests, but in the bridge's own table, never in Resolve's real globals (which other scripts share).
+- Bridge results are capped at about 4 MB (`result_truncated`) besides the 256 KB output cap; output stays a prefix ending in `...<output truncated>`; a value or error whose `__tostring` raises no longer costs the whole result.
+- A request that arrives while the bridge is busy (a parallel tool call, or another MCP client) waits its turn within its own timeout instead of failing at once. A bridge whose Resolve process died is reported as gone: the heartbeat now carries the process id (older bridges' heartbeats are still read).
+- Windows, non-ASCII user folder: the bridge folder is reached through its 8.3 short name instead of a folder under `C:\Users\Public`, which every account on the machine can write to (and so could have run Lua in your Resolve). Without short names, setup refuses and points at `RESOLVE_PILOT_BRIDGE_DIR`.
+- Plans: two MCP servers (Claude Desktop + Claude Code) editing the same plan are serialized with a file lock. Validation checks dissolves, fades and the music bed on exactly the frames the FCPXML exporter writes, so what passes validation is what Resolve imports.
+- Exports: `export_fcpxml`, `export_srt` and `export_timeline` never replace an existing file unless `overwrite=true`; default names are claimed atomically, so parallel exports cannot pick the same file. `export_srt` drops zero-length cues and reports how many.
+- `detect_beats` no longer reports a beat at 0:00 for music that is already playing when the file starts.
+
 ### Resolve 21.1+ Free
 - The bridge no longer needs `io`, `os.execute`, `package` or `debug`, which Resolve 21.1+ Free removed from its Lua. When `io` is missing it reads and writes its files through LuaJIT's `ffi` (a global in Resolve), takes the path separator from the MCP server, and the server creates the bridge folder. `rp.file_access` says which one is in use. Tests run the bridge in an emulated 21.1 sandbox. Not yet tried on a real 21.1 install.
 - `setup_bridge(install)` returns `console_command`, a one-line `dofile(...)` to paste into the Console when the Scripts menu entry does nothing, and lists older resolve-pilot bridge scripts left in the same menu.

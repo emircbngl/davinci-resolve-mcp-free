@@ -14,22 +14,24 @@ import platform
 import threading
 import time
 import uuid
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from resolve_pilot import __version__, traps
+from resolve_pilot._filelock import LockTimeout, file_lock
 from resolve_pilot._paths import home
 from resolve_pilot.lua_snippets.library import lua_string
 
 SCRIPT_NAME = "ResolvePilotBridge.lua"
 HEARTBEAT_STALE_SECONDS = 8.0
-# A request may legitimately run this long (run_lua's maximum timeout plus slack);
-# past it, a "busy" heartbeat means the bridge died mid-request.
+# Without a process id to check, a "busy" heartbeat is trusted this long (run_lua's
+# maximum timeout plus slack); past it the bridge is presumed dead.
 MAX_BUSY_SECONDS = 900.0
 DEFAULT_IDLE_MINUTES = 60
+# After waiting behind another request, don't start ours with less time left
+# than this (or half the caller's timeout, if that is smaller).
+MIN_REQUEST_SECONDS = 1.0
 _TEMPLATE = Path(__file__).with_name("bridge.lua")
 _lock = threading.Lock()
 
@@ -84,33 +86,58 @@ class BridgeResult:
     output: str
     elapsed_seconds: float
     output_truncated: bool = False
+    result_truncated: bool = False
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        if not self.output_truncated:
-            d.pop("output_truncated")
+        for flag in ("output_truncated", "result_truncated"):
+            if not d[flag]:
+                d.pop(flag)
         return d
 
 
+def _windows_short_path(p: Path) -> Path | None:
+    """The ASCII 8.3 alias of an existing folder, if the volume has one."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        fn = ctypes.windll.kernel32.GetShortPathNameW
+        fn.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+        buf = ctypes.create_unicode_buffer(1024)
+        n = fn(str(p), buf, len(buf))
+        return Path(buf.value) if 0 < n < len(buf) else None
+    except Exception:
+        return None
+
+
 def bridge_dir() -> Path:
-    """Folder shared with the bridge. ``RESOLVE_PILOT_BRIDGE_DIR`` overrides it."""
+    """Folder shared with the bridge. ``RESOLVE_PILOT_BRIDGE_DIR`` overrides it.
+
+    On Windows the bridge's LuaJIT opens files through the ANSI code page, so a
+    profile path like C:\\Users\\José would be unreachable; the folder's 8.3 short
+    name (pure ASCII, still inside the user's own profile) is used instead.
+    """
     env = os.environ.get("RESOLVE_PILOT_BRIDGE_DIR")
-    if env:
-        p = Path(env).expanduser()
-    else:
-        p = home() / "bridge"
-        if platform.system() == "Windows" and not str(p).isascii():
-            # LuaJIT inside Resolve opens files through the ANSI code page, so a
-            # profile path like C:\Users\José would be unreachable from the bridge.
-            base = os.environ.get("PUBLIC") or os.environ.get("PROGRAMDATA") or r"C:\ProgramData"
-            p = Path(base) / "resolve-pilot" / "bridge"
+    p = Path(env).expanduser() if env else home() / "bridge"
     p.mkdir(parents=True, exist_ok=True)
+    if platform.system() == "Windows" and not str(p).isascii():
+        short = _windows_short_path(p)
+        if short is not None and str(short).isascii():
+            return short
     return p
 
 
 def render_script(idle_minutes: int = DEFAULT_IDLE_MINUTES, directory: Path | None = None) -> str:
     """Return the bridge Lua with this machine's folder and settings baked in."""
     d = directory or bridge_dir()
+    if platform.system() == "Windows" and not str(d).isascii():
+        raise BridgeError(
+            f"The bridge folder {d} contains non-ASCII characters, which Lua inside Resolve "
+            "cannot open on Windows, and this drive has no short (8.3) name for it. Set "
+            "RESOLVE_PILOT_BRIDGE_DIR to an ASCII folder that only you can write to (e.g. one "
+            "you create under your own drive), restart the MCP server and set the bridge up again."
+        )
     minutes = max(1, int(idle_minutes))
     return (
         _TEMPLATE.read_text(encoding="utf-8")
@@ -156,11 +183,41 @@ def scripts_menu_dir(scope: str = "user") -> Path:
 
 def install_script(idle_minutes: int = DEFAULT_IDLE_MINUTES, scope: str = "user") -> Path:
     """Write the bridge into Resolve's Scripts menu folder and return its path."""
+    script = render_script(idle_minutes)
     target = scripts_menu_dir(scope)
     target.mkdir(parents=True, exist_ok=True)
     path = target / SCRIPT_NAME
-    path.write_text(render_script(idle_minutes), encoding="utf-8")
+    path.write_text(script, encoding="utf-8")
     return path
+
+
+def _pid_alive(pid: int) -> bool | None:
+    """Whether a process exists; None when it cannot be told."""
+    if pid <= 0:
+        return None
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            k = ctypes.windll.kernel32
+            handle = k.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not handle:
+                return k.GetLastError() == 5  # access denied: it exists
+            code = ctypes.c_ulong()
+            ok = k.GetExitCodeProcess(handle, ctypes.byref(code))
+            k.CloseHandle(handle)
+            return bool(ok) and code.value == 259  # STILL_ACTIVE
+        except Exception:
+            return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    return True
 
 
 def _read_heartbeat(beat: Path) -> tuple[list[str], float] | None:
@@ -180,6 +237,8 @@ def status() -> BridgeStatus:
     beat = _read_heartbeat(d / "heartbeat")
     if beat is None:
         return BridgeStatus(False, str(d), detail="Bridge is not running. " + START_HINT)
+    # "<epoch> <version> <token> <pid> [busy <start>]"; bridges before the pid field
+    # wrote "<epoch> <version> <token> [busy <start>]".
     fields, mtime = beat
     try:
         epoch = float(fields[0])
@@ -188,12 +247,22 @@ def status() -> BridgeStatus:
     now = time.time()
     age = round(max(0.0, now - epoch), 1)
     version = fields[1] if len(fields) > 1 else None
-    if len(fields) >= 5 and fields[3] == "busy":
+    try:
+        pid = int(fields[3])
+    except (IndexError, ValueError):
+        pid = 0
+    busy_at = fields.index("busy", 3) if "busy" in fields[3:] else None
+    if _pid_alive(pid) is False:
+        return BridgeStatus(
+            False, str(d), age, version,
+            "The bridge's Resolve process is gone (Resolve quit or crashed). " + START_HINT,
+        )
+    if busy_at is not None:
         try:
-            busy_for = round(max(0.0, now - float(fields[4])), 1)
-        except ValueError:
+            busy_for = round(max(0.0, now - float(fields[busy_at + 1])), 1)
+        except (IndexError, ValueError):
             busy_for = age
-        if busy_for <= MAX_BUSY_SECONDS:
+        if pid > 0 or busy_for <= MAX_BUSY_SECONDS:
             return BridgeStatus(
                 True, str(d), age, version,
                 f"Bridge is busy: Resolve has been running a request for {busy_for:.0f}s. "
@@ -233,111 +302,101 @@ def _remove(path: Path) -> None:
         pass
 
 
-@contextmanager
-def _host_lock(d: Path, timeout: float) -> Iterator[None]:
-    """Serialize requests across processes (e.g. Claude Desktop + Claude Code).
-
-    There is one request/response slot, so two MCP servers talking to the same
-    bridge must take turns or they overwrite each other's requests.
-    """
-    with open(d / "host.lock", "a+b") as f:
-        if os.name == "nt":
-            import msvcrt
-
-            def try_lock() -> None:
-                f.seek(0)
-                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
-
-            def unlock() -> None:
-                f.seek(0)
-                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-
-            def try_lock() -> None:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-            def unlock() -> None:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-
-        deadline = time.monotonic() + timeout
-        while True:
-            try:
-                try_lock()
-                break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    raise BridgeBusy(
-                        "Another resolve-pilot session is using the bridge right now; retry shortly."
-                    ) from None
-                time.sleep(0.05)
-        try:
-            yield
-        finally:
-            unlock()
+def _busy_error(st: BridgeStatus) -> BridgeBusy:
+    return BridgeBusy(
+        f"Resolve is still running a previous request (started {st.busy_seconds or 0:.0f}s ago). "
+        "Wait, then retry."
+    )
 
 
 def exec_lua(code: str, timeout: float = 30.0) -> BridgeResult:
     """Run ``code`` inside Resolve and return what it printed and returned.
 
-    Raises BridgeNotRunning when no bridge is listening, BridgeBusy when it is
-    still working on an earlier request, and BridgeError when it picked the
-    request up but did not answer in time.
+    A request that arrives while the bridge is working on another one (from this
+    session, a parallel tool call, or another MCP client) waits its turn within
+    ``timeout``. Raises BridgeNotRunning when no bridge is listening, BridgeBusy
+    when the turn did not come in time, and BridgeError when the bridge picked
+    the request up but did not answer in time.
     """
     st = status()
     if not st.running:
         raise BridgeNotRunning(st.detail)
-    # A request that just finished can leave "busy" up for a moment; give it two seconds.
-    settle = time.monotonic() + 2.0
-    while st.busy and time.monotonic() < settle:
-        time.sleep(0.05)
+    start = time.monotonic()
+    deadline = start + timeout
+
+    def remaining() -> float:
+        return deadline - time.monotonic()
+
+    # One request at a time, in this process and across processes sharing the folder.
+    if not _lock.acquire(timeout=max(0.0, remaining())):
+        raise BridgeBusy("Another request from this session is still running; retry shortly.")
+    try:
+        d = bridge_dir()
+        try:
+            with file_lock(d / "host.lock", remaining()):
+                return _exchange(d, code, start, remaining, timeout)
+        except LockTimeout:
+            raise BridgeBusy(
+                "Another resolve-pilot session is using the bridge right now; retry shortly."
+            ) from None
+    finally:
+        _lock.release()
+
+
+def _exchange(d: Path, code: str, start: float, remaining, timeout: float) -> BridgeResult:
+    # A request we waited behind (or one another client abandoned) may still be
+    # running inside Resolve, or may have taken the bridge down with it.
+    need = min(MIN_REQUEST_SECONDS, timeout / 2)
+    while True:
         st = status()
-    if st.busy:
-        raise BridgeBusy(
-            f"Resolve is still running a previous request (started {st.busy_seconds:.0f}s ago). "
-            "Wait, then retry."
-        )
-    d = Path(st.directory)
+        if not st.running:
+            raise BridgeNotRunning(st.detail)
+        if not st.busy and remaining() >= need:
+            break
+        if remaining() < need:
+            raise _busy_error(st) if st.busy else BridgeBusy(
+                "Waited too long behind another request; retry shortly.")
+        time.sleep(0.1)
     req, resp = d / "request.lua", d / "response.json"
     rid = uuid.uuid4().hex[:12]
-    start = time.monotonic()
-    with _lock, _host_lock(d, timeout):
-        _remove(resp)  # safe under the lock: only abandoned requests leave one behind
-        _write_atomic(req, f"-- rp-id: {rid}\n{code}", rid)
-        while time.monotonic() - start < timeout:
+    _remove(resp)  # safe under the lock: only abandoned requests leave one behind
+    _write_atomic(req, f"-- rp-id: {rid}\n{code}", rid)
+    while remaining() > 0:
+        try:
+            raw = resp.read_bytes()
+        except (FileNotFoundError, PermissionError):
+            raw = None
+        if raw is not None:
             try:
-                raw = resp.read_bytes()
-            except (FileNotFoundError, PermissionError):
-                raw = None
-            if raw is not None:
-                try:
-                    payload = json.loads(raw.decode("utf-8", errors="replace"))
-                except ValueError:
-                    payload = None
-                if isinstance(payload, dict) and payload.get("id") == rid:
-                    _remove(resp)
-                    return BridgeResult(
-                        ok=bool(payload.get("ok")),
-                        result=payload.get("result"),
-                        error=payload.get("error"),
-                        output=payload.get("output") or "",
-                        elapsed_seconds=round(time.monotonic() - start, 3),
-                        output_truncated=bool(payload.get("output_truncated")),
-                    )
-                if payload is not None:
-                    _remove(resp)  # an answer to an abandoned request
-            time.sleep(0.05)
-        picked_up = not req.exists()
-        if not picked_up:
-            _remove(req)
-    if picked_up:
-        raise BridgeError(
-            f"Resolve took the request but did not answer within {timeout:g}s. It is probably "
-            "still running (long imports or renders); the bridge reports busy until it is done. "
-            "Wait, then retry with a longer timeout or check get_resolve_state. " + MODAL_HINT
-        )
-    raise BridgeNotRunning(
-        f"The bridge did not pick up the request within {timeout:g}s. {MODAL_HINT} " + START_HINT)
+                payload = json.loads(raw.decode("utf-8", errors="replace"))
+            except ValueError:
+                payload = None
+            if isinstance(payload, dict) and payload.get("id") == rid:
+                _remove(resp)
+                return BridgeResult(
+                    ok=bool(payload.get("ok")),
+                    result=payload.get("result"),
+                    error=payload.get("error"),
+                    output=payload.get("output") or "",
+                    elapsed_seconds=round(time.monotonic() - start, 3),
+                    output_truncated=bool(payload.get("output_truncated")),
+                    result_truncated=bool(payload.get("result_truncated")),
+                )
+            if payload is not None:
+                _remove(resp)  # an answer to an abandoned request
+        time.sleep(0.05)
+    if req.exists():
+        _remove(req)
+        st = status()
+        if st.running and st.busy:
+            raise _busy_error(st)
+        raise BridgeNotRunning(
+            f"The bridge did not pick up the request in time. {MODAL_HINT} " + st.detail)
+    raise BridgeError(
+        "Resolve took the request but did not answer in time. It is probably still running "
+        "(long imports or renders); the bridge reports busy until it is done. Wait, then "
+        "retry with a longer timeout or check get_resolve_state. " + MODAL_HINT
+    )
 
 
 def stop() -> bool:

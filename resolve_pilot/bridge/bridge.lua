@@ -10,24 +10,38 @@
 -- Protocol: plain files in DIR. Both sides write a temp file and rename it.
 --   request.lua    host -> bridge   line 1 "-- rp-id: <id>", then the Lua to run
 --   response.json  bridge -> host   {"id", "ok", "result", "error", "output", ...}
---   heartbeat      bridge -> host   "<epoch> <version> <token>", refreshed every ~2 s;
+--   heartbeat      bridge -> host   "<epoch> <version> <token> <pid>", refreshed every ~2 s;
 --                                   "... busy <start>" while a request is running
 --   stop           host -> bridge   its presence makes the bridge exit
+
+-- Everything the bridge itself uses is bound locally: request code writes to the
+-- globals, and reassigning one like `type`, `table` or `os` must not break the bridge.
+local type, pairs, ipairs, tostring, tonumber, select = type, pairs, ipairs, tostring, tonumber, select
+local pcall, xpcall, error, rawget, setmetatable = pcall, xpcall, error, rawget, setmetatable
+local getfenv, setfenv, loadstring, load = getfenv, setfenv, loadstring, load
+local concat, sort = table.concat, table.sort
+local format = string.format
+local floor, huge = math.floor, math.huge
+local os_time, os_clock = os.time, os.clock
+local os_remove, os_rename, os_execute = os.remove, os.rename, os.execute
+local io_open = io and io.open
+local bmd = bmd
+local log = print
 
 local DIR = __RP_BRIDGE_DIR__
 local VERSION = __RP_VERSION__
 local IDLE_LIMIT = __RP_IDLE_SECONDS__
 local TICK = 0.2
-local MAX_OUTPUT = 256 * 1024     -- bytes of print() output kept per request
-local MAX_VALUES = 200000         -- values encoded per JSON document
-local MAX_STRING = 1024 * 1024    -- characters kept per string
+local MAX_OUTPUT = 256 * 1024          -- bytes of print() output kept per request
+local MAX_RESULT = 4 * 1024 * 1024     -- bytes of encoded result per request
+local MAX_VALUES = 200000              -- values encoded per JSON document
+local MAX_STRING = 1024 * 1024         -- characters kept per string
 
 local SEP = __RP_SEP__
 local REQ = DIR .. SEP .. "request.lua"
 local RESP = DIR .. SEP .. "response.json"
 local BEAT = DIR .. SEP .. "heartbeat"
 local STOP = DIR .. SEP .. "stop"
-local log = print
 
 -- File access ----------------------------------------------------------------
 -- Resolve 21.1+ Free runs Console Lua without io, package, require, debug or
@@ -35,8 +49,12 @@ local log = print
 -- missing the same operations go through the C library instead.
 
 local FFI = rawget(_G, "ffi") or ffi
+if not FFI and type(require) == "function" then
+  local ok, m = pcall(require, "ffi")
+  if ok then FFI = m end
+end
 local C
-if not (io and io.open) and FFI then
+if not io_open and FFI then
   pcall(FFI.cdef, [[
     typedef struct FILE FILE;
     FILE *fopen(const char *path, const char *mode);
@@ -50,21 +68,21 @@ if not (io and io.open) and FFI then
   ]])
   C = FFI.C
 end
-local BACKEND = (io and io.open) and "io" or (C and "ffi") or "none"
+local BACKEND = io_open and "io" or (C and "ffi") or "none"
 
 local function remove(path)
-  if os and os.remove then return os.remove(path) end
+  if os_remove then return os_remove(path) end
   return C and C.remove(path) == 0
 end
 
 local function rename(a, b)
-  if os and os.rename then return os.rename(a, b) end
+  if os_rename then return os_rename(a, b) end
   return C and C.rename(a, b) == 0
 end
 
 local function read_file(path)
   if BACKEND == "io" then
-    local f = io.open(path, "rb")
+    local f = io_open(path, "rb")
     if not f then return nil end
     local s = f:read("*a")
     f:close()
@@ -88,7 +106,7 @@ end
 
 local function exists(path)
   if BACKEND == "io" then
-    local f = io.open(path, "rb")
+    local f = io_open(path, "rb")
     if f then f:close() end
     return f ~= nil
   elseif BACKEND == "ffi" then
@@ -100,7 +118,7 @@ end
 
 local function write_file(path, content)
   if BACKEND == "io" then
-    local f = io.open(path, "wb")
+    local f = io_open(path, "wb")
     if not f then return false end
     f:write(content)
     f:close()
@@ -125,34 +143,54 @@ end
 
 local function sleep(sec)
   if bmd and bmd.wait then bmd.wait(sec) return end
-  if os and os.execute and SEP == "/" then os.execute("sleep " .. sec) return end
-  local t = os.clock() + sec
-  while os.clock() < t do end
+  if os_execute and SEP == "/" then os_execute("sleep " .. sec) return end
+  local t = os_clock() + sec
+  while os_clock() < t do end
+end
+
+-- The host checks this process id to tell a long request from a bridge that died
+-- with Resolve. 0 when it cannot be read.
+local PID = 0
+if FFI then
+  local win = FFI.os == "Windows"
+  pcall(FFI.cdef, win and "unsigned long GetCurrentProcessId(void);" or "int getpid(void);")
+  local ok, v = pcall(function()
+    if win then return FFI.C.GetCurrentProcessId() end
+    return FFI.C.getpid()
+  end)
+  if ok then PID = tonumber(v) or 0 end
 end
 
 local traceback = (debug and debug.traceback) or function(err) return tostring(err) end
 
+-- tostring that cannot fail: a Resolve object or an error value may carry a
+-- __tostring that raises.
+local function safe_tostring(v)
+  local ok, s = pcall(tostring, v)
+  if ok and type(s) == "string" then return s end
+  return "<" .. type(v) .. ">"
+end
+
 -- JSON encoding ------------------------------------------------------------
--- Safe on anything a script can return: cycles become "<cycle>", and huge or
--- deeply nested values are cut short instead of hanging Resolve.
+-- Safe on anything a script can return: cycles become "<cycle>", and output beyond
+-- the value / byte budget becomes "<truncated>" instead of hanging Resolve.
 
 local ESC = {
   ['"'] = '\\"', ["\\"] = "\\\\", ["\b"] = "\\b", ["\f"] = "\\f",
   ["\n"] = "\\n", ["\r"] = "\\r", ["\t"] = "\\t",
 }
 
-local function json_string(s)
-  if #s > MAX_STRING then s = s:sub(1, MAX_STRING) .. "...<truncated>" end
-  return '"' .. s:gsub('[%c"\\]', function(c)
-    return ESC[c] or string.format("\\u%04x", c:byte())
-  end) .. '"'
+local function escape(s)
+  return (s:gsub('[%c"\\]', function(c)
+    return ESC[c] or format("\\u%04x", c:byte())
+  end))
 end
 
 local function is_array(t)
   local n = 0
   for k in pairs(t) do
     if k == "__flags" then -- internal tag on tables returned by the Resolve API
-    elseif type(k) ~= "number" or k < 1 or k ~= math.floor(k) then return false, 0
+    elseif type(k) ~= "number" or k < 1 or k ~= floor(k) then return false, 0
     else n = n + 1 end
   end
   for i = 1, n do
@@ -161,21 +199,40 @@ local function is_array(t)
   return true, n
 end
 
-local function encode(value)
-  local seen, count = {}, 0
+-- Returns the JSON text and whether anything was cut short.
+local function encode(value, max_bytes)
+  max_bytes = max_bytes or MAX_RESULT
+  local seen, count, bytes, cut = {}, 0, 0, false
+  local function over()
+    return count > MAX_VALUES or bytes > max_bytes
+  end
+  local function str(s)
+    local room = max_bytes - bytes
+    if room > MAX_STRING then room = MAX_STRING end
+    if #s > room then
+      s = s:sub(1, room > 0 and room or 0) .. "...<truncated>"
+      cut = true
+    end
+    local out = '"' .. escape(s) .. '"'
+    bytes = bytes + #out
+    return out
+  end
   local function enc(v, depth)
     count = count + 1
-    if count > MAX_VALUES then return '"<truncated>"' end
+    if over() then cut = true; return '"<truncated>"' end
     local t = type(v)
     if v == nil then return "null" end
     if t == "boolean" then return v and "true" or "false" end
     if t == "number" then
-      if v ~= v or v == math.huge or v == -math.huge then return "null" end
-      if v == math.floor(v) and math.abs(v) < 1e15 then return string.format("%d", v) end
-      return string.format("%.14g", v)
+      local s
+      if v ~= v or v == huge or v == -huge then s = "null"
+      elseif v == floor(v) and v < 1e15 and v > -1e15 then s = format("%d", v)
+      else s = format("%.14g", v) end
+      bytes = bytes + #s
+      return s
     end
-    if t == "string" then return json_string(v) end
-    if t ~= "table" then return json_string(tostring(v)) end -- Resolve objects, functions
+    if t == "string" then return str(v) end
+    if t ~= "table" then return str(safe_tostring(v)) end -- Resolve objects, functions
     if seen[v] then return '"<cycle>"' end
     if depth > 32 then return '"<nested too deep>"' end
     seen[v] = true
@@ -183,28 +240,27 @@ local function encode(value)
     local arr, n = is_array(v)
     if arr then
       for i = 1, n do
-        if count > MAX_VALUES then parts[#parts + 1] = '"<truncated>"'; break end
+        if over() then parts[#parts + 1] = '"<truncated>"'; cut = true; break end
         parts[i] = enc(v[i], depth + 1)
       end
       seen[v] = nil
-      return "[" .. table.concat(parts, ",") .. "]"
+      return "[" .. concat(parts, ",") .. "]"
     end
     local keys = {}
-    for k in pairs(v) do if k ~= "__flags" then keys[#keys + 1] = k end end
-    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+    for k in pairs(v) do
+      if #keys >= MAX_VALUES then cut = true; break end
+      if k ~= "__flags" then keys[#keys + 1] = k end
+    end
+    sort(keys, function(a, b) return safe_tostring(a) < safe_tostring(b) end)
     for _, k in ipairs(keys) do
-      if count > MAX_VALUES then parts[#parts + 1] = '"...":"<truncated>"'; break end
-      parts[#parts + 1] = json_string(tostring(k)) .. ":" .. enc(v[k], depth + 1)
+      if over() then parts[#parts + 1] = '"...":"<truncated>"'; cut = true; break end
+      parts[#parts + 1] = str(safe_tostring(k)) .. ":" .. enc(v[k], depth + 1)
     end
     seen[v] = nil
-    return "{" .. table.concat(parts, ",") .. "}"
+    return "{" .. concat(parts, ",") .. "}"
   end
-  return enc(value, 0)
-end
-
-local function show(v)
-  if type(v) == "table" then return encode(v) end
-  return tostring(v)
+  local text = enc(value, 0)
+  return text, cut
 end
 
 -- Helpers available to request code as the global `rp` ----------------------
@@ -223,9 +279,10 @@ if not resolve then resolve = get_resolve() end
 rp = {
   version = VERSION,
   file_access = BACKEND, -- "io", or "ffi" where Resolve's Lua has no io (21.1+ Free)
-  json = encode,
+  json = function(v) return (encode(v)) end,
   resolve = get_resolve,
 }
+local rp = rp
 
 function rp.project()
   local r = get_resolve()
@@ -254,19 +311,22 @@ end
 -- Resolve runs this script in its own environment, but loadstring compiles request
 -- code against the real globals, where neither `rp` nor our print capture is visible
 -- (measured on Resolve 20.3). Each request therefore gets an environment that reads
--- through to this script's environment and the globals, and writes to the globals so
--- values set by one request are still there for the next.
+-- through to this script's environment and the globals. Globals a request sets go to
+-- a table of the bridge's own, so they are still there for the next request but never
+-- overwrite Resolve's real globals (a `type = "Video"` would break other scripts).
 local SCRIPT_ENV = getfenv and getfenv(1) or _G
 local GLOBALS = getfenv and getfenv(0) or _G
+local SHARED = {}
 
 local function request_env(capture)
   return setmetatable({ print = capture, rp = rp }, {
     __index = function(_, k)
-      local v = SCRIPT_ENV[k]
+      local v = SHARED[k]
+      if v == nil then v = SCRIPT_ENV[k] end
       if v == nil then v = GLOBALS[k] end
       return v
     end,
-    __newindex = GLOBALS,
+    __newindex = SHARED,
   })
 end
 
@@ -274,15 +334,28 @@ local function handle(id, raw, before_reply)
   -- Compile without the header line so error line numbers match the caller's code.
   local code = raw:match("^%-%- rp%-id: [%w%-_]+\r?\n(.*)$") or raw
   local resp = { id = id }
-  local captured, kept, total = {}, 0, 0
+  local captured, kept, total, full = {}, 0, 0, false
   local function capture(...)
     local row = {}
-    for i = 1, select("#", ...) do row[i] = show((select(i, ...))) end
-    local line = table.concat(row, "\t")
+    for i = 1, select("#", ...) do
+      local v = (select(i, ...))
+      if type(v) == "table" then
+        row[i] = (encode(v, MAX_OUTPUT - kept + 64))
+      else
+        row[i] = safe_tostring(v)
+      end
+    end
+    local line = concat(row, "\t")
     total = total + #line + 1
+    if full then return end
     if kept + #line + 1 <= MAX_OUTPUT then
       captured[#captured + 1] = line
       kept = kept + #line + 1
+    else
+      -- Keep what fits, mark the cut, and stop: the output stays a prefix.
+      local room = MAX_OUTPUT - kept
+      captured[#captured + 1] = line:sub(1, room > 0 and room or 0) .. "...<output truncated>"
+      full = true
     end
   end
   local env = request_env(capture)
@@ -295,14 +368,14 @@ local function handle(id, raw, before_reply)
   end
   if not fn then
     resp.ok = false
-    resp.error = "Lua syntax error: " .. tostring(perr)
+    resp.error = "Lua syntax error: " .. safe_tostring(perr)
   else
     local ok, value = xpcall(fn, traceback)
     resp.ok = ok
     if ok then
       resp.result = value
     else
-      resp.error = tostring(value)
+      resp.error = safe_tostring(value)
       -- Started from the Project Manager, the bridge gets a Resolve object that cannot
       -- do anything (measured on 20.3); every API call then fails cryptically.
       local r = get_resolve()
@@ -313,17 +386,22 @@ local function handle(id, raw, before_reply)
       end
     end
   end
-  if total > kept then
+  if full or total > kept then
     resp.output_truncated = true
     resp.output_bytes = total
   end
-  local encoded, text = pcall(function()
-    resp.output = table.concat(captured, "\n")
+  local encoded, text, cut = pcall(function()
+    resp.output = concat(captured, "\n")
     return encode(resp)
   end)
   if not encoded then
-    text = encode({ id = id, ok = false, output = "",
-      error = "The script ran, but its result could not be encoded: " .. tostring(text) })
+    encoded, text = pcall(encode, { id = id, ok = false, output = "",
+      error = "The script ran, but its result could not be encoded: " .. safe_tostring(text) })
+  elseif cut then
+    text = text:sub(1, -2) .. ',"result_truncated":true}'
+  end
+  if not encoded then
+    text = '{"id":"' .. id .. '","ok":false,"output":"","error":"The result could not be encoded."}'
   end
   -- Clear "busy" before the reply lands: a client that reads the reply and sends its
   -- next request at once must not see the previous request still running.
@@ -337,12 +415,12 @@ end
 
 -- os.time() alone repeats when two bridges start in the same second; a fresh
 -- table's address differs per process, which keeps tokens unique.
-local ADDR = tostring({}):match("0x(%x+)") or tostring(os.clock())
-math.randomseed(os.time() + (tonumber(ADDR:sub(-6), 16) or 0))
-local TOKEN = os.time() .. "-" .. ADDR .. "-" .. math.random(100000, 999999)
+local ADDR = tostring({}):match("0x(%x+)") or tostring(os_clock())
+math.randomseed(os_time() + (tonumber(ADDR:sub(-6), 16) or 0))
+local TOKEN = os_time() .. "-" .. ADDR .. "-" .. math.random(100000, 999999)
 
 local function heartbeat(busy_since)
-  local s = os.time() .. " " .. VERSION .. " " .. TOKEN
+  local s = os_time() .. " " .. VERSION .. " " .. TOKEN .. " " .. PID
   if busy_since then s = s .. " busy " .. busy_since end
   return write_atomic(BEAT, s)
 end
@@ -350,6 +428,23 @@ end
 local function superseded()
   local s = read_file(BEAT)
   return s ~= nil and not s:find(TOKEN, 1, true)
+end
+
+local function serve(req)
+  local id = req:match("^%-%- rp%-id: ([%w%-_]+)") or ""
+  heartbeat(os_time())
+  local ok, err = pcall(handle, id, req, function() if not superseded() then heartbeat() end end)
+  if not ok then
+    local msg = safe_tostring(err)
+    pcall(log, "[bridge] request failed: " .. msg)
+    local written = pcall(function()
+      write_atomic(RESP, (encode({ id = id, ok = false, output = "",
+        error = "Internal bridge error: " .. msg })))
+    end)
+    if not written then
+      pcall(write_atomic, RESP, '{"id":"' .. id .. '","ok":false,"output":"","error":"Internal bridge error."}')
+    end
+  end
 end
 
 if BACKEND == "none" then
@@ -361,7 +456,7 @@ remove(RESP)
 remove(STOP)
 if not heartbeat() then
   -- The MCP server creates the folder; this only helps when it was deleted since.
-  if os and os.execute then os.execute((SEP == "/" and 'mkdir -p "' or 'mkdir "') .. DIR .. '"') end
+  if os_execute then os_execute((SEP == "/" and 'mkdir -p "' or 'mkdir "') .. DIR .. '"') end
   if not heartbeat() then
     log("[bridge] ERROR: cannot write to " .. DIR)
     log("[bridge] Make sure the folder is writable, or point RESOLVE_PILOT_BRIDGE_DIR at another " ..
@@ -376,10 +471,10 @@ if not (resolve and type(resolve.GetProjectManager) == "function") then
   log("[bridge] WARNING: no working 'resolve' object here. Open a project first, then start the bridge " ..
     "from Resolve's Console or Workspace > Scripts.")
 end
-log(string.format("[bridge] Leave Resolve open and talk to Claude. Stops after %d min without requests.",
-  math.floor(IDLE_LIMIT / 60)))
+log(format("[bridge] Leave Resolve open and talk to Claude. Stops after %d min without requests.",
+  floor(IDLE_LIMIT / 60)))
 
-local last_activity = os.time()
+local last_activity = os_time()
 local tick = 0
 local reason = "idle timeout"
 while true do
@@ -388,17 +483,8 @@ while true do
     if superseded() then reason = "another bridge started"; break end
     local req = read_file(REQ)
     remove(REQ)
-    if req then
-      local id = req:match("^%-%- rp%-id: ([%w%-_]+)") or ""
-      heartbeat(os.time())
-      local ok, err = pcall(handle, id, req, function() if not superseded() then heartbeat() end end)
-      if not ok then
-        log("[bridge] request failed: " .. tostring(err))
-        pcall(write_atomic, RESP, encode({ id = id, ok = false, output = "",
-          error = "Internal bridge error: " .. tostring(err) }))
-      end
-    end
-    last_activity = os.time()
+    if req then serve(req) end
+    last_activity = os_time()
     -- A newer bridge may have started while this request ran; never overwrite it.
     if superseded() then reason = "another bridge started"; break end
     heartbeat()
@@ -412,7 +498,7 @@ while true do
     if superseded() then reason = "another bridge started"; break end
     heartbeat()
   end
-  if os.time() - last_activity > IDLE_LIMIT then break end
+  if os_time() - last_activity > IDLE_LIMIT then break end
   sleep(TICK)
 end
 
