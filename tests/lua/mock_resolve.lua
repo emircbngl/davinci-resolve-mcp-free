@@ -613,3 +613,10 @@ function Item:CopyGrades(targets)
   for _, t in ipairs(targets or {}) do t.cdl = self.cdl end
   return true
 end
+
+function Timeline:SetName(n) self.name = n; return true end
+function Timeline:DeleteMarkerAtFrame(f)
+  if not self.markers[f] then return false end
+  self.markers[f] = nil
+  return true
+end

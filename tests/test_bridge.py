@@ -124,6 +124,8 @@ _SNIPPET_SAMPLES = {
     "add_subtitles": {"srt_path": "/x.srt"},
     "checkpoint": {"action": "save", "label": "before cut"},
     "make_format_version": {"aspect": "4:5", "name": "Feed"},
+    "manage_timelines": {"action": "rename", "name": "A", "new_name": "B"},
+    "edit_markers": {"action": "update", "seconds": [1.5], "color": "red", "note": "n", "new_color": "green"},
     "grade_clips": {"indices": [0], "slope": [1.1, 1, 0.9], "saturation": 1.2, "still_dir": "/x"},
     "add_title": {"text": "Hi", "start_seconds": 1, "duration_seconds": 7, "position": (0.5, 0.2),
                   "color": (1, 1, 0), "size": 0.1, "font": "Open Sans"},
@@ -571,3 +573,29 @@ def test_vertical_version_and_custom_render(live_bridge):
     assert bad["ok"] is False and bad["available_codecs"] == ["H264", "H265"]
     with pytest.raises(ValueError, match="together"):
         lua.snippet_render_current_timeline(format="mp4")
+
+
+@needs_luajit
+def test_manage_timelines_and_edit_markers(live_bridge):
+    from resolve_pilot import mcp_server
+    listed = mcp_server.manage_timelines("list")
+    assert [t["name"] for t in listed["timelines"]] == ["Main"] and listed["timelines"][0]["current"] is True
+    dup = mcp_server.manage_timelines("duplicate", name="Main", new_name="Alt")
+    assert dup["ok"] and dup["current"] == "Main"  # DuplicateTimeline switched; we switched back
+    assert mcp_server.manage_timelines("rename", name="Alt", new_name="Main")["ok"] is False  # clash
+    assert mcp_server.manage_timelines("rename", name="Alt", new_name="Alt 2")["name"] == "Alt 2"
+    assert mcp_server.manage_timelines("open", name="Alt 2")["current"] == "Alt 2"
+    mcp_server.manage_timelines("open", name="Main")
+
+    lua_rows = [{"seconds": 1, "color": "Red", "name": "a"}, {"seconds": 2, "color": "Blue", "name": "b"},
+                {"seconds": 3, "color": "Red", "name": "c"}]
+    bridge.exec_lua(lua.snippet_add_markers(lua.normalize_markers(lua_rows)))
+    assert mcp_server.edit_markers("list", color="Red")["count"] == 2
+    upd = mcp_server.edit_markers("update", seconds=[2], note="check audio", new_color="Green")
+    assert upd["ok"] and upd["changed"] == 1
+    after = mcp_server.edit_markers("list", seconds=[2])["markers"][0]
+    assert after["color"] == "Green" and after["note"] == "check audio" and after["name"] == "b"
+    gone = mcp_server.edit_markers("delete", color="Red")
+    assert gone["changed"] == 2 and gone["markers_left"] == 1
+    with pytest.raises(ValueError, match="needs frames"):
+        mcp_server.edit_markers("delete")

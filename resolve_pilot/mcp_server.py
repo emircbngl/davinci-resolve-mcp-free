@@ -1867,6 +1867,39 @@ def make_format_version(
                            None, channel, timeout=60.0)
 
 
+@tool(EDIT_RESOLVE, title="Timelines: list, open, rename, duplicate")
+def manage_timelines(
+    action: Literal["list", "open", "rename", "duplicate"] = "list",
+    name: Annotated[str | None, Field(description="The timeline to act on (from list).")] = None,
+    new_name: Annotated[str | None, Field(description="rename / duplicate: the new name.")] = None,
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """Every timeline in the open project (duration, fps, size, which is current), and
+    switching to, renaming or duplicating one. duplicate keeps you on the current timeline."""
+    return control.perform(lua_lib.snippet_manage_timelines(action, name, new_name), None, channel)
+
+
+@tool(EDIT_RESOLVE, title="Markers: list, delete, update")
+def edit_markers(
+    action: Literal["list", "delete", "update"] = "list",
+    frames: Annotated[list[int] | None, Field(description="Marker positions, frames from the timeline start.")] = None,
+    seconds: Annotated[list[float] | None, Field(description="...or seconds from the timeline start.")] = None,
+    color: Annotated[str | None, Field(description="Only markers of this color.")] = None,
+    custom_data_prefix: Annotated[str | None, Field(description="Only markers whose customData starts with this.")] = None,
+    name: Annotated[str | None, Field(description="update: new name.")] = None,
+    note: Annotated[str | None, Field(description="update: new note.")] = None,
+    new_color: Annotated[str | None, Field(description="update: new color.")] = None,
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """Read and tidy the current timeline's markers (add them with add_markers).
+
+    Selectors combine (frames/seconds AND color AND prefix). delete needs a selector, so
+    it never clears everything by accident. update rewrites name / note / color in place.
+    """
+    return control.perform(lua_lib.snippet_edit_markers(action, frames, seconds, color, custom_data_prefix,
+                                                        name, note, new_color), None, channel)
+
+
 class TimelinePosition(BaseModel):
     seconds: float | None = Field(None, ge=0, description="Offset from the timeline start.")
     frame: int | None = Field(None, ge=0, description="Frame offset from the timeline start.")
@@ -2052,6 +2085,8 @@ _TOOL_CHANNELS: dict[str, list[str]] = {
     "checkpoint": ["bridge", "manual"],
     "grade_clips": ["bridge", "manual"],
     "make_format_version": ["bridge", "manual"],
+    "manage_timelines": ["bridge", "manual"],
+    "edit_markers": ["bridge", "manual"],
     "open_page": _LIVE + ["macos_ui"],
     "screenshot_resolve": ["macos_ui"],
     "send_keystroke": ["macos_ui"],

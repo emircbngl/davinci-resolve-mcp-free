@@ -726,6 +726,119 @@ return {{ok = got.width == w and got.height == h, timeline = v:GetName(), source
 
 
 @_snippet
+def snippet_manage_timelines(action: str = "list", name: str | None = None,
+                             new_name: str | None = None) -> str:
+    """List, open (make current), rename or duplicate timelines in the open project."""
+    action = _pick(action, ("list", "open", "rename", "duplicate"), "action")
+    if action != "list" and not name:
+        raise ValueError(f"{action} needs the timeline name (see action='list')")
+    if action in ("rename", "duplicate") and not new_name:
+        raise ValueError(f"{action} needs new_name")
+    return f"""-- resolve-pilot: manage_timelines
+{_PROJECT_PREAMBLE}local action, name, new_name = {to_lua(action)}, {to_lua(name)}, {to_lua(new_name)}
+local function all()
+  local out = {{}}
+  for i = 1, project:GetTimelineCount() do out[#out + 1] = project:GetTimelineByIndex(i) end
+  return out
+end
+local function find(n) for _, t in ipairs(all()) do if t:GetName() == n then return t end end end
+local cur = project:GetCurrentTimeline()
+if action == "list" then
+  local rows = {{}}
+  for _, t in ipairs(all()) do
+    local fps = tonumber(t:GetSetting("timelineFrameRate")) or tonumber(project:GetSetting("timelineFrameRate")) or 24
+    local clips = 0
+    for i = 1, t:GetTrackCount("video") do clips = clips + #(t:GetItemListInTrack("video", i) or {{}}) end
+    rows[#rows + 1] = {{name = t:GetName(), current = cur ~= nil and t:GetName() == cur:GetName(),
+      duration_seconds = (t:GetEndFrame() - t:GetStartFrame()) / fps, fps = fps,
+      width = tonumber(t:GetSetting("timelineResolutionWidth")) or tonumber(project:GetSetting("timelineResolutionWidth")),
+      height = tonumber(t:GetSetting("timelineResolutionHeight")) or tonumber(project:GetSetting("timelineResolutionHeight")),
+      video_tracks = t:GetTrackCount("video"), video_items = clips}}
+  end
+  return {{ok = true, project = project:GetName(), count = #rows, timelines = rows}}
+end
+local t = find(name)
+if not t then return {{ok = false, error = "No timeline named '" .. name .. "'. See action='list'."}} end
+if action == "open" then
+  project:SetCurrentTimeline(t)
+  local now = project:GetCurrentTimeline()
+  return {{ok = now ~= nil and now:GetName() == name, current = now and now:GetName()}}
+end
+if find(new_name) then return {{ok = false, error = "A timeline named '" .. new_name .. "' already exists."}} end
+if action == "rename" then
+  t:SetName(new_name)
+  return {{ok = t:GetName() == new_name, name = t:GetName(), current = cur and cur:GetName()}}
+end
+local copy = t:DuplicateTimeline(new_name)
+-- DuplicateTimeline makes the copy current (measured on 20.3); keep the user where they were
+if cur then project:SetCurrentTimeline(cur) end
+return {{ok = copy ~= nil, name = copy and copy:GetName(), current = project:GetCurrentTimeline():GetName()}}
+"""
+
+
+@_snippet
+def snippet_edit_markers(action: str = "list", frames: list[int] | None = None,
+                         seconds: list[float] | None = None, color: str | None = None,
+                         custom_data_prefix: str | None = None, name: str | None = None,
+                         note: str | None = None, new_color: str | None = None) -> str:
+    """List, delete or update markers on the current timeline.
+
+    Select markers by frames / seconds (offsets from the timeline start), color, or a
+    customData prefix; with no selector, list shows all and delete refuses.
+    """
+    action = _pick(action, ("list", "delete", "update"), "action")
+    c = _validate_color(color) if color else None
+    nc = _validate_color(new_color) if new_color else None
+    if action == "delete" and not (frames or seconds or color or custom_data_prefix):
+        raise ValueError("delete needs frames, seconds, color or custom_data_prefix (no 'delete everything')")
+    if action == "update" and not (frames or seconds):
+        raise ValueError("update needs frames or seconds")
+    if action == "update" and name is None and note is None and nc is None:
+        raise ValueError("update needs name, note or new_color")
+    sel_frames = [int(f) for f in frames or []]
+    sel_secs = [float(x) for x in seconds or []]
+    return f"""-- resolve-pilot: edit_markers
+{_TIMELINE_PREAMBLE}{_TIMELINE_FPS}local action, frames, secs, color, prefix = {to_lua(action)}, {to_lua(sel_frames)}, {to_lua(sel_secs)}, {to_lua(c)}, {to_lua(custom_data_prefix)}
+local new_name, new_note, new_color = {to_lua(name)}, {to_lua(note)}, {to_lua(nc)}
+local wanted = {{}}
+for _, f in ipairs(frames) do wanted[f] = true end
+for _, x in ipairs(secs) do wanted[math.floor(x * fps + 0.5)] = true end
+local any_frame = next(wanted) ~= nil
+local function picked(f, m)
+  if any_frame and not wanted[f] then return false end
+  if color and m.color ~= color then return false end
+  if prefix and (m.customData or ""):sub(1, #prefix) ~= prefix then return false end
+  return true
+end
+local rows = {{}}
+for f, m in pairs(timeline:GetMarkers() or {{}}) do
+  if f ~= "__flags" and picked(f, m) then
+    rows[#rows + 1] = {{frame = f, seconds = f / fps, color = m.color, name = m.name, note = m.note,
+      duration = m.duration, custom_data = m.customData}}
+  end
+end
+table.sort(rows, function(a, b) return a.frame < b.frame end)
+if action == "list" then return {{ok = true, timeline = timeline:GetName(), count = #rows, markers = rows}} end
+local changed = 0
+for _, r in ipairs(rows) do
+  if timeline:DeleteMarkerAtFrame(r.frame) then
+    if action == "update" then
+      local ok = timeline:AddMarker(r.frame, new_color or r.color, new_name or r.name, new_note or r.note,
+        r.duration or 1, r.custom_data or "")
+      if ok then changed = changed + 1 end
+    else
+      changed = changed + 1
+    end
+  end
+end
+local left = 0
+for f in pairs(timeline:GetMarkers() or {{}}) do if f ~= "__flags" then left = left + 1 end end
+return {{ok = changed == #rows, action = action, matched = #rows, changed = changed, markers_left = left,
+  markers = rows}}
+"""
+
+
+@_snippet
 def snippet_add_markers(markers: list[dict], replace_owned_prefix: str | None = None) -> str:
     """Add markers to the current timeline; positions in frames or seconds.
 
