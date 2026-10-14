@@ -599,3 +599,11 @@ def test_manage_timelines_and_edit_markers(live_bridge):
     assert gone["changed"] == 2 and gone["markers_left"] == 1
     with pytest.raises(ValueError, match="needs frames"):
         mcp_server.edit_markers("delete")
+
+
+@needs_luajit
+def test_back_to_back_requests_never_see_a_stale_busy_flag(live_bridge):
+    # The bridge used to write the reply before clearing "busy", so a client sending its
+    # next request right away could get BridgeBusy for a finished request.
+    for i in range(40):
+        assert bridge.exec_lua(f"return {i}").result == i

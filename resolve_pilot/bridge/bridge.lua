@@ -270,7 +270,7 @@ local function request_env(capture)
   })
 end
 
-local function handle(id, raw)
+local function handle(id, raw, before_reply)
   -- Compile without the header line so error line numbers match the caller's code.
   local code = raw:match("^%-%- rp%-id: [%w%-_]+\r?\n(.*)$") or raw
   local resp = { id = id }
@@ -325,6 +325,9 @@ local function handle(id, raw)
     text = encode({ id = id, ok = false, output = "",
       error = "The script ran, but its result could not be encoded: " .. tostring(text) })
   end
+  -- Clear "busy" before the reply lands: a client that reads the reply and sends its
+  -- next request at once must not see the previous request still running.
+  if before_reply then pcall(before_reply) end
   if not write_atomic(RESP, text) then
     log("[bridge] could not write " .. RESP)
   end
@@ -388,7 +391,7 @@ while true do
     if req then
       local id = req:match("^%-%- rp%-id: ([%w%-_]+)") or ""
       heartbeat(os.time())
-      local ok, err = pcall(handle, id, req)
+      local ok, err = pcall(handle, id, req, function() if not superseded() then heartbeat() end end)
       if not ok then
         log("[bridge] request failed: " .. tostring(err))
         pcall(write_atomic, RESP, encode({ id = id, ok = false, output = "",

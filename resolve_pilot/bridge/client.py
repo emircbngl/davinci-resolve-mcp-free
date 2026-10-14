@@ -287,6 +287,11 @@ def exec_lua(code: str, timeout: float = 30.0) -> BridgeResult:
     st = status()
     if not st.running:
         raise BridgeNotRunning(st.detail)
+    # A request that just finished can leave "busy" up for a moment; give it two seconds.
+    settle = time.monotonic() + 2.0
+    while st.busy and time.monotonic() < settle:
+        time.sleep(0.05)
+        st = status()
     if st.busy:
         raise BridgeBusy(
             f"Resolve is still running a previous request (started {st.busy_seconds:.0f}s ago). "
