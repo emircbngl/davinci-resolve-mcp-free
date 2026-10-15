@@ -439,6 +439,7 @@ local function serve(req)
   if not ok then
     local msg = safe_tostring(err)
     pcall(log, "[bridge] request failed: " .. msg)
+    pcall(function() if not superseded() then heartbeat() end end) -- not busy any more
     local written = pcall(function()
       write_atomic(RESP, (encode({ id = id, ok = false, output = "",
         error = "Internal bridge error: " .. msg })))

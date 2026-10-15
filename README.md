@@ -161,24 +161,27 @@ The test suite runs against a mock of Resolve's API, so this table records what 
 | `set_tracks` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | rename, lock, add |
 | `export_timeline` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | FCPXML, EDL, OTIO, DRT, AAF, CSV |
 | `apply_lut` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | that run found LUTs outside Resolve's LUT folder rejected; they are copied in since, not re-run yet |
-| `queue_render` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | known preset queued; an unknown one lists the presets |
+| `queue_render` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | known preset queued, an unknown one lists the presets; format / codec / size / range: a 3 s 1080×1920 H.264 MP4 |
 | `open_page` | Studio API · bridge · paste Lua · macOS UI | ✅ 20.3 Free, macOS (bridge) | all seven pages |
-| `run_lua` | bridge | ✅ 20.3 Free, macOS (bridge) | results, print output, errors; `return _G` does not hang |
+| `run_lua` | bridge | ✅ 20.3 Free, macOS (bridge) | results and errors; `return _G` does not hang. print capture and request globals were reworked since, not re-run yet |
 | `send_keystroke` | macOS UI | not yet | keystrokes reach Resolve only when it is frontmost |
 | `menu_pick` | macOS UI | ✅ 20.3 Free, macOS (macOS UI) | Workspace › Scripts › ResolvePilotBridge |
 | `add_subtitles` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | timelines starting at 0 and at 01:00:00:00 |
 | `add_title` | bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | overlay above V1, the edit left alone |
 | `checkpoint` | bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | save, list, restore, .drp backup |
 | `grade_clips` | bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | CDL grade, copy, reset; change measured on exported frames |
+| `make_format_version` | bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | 9:16 copy of a 16:9 edit, rendered filled edge to edge |
+| `manage_timelines` | bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) |  |
+| `edit_markers` | bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) |  |
 | `timeline_frames` | Studio API · bridge | ✅ 20.3 Free, macOS (bridge) | playhead and page put back |
 | `render_status` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) |  |
 | `screenshot_resolve` | macOS UI | ✅ 20.3 Free, macOS (macOS UI) |  |
 | `open_ai_feature` | macOS UI | not yet | Studio-only features in Free answer ok: false and leave no dialog open |
 
-Nothing has been run through Resolve Studio's Python API (the studio channel), on Windows or Linux, or on Resolve 21.x yet; the bridge's Resolve 21.1+ Free file access is only emulated in tests.
+No tool has been run through Resolve Studio's Python API (the studio channel), on Windows or Linux, or on Resolve 21.x yet (some API behaviour in resolve://traps was measured with Python on 21.0.4); the bridge's Resolve 21.1+ Free file access is only emulated in tests.
 <!-- verified-matrix:end -->
 
-Tools that don't touch Resolve (analysis, transcripts, frames from files, plans) behave the same everywhere; CI runs them on Linux and macOS. Reports from other Resolve versions, Studio, Windows and Linux are very welcome. Linux/Windows UI automation is not planned — the live bridge covers those platforms.
+Tools that don't touch Resolve (analysis, frames from files, plans) run in CI on Linux and macOS; transcription runs there only against a stand-in engine (mlx-whisper and faster-whisper are not exercised in CI). Reports from other Resolve versions, Studio, Windows and Linux are very welcome. Linux/Windows UI automation is not planned — the live bridge covers those platforms.
 
 ## License
 

@@ -1,7 +1,8 @@
 """Which tools have been run against a real DaVinci Resolve, where, and how.
 
 The test suite runs the bridge against a mock Resolve, so a green suite says
-nothing about how Resolve itself behaves. This ledger records what was run live:
+nothing about how Resolve itself behaves. This ledger records what the
+maintainers ran live (from their test notes; the changelog has the highlights):
 the Resolve version and edition, the OS, the channel that reached Resolve, and
 what the run covered. ``resolve://capabilities`` and the matrix in README.md are
 built from it. Add a tool to ``LIVE`` only after running it in Resolve, and put
@@ -33,7 +34,8 @@ def _r20(channel: str, scope: str = "") -> LiveCheck:
 LIVE: dict[str, LiveCheck] = {
     "resolve_pilot_status": _r20("bridge", "channel switches from manual to bridge"),
     "setup_bridge": _r20("bridge", "install into Workspace › Scripts, status"),
-    "run_lua": _r20("bridge", "results, print output, errors; `return _G` does not hang"),
+    "run_lua": _r20("bridge", "results and errors; `return _G` does not hang. print capture and "
+                              "request globals were reworked since, not re-run yet"),
     "get_resolve_state": _r20("bridge"),
     "import_timeline": _r20("bridge", "FCPXML from export_fcpxml; paths with spaces, # and non-ASCII"),
     "add_markers": _r20("bridge", "seconds and frames on a 24 fps timeline; a second marker on "
@@ -44,7 +46,11 @@ LIVE: dict[str, LiveCheck] = {
     "apply_lut": _r20("bridge", "that run found LUTs outside Resolve's LUT folder rejected; "
                             "they are copied in since, not re-run yet"),
     "grade_clips": _r20("bridge", "CDL grade, copy, reset; change measured on exported frames"),
-    "queue_render": _r20("bridge", "known preset queued; an unknown one lists the presets"),
+    "queue_render": _r20("bridge", "known preset queued, an unknown one lists the presets; "
+                                   "format / codec / size / range: a 3 s 1080×1920 H.264 MP4"),
+    "make_format_version": _r20("bridge", "9:16 copy of a 16:9 edit, rendered filled edge to edge"),
+    "manage_timelines": _r20("bridge"),
+    "edit_markers": _r20("bridge"),
     "render_status": _r20("bridge"),
     "open_page": _r20("bridge", "all seven pages"),
     "timeline_frames": _r20("bridge", "playhead and page put back"),
@@ -72,9 +78,10 @@ NOT_YET: dict[str, str] = {
     "open_ai_feature": "Studio-only features in Free answer ok: false and leave no dialog open",
 }
 
-UNTESTED = ("Nothing has been run through Resolve Studio's Python API (the studio channel), on "
-            "Windows or Linux, or on Resolve 21.x yet; the bridge's Resolve 21.1+ Free file "
-            "access is only emulated in tests.")
+UNTESTED = ("No tool has been run through Resolve Studio's Python API (the studio channel), on "
+            "Windows or Linux, or on Resolve 21.x yet (some API behaviour in resolve://traps was "
+            "measured with Python on 21.0.4); the bridge's Resolve 21.1+ Free file access is only "
+            "emulated in tests.")
 
 
 def entry(name: str) -> dict[str, Any] | None:
