@@ -387,12 +387,19 @@ def snippet_add_title(
     position: tuple[float, float] | None = None,
     color: tuple[float, float, float] | None = None,
     font: str | None = None,
+    style: str | None = None,
 ) -> str:
     """Overlay a Text+ title on the current timeline without touching other clips.
 
     InsertFusionTitleIntoTimeline is an INSERT edit on V1 (it splits and ripples the
     edit, measured on 20.3), so the title is built on a scratch timeline, wrapped in a
     compound clip and appended onto a free upper video track at start_seconds.
+
+    Text+ keeps its Style (default "Semibold") when only Font changes, and a family
+    without that style makes every render of the title fail ("Font Not Found: Heiti TC
+    Semibold", measured on 21.1.1 free). So font and style are checked against
+    Fusion's FontManager first, and a style the family really has is picked when none
+    is given.
     """
     if not text:
         raise ValueError("text must not be empty")
@@ -411,8 +418,8 @@ def snippet_add_title(
         if len(color) != 3 or any(not 0 <= c <= 1 for c in color):
             raise ValueError("color is [r, g, b], each 0-1")
         inputs.update(Red1=float(color[0]), Green1=float(color[1]), Blue1=float(color[2]))
-    if font:
-        inputs["Font"] = str(font)
+    if style and not font:
+        raise ValueError("style needs font (the family the style belongs to)")
     center = None
     if position is not None:
         if len(position) != 2 or any(not 0 <= v <= 1 for v in position):
@@ -421,6 +428,48 @@ def snippet_add_title(
     return f"""-- resolve-pilot: add_title
 {_TIMELINE_PREAMBLE}{_TIMELINE_FPS}{_TIMECODE_FN}local text, start_s, dur_s = {to_lua(text)}, {to_lua(float(start_seconds))}, {to_lua(float(duration_seconds))}
 local want_track, inputs, center = {to_lua(int(track) if track else None)}, {to_lua(inputs)}, {to_lua(center)}
+local want_font, want_style = {to_lua(font)}, {to_lua(style)}
+-- check font + style against what Fusion can load before building anything
+local font_style
+if want_font then
+  local fu = fusion or resolve:Fusion()
+  local fm = fu and fu.FontManager
+  local ok, fl = false, nil
+  if fm then ok, fl = pcall(function() return fm:GetFontList() end) end
+  if ok and type(fl) == "table" then
+    local styles = fl[want_font]
+    if not styles then
+      local lower, last, near = want_font:lower(), want_font:match("(%S+)$"), {{}}
+      for fam in pairs(fl) do
+        local f = fam:lower()
+        if f:find(lower, 1, true) or lower:find(f, 1, true) then near[#near + 1] = fam end
+      end
+      if #near == 0 and last then
+        for fam in pairs(fl) do if fam:match("(%S+)$") == last then near[#near + 1] = fam end end
+      end
+      table.sort(near)
+      return {{ok = false, error = "Fusion has no font family '" .. want_font .. "'", similar_fonts = near}}
+    end
+    local names = {{}}
+    for s in pairs(styles) do names[#names + 1] = s end
+    table.sort(names)
+    if want_style then
+      if not styles[want_style] then
+        return {{ok = false, error = "font '" .. want_font .. "' has no style '" .. want_style .. "'",
+          styles = names}}
+      end
+      font_style = want_style
+    else
+      for _, s in ipairs({{"Regular", "Medium", "Book", "Normal", "W3", "W4", "Semibold", "Demibold",
+          "Bold", "Light"}}) do
+        if not font_style and styles[s] then font_style = s end
+      end
+      font_style = font_style or names[1]
+    end
+  else
+    font_style = want_style -- no FontManager to ask: trust the caller
+  end
+end
 local mp = project:GetMediaPool()
 local target = timeline
 local tstart = target:GetStartFrame()
@@ -449,8 +498,12 @@ while total < need and #items < 120 do
   if tool then
     for k, v in pairs(inputs) do tool:SetInput(k, v) end
     if center then tool:SetInput("Center", center) end
+    -- Font first: Style is read within the current family
+    if want_font then tool:SetInput("Font", want_font) end
+    if font_style then tool:SetInput("Style", font_style) end
     if #items == 0 then
       for k in pairs(inputs) do set_inputs[k] = tool:GetInput(k) end
+      if want_font then set_inputs.Font, set_inputs.Style = tool:GetInput("Font"), tool:GetInput("Style") end
       if center then
         local c = tool:GetInput("Center")
         set_inputs.Center = type(c) == "table" and {{c[1], c[2]}} or c
