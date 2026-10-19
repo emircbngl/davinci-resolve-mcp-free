@@ -505,9 +505,31 @@ def test_add_title_overlays_without_touching_the_edit(live_bridge):
 
 def test_add_title_rejects_v1_and_bad_values():
     for kwargs, msg in (({"track": 1}, "track must be 2"), ({"position": (2, 0)}, "position"),
-                        ({"color": (1, 1)}, "color"), ({"size": 2}, "size")):
+                        ({"color": (1, 1)}, "color"), ({"size": 2}, "size"),
+                        ({"style": "Medium"}, "style needs font")):
         with pytest.raises(ValueError, match=msg):
             lua.snippet_add_title("x", 0, 1, **kwargs)
+
+
+@needs_luajit
+@pytest.mark.parametrize("live_bridge", [None, "21.1"], indirect=True)
+def test_add_title_font_gets_a_style_the_family_has(live_bridge):
+    # Text+ keeps its "Semibold" style when only Font changes. Heiti TC has no Semibold,
+    # so every render of such a title failed: "Font Not Found: Heiti TC Semibold" (21.1.1).
+    from resolve_pilot import mcp_server
+    out = mcp_server.add_title("第一天 雪梨", start_seconds=0.5, duration_seconds=2, font="Heiti TC")
+    assert out["ok"] and out["inputs"]["StyledText"] == "第一天 雪梨"
+    assert out["inputs"]["Font"] == "Heiti TC" and out["inputs"]["Style"] == "Medium"
+    out = mcp_server.add_title("W6", start_seconds=3, duration_seconds=1, font="Hiragino Sans", style="W6")
+    assert out["ok"] and out["inputs"]["Style"] == "W6"
+    # Refused before anything is built: no scratch timeline, no title left behind.
+    before = bridge.exec_lua("return rp.project():GetTimelineCount()").result
+    out = mcp_server.add_title("x", start_seconds=5, duration_seconds=1, font="Heiti TC", style="Semibold")
+    assert out["ok"] is False and out["styles"] == ["Light", "Medium"]
+    out = mcp_server.add_title("x", start_seconds=5, duration_seconds=1, font="PingFang TC")
+    assert out["ok"] is False and "PingFang TC" in out["error"]
+    assert out["similar_fonts"] == ["Heiti TC", "Lantinghei TC"]
+    assert bridge.exec_lua("return rp.project():GetTimelineCount()").result == before
 
 
 @needs_luajit

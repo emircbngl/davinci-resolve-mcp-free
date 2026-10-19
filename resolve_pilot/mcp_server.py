@@ -1730,7 +1730,13 @@ def add_title(
     position: Annotated[list[float] | None, Field(min_length=2, max_length=2, description=(
         "[x, y] in 0-1, origin bottom-left; [0.5, 0.15] = lower third. Default centre."))] = None,
     color: Annotated[list[float] | None, Field(min_length=3, max_length=3, description="[r, g, b], each 0-1.")] = None,
-    font: Annotated[str | None, Field(description="Font family name as Resolve lists it.")] = None,
+    font: Annotated[str | None, Field(description=(
+        "Font family name as Fusion lists it, e.g. 'Heiti TC' for Traditional Chinese on macOS. "
+        "The default font has no CJK glyphs, so set one for Chinese/Japanese/Korean text. "
+        "An unknown family is refused with similar_fonts."))] = None,
+    style: Annotated[str | None, Field(description=(
+        "Style of that family, e.g. 'Medium' or 'W3'. Default: one the family has "
+        "(Regular, Medium, ... in that order). An unknown style is refused with the family's styles."))] = None,
     channel: Channel = "auto",
 ) -> dict[str, Any]:
     """Overlay a Text+ title on the current timeline without moving or cutting anything else.
@@ -1743,7 +1749,7 @@ def add_title(
     return control.perform(
         lua_lib.snippet_add_title(text, start_seconds, duration_seconds, track, size,
                                   tuple(position) if position else None,
-                                  tuple(color) if color else None, font),
+                                  tuple(color) if color else None, font, style),
         None, channel, timeout=60.0)
 
 

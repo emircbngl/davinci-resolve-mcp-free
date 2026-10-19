@@ -200,6 +200,23 @@ TRAPS: tuple[Trap, ...] = (
         lua_methods=("InsertFusionTitleIntoTimeline",),
     ),
     Trap(
+        id="textplus-font-keeps-style",
+        title="Text+ keeps its Style when only Font changes",
+        symptom="A title with a new font looks fine in the timeline, but every render fails with "
+                "\"The Fusion composition ... could not be processed\"; ResolveDebug.txt says "
+                "\"Font Not Found: Heiti TC Semibold\".",
+        cause="Text+ starts as Open Sans Semibold. Setting Font alone leaves Style at Semibold, and "
+              "a family without that style (Heiti TC has only Light and Medium) cannot be loaded. "
+              "The default font has no CJK glyphs, so Chinese / Japanese / Korean titles need a "
+              "font. Some system fonts (PingFang on macOS) are not visible to Fusion at all.",
+        handling="add_title checks font and style against Fusion's FontManager:GetFontList() "
+                 "before building anything, picks a style the family has when none is given, and "
+                 "refuses an unknown family (with similar_fonts) or style (with the family's styles).",
+        source="measured",
+        measured_on="Resolve 21.1.1 Free (macOS)",
+        tools=("add_title", "run_lua"),
+    ),
+    Trap(
         id="deleteclips-needs-edit-page",
         title="DeleteClips only works on the Edit page",
         symptom="DeleteClips returns false or deletes nothing on other pages.",
