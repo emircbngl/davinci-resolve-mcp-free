@@ -715,17 +715,23 @@ def test_heartbeat_formats_and_a_pid_this_server_cannot_see(monkeypatch):
     _heartbeat(f"{now} 0.2.0 tok-old busy {now - 5}")  # 0.2.0 bridges: no pid
     st = bridge.status()
     assert st.running and st.busy
+    # A pid this server has seen alive and now looks dead: Resolve is gone.
+    monkeypatch.setattr(client, "_pid_alive", lambda pid: True)
+    _heartbeat(f"{now} 0.2.0 tok-crash busy {now - 5} pid=4242")
+    assert bridge.status().running
     monkeypatch.setattr(client, "_pid_alive", lambda pid: False)
-    _heartbeat(f"{now} 0.2.0 tok-dead busy {now - 5} pid=4242")
     st = bridge.status()
     assert not st.running and "gone" in st.detail
-    # Resolve in another PID namespace (Flatpak, container): a fresh heartbeat wins ...
-    _heartbeat(f"{now} 0.2.0 tok-ns pid=4242")
-    assert bridge.status().running
-    # ... and that bridge's pid is ignored from then on, also while it is busy.
+    with pytest.raises(bridge.BridgeNotRunning):
+        bridge.exec_lua("return 1", timeout=0.3)
+    # Resolve in another PID namespace (Flatpak, container): its pid always looks dead.
+    # A server that first sees it mid-request (another client's) must not call it gone ...
     _heartbeat(f"{now} 0.2.0 tok-ns busy {now - 5} pid=4242")
     st = bridge.status()
     assert st.running and st.busy
+    # ... nor once it is idle again: the fresh heartbeat counts.
+    _heartbeat(f"{now} 0.2.0 tok-ns pid=4242")
+    assert bridge.status().running
 
 
 def test_a_request_running_past_the_ceiling_is_reported_as_possibly_stuck(monkeypatch):

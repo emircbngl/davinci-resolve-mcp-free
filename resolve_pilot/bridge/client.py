@@ -197,10 +197,11 @@ def _pid_alive(pid: int) -> bool | None:
         try:
             import ctypes
 
-            k = ctypes.windll.kernel32
+            # use_last_error: a plain GetLastError() call can see a later call's error.
+            k = ctypes.WinDLL("kernel32", use_last_error=True)
             handle = k.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
             if not handle:
-                return k.GetLastError() == 5  # access denied: it exists
+                return ctypes.get_last_error() == 5  # access denied: it exists
             code = ctypes.c_ulong()
             ok = k.GetExitCodeProcess(handle, ctypes.byref(code))
             k.CloseHandle(handle)
@@ -230,11 +231,12 @@ def _read_heartbeat(beat: Path) -> tuple[list[str], float] | None:
     return None
 
 
-# Bridges (by token) whose process id this server cannot check: the id looked dead
-# while the heartbeat was fresh, which happens when Resolve and this server run in
-# different PID namespaces (a Flatpak or container sharing the home folder). Their
-# process id is ignored from then on and the heartbeat alone counts.
-_unverifiable: set[str] = set()
+# Bridges (by token) whose process id this server has seen alive. Only for those does
+# an id that looks dead mean Resolve is gone. When Resolve runs in another PID namespace
+# (a Flatpak or container sharing the home folder) its id always looks dead from here,
+# even the first time this server sees it, mid-request; such a bridge is judged by its
+# heartbeat alone.
+_seen_alive: set[str] = set()
 
 
 def _parse_heartbeat(fields: list[str]) -> tuple[str, int, int | None]:
@@ -270,7 +272,11 @@ def status() -> BridgeStatus:
     age = round(max(0.0, now - epoch), 1)
     version = fields[1] if len(fields) > 1 else None
     token, pid, busy_at = _parse_heartbeat(fields)
-    alive = _pid_alive(pid) if pid > 0 and token not in _unverifiable else None
+    alive = _pid_alive(pid) if pid > 0 else None
+    if alive:
+        _seen_alive.add(token)
+    elif alive is False and token not in _seen_alive:
+        alive = None  # a dead process, or one this server cannot see: can't tell
     gone = BridgeStatus(
         False, str(d), age, version,
         "The bridge's Resolve process is gone (Resolve quit or crashed). " + START_HINT,
@@ -313,8 +319,6 @@ def status() -> BridgeStatus:
             f"Bridge heartbeat is {age:.0f}s old: it stopped, or Resolve is busy. {MODAL_HINT} "
             + START_HINT,
         )
-    if alive is False:
-        _unverifiable.add(token)  # a fresh heartbeat outranks a process id we cannot see
     detail = "Bridge is running."
     if version != __version__:
         detail += (
