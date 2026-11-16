@@ -122,3 +122,26 @@ test fails with `KeyError: 'warnings'` in both bridge modes without the follow-u
 
 Not run here: the contributor's live check on Resolve 21.1.1 Free. On Emir's 20.3 Free, a CJK
 title still needs a live render to confirm.
+
+# Issue #4: the bridge does not run on Resolve 21.1.2 Free
+
+Reported (Mitch, issue #4, macOS Apple Silicon): on 21.1.2 Free the Scripts-menu entry does
+nothing, `dofile` is nil and the pasted script stops with "neither io nor ffi". On 21.1.1 Free
+the Console `dofile` still worked (PR #3's author). Every place that says "written for 21.1, not
+yet tried" now says what was reported, per patch release, and points at 20.3.x.
+
+- [x] `resolve_pilot_status` (manual channel) and `setup_bridge(install)`: on 21.1.2+ Free say the
+      bridge cannot start there and what still works; 21.1.0-21.1.1 keep the console_command
+      note. Needs the edition (Free vs Studio app bundle) and a patch-level version compare
+- [x] `resolve://capabilities` edition note, the `resolve-21-1-free-lua-sandbox` trap, the
+      `verified.UNTESTED` note (regenerate the README matrix), README intro, CHANGELOG
+- [x] Tests: version compare with patch; status / setup_bridge notes for 21.1.1 vs 21.1.2 Free
+      vs 21.1.2 Studio; red without the change
+- [x] Full pytest + ruff; fast-forward local main; draft the issue reply (Emir approves posting)
+
+## Review
+
+321 passed, ruff clean. The new status test fails when the 21.1.2 branch is removed (the
+install suggestion comes back on 21.1.2 Free). Every 21.1 statement is a user report, not a
+maintainer measurement: nobody here has a 21.1 install. Whether pasted Lua (the manual
+channel) still works on 21.1.2 Free is unknown, so the notes do not claim it.

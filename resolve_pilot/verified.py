@@ -78,10 +78,11 @@ NOT_YET: dict[str, str] = {
     "open_ai_feature": "Studio-only features in Free answer ok: false and leave no dialog open",
 }
 
-UNTESTED = ("No tool has been run through Resolve Studio's Python API (the studio channel), on "
-            "Windows or Linux, or on Resolve 21.x yet (some API behaviour in resolve://traps was "
-            "measured with Python on 21.0.4); the bridge's Resolve 21.1+ Free file access is only "
-            "emulated in tests.")
+UNTESTED = ("No tool has been run by the maintainers through Resolve Studio's Python API (the "
+            "studio channel), on Windows or Linux, or on Resolve 21.x yet (some API behaviour in "
+            "resolve://traps was measured with Python on 21.0.4). Users report the bridge "
+            "starting from the Console on 21.1.1 Free and not starting at all on 21.1.2 Free, "
+            "whose Lua has no dofile, io or ffi: use Resolve 20.3.x Free for live control.")
 
 
 def entry(name: str) -> dict[str, Any] | None:

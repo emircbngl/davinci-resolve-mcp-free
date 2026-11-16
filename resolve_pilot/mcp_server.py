@@ -287,23 +287,54 @@ _MAC_RESOLVE_APPS = (
 )
 
 
-def _resolve_app_version() -> str | None:
-    """Installed Resolve version from the app bundle (macOS); None elsewhere or if unknown."""
+def _resolve_app() -> tuple[str | None, bool]:
+    """Installed Resolve version and whether it is Studio, from the app bundle (macOS).
+
+    (None, False) elsewhere or if unknown; with both editions installed, Free is reported.
+    """
     if platform.system() != "Darwin":
-        return None
+        return None, False
     import plistlib
     for app in _MAC_RESOLVE_APPS:
         try:
             with open(app / "Contents" / "Info.plist", "rb") as f:
-                return str(plistlib.load(f).get("CFBundleShortVersionString") or "") or None
+                found = str(plistlib.load(f).get("CFBundleShortVersionString") or "") or None
+            return found, "Studio" in app.name
         except (OSError, plistlib.InvalidFileException):
             continue
-    return None
+    return None, False
 
 
-def _version_at_least(text: str | None, major: int, minor: int) -> bool:
-    parts = [int(p) for p in (text or "").split(".")[:2] if p.isdigit()]
-    return len(parts) == 2 and (parts[0], parts[1]) >= (major, minor)
+def _version_at_least(text: str | None, major: int, minor: int, patch: int = 0) -> bool:
+    nums: list[int] = []
+    for part in (text or "").split(".")[:3]:
+        if not part.isdigit():
+            break
+        nums.append(int(part))
+    if len(nums) < 2:
+        return False
+    return tuple(nums + [0] * (3 - len(nums))) >= (major, minor, patch)
+
+
+def _bridge_on_this_resolve(resolve_version: str | None, studio: bool) -> tuple[bool, str | None]:
+    """(whether the bridge can start, what to tell the user) for the installed Resolve.
+
+    Free 21.1 restricts Console Lua, and each patch release so far took more away. These
+    are user reports, not maintainer measurements (resolve://traps).
+    """
+    if studio or not _version_at_least(resolve_version, 21, 1):
+        return True, None
+    if _version_at_least(resolve_version, 21, 1, 2):
+        return False, (
+            f"Resolve {resolve_version} Free: the bridge cannot start. From 21.1.2 the Free "
+            "Console's Lua has no dofile, io or ffi, so nothing run there can reach the bridge's "
+            "folder (reported on 21.1.2). For live control use Resolve 20.3.x Free, where the "
+            "bridge is verified. On this version export_fcpxml still builds timelines to import "
+            "with File > Import > Timeline, and the analysis and frame tools work.")
+    return True, (
+        f"Resolve {resolve_version} Free: Workspace > Scripts entries do nothing from 21.1. Have "
+        "the user paste setup_bridge's console_command into Workspace > Console and press Enter "
+        "(reported working on 21.1.1).")
 
 
 @tool(READ, title="Status and capabilities")
@@ -323,23 +354,21 @@ def resolve_pilot_status() -> dict[str, Any]:
     except PackageNotFoundError:
         sdk = None
 
-    resolve_version = _resolve_app_version()
+    resolve_version, studio_app = _resolve_app()
     next_steps: list[str] = []
     if not has_ffmpeg:
         next_steps.append("Install ffmpeg (macOS: brew install ffmpeg, Windows: winget install ffmpeg, "
                           "Linux: apt install ffmpeg); media analysis and frames need it.")
     if channel == "manual":
-        next_steps.append(
-            "No live connection to Resolve. For hands-free control (works in Resolve Free): call "
-            "setup_bridge(action='install'), then ask the user to click Workspace > Scripts > "
-            "ResolvePilotBridge in Resolve. Until then Resolve actions return Lua for the user to paste."
-        )
-        if _version_at_least(resolve_version, 21, 1):
+        can_start, note = _bridge_on_this_resolve(resolve_version, studio_app)
+        if can_start:
             next_steps.append(
-                f"Resolve {resolve_version}: from 21.1 the Free edition limits scripts started from "
-                "the Workspace > Scripts menu. If the menu entry does nothing, have the user paste "
-                "setup_bridge's console_command into Workspace > Console (Lua tab)."
-            )
+                "No live connection to Resolve. For hands-free control (works in Resolve Free): call "
+                "setup_bridge(action='install'), then ask the user to click Workspace > Scripts > "
+                "ResolvePilotBridge in Resolve. Until then Resolve actions return Lua for the user "
+                "to paste.")
+        if note:
+            next_steps.append(note)
     else:
         next_steps.append("Call get_resolve_state to see the open project and timeline.")
     if not engines:
@@ -414,8 +443,8 @@ def setup_bridge(
         return {
             "lua_code": bridge.render_script(idle_minutes),
             "instructions": (
-                "In DaVinci Resolve: Workspace > Console, choose the Lua tab, paste the whole "
-                "script and press Enter. It prints '[bridge] ... ready' and keeps running in "
+                "In DaVinci Resolve: Workspace > Console, choose the Lua tab (21.1 opens straight "
+                "at a Lua> prompt), paste the whole script and press Enter. It prints '[bridge] ... ready' and keeps running in "
                 "the background. Keep Resolve open."
             ),
         }
@@ -427,10 +456,15 @@ def setup_bridge(
             "In DaVinci Resolve choose Workspace > Scripts > ResolvePilotBridge (it may sit under "
             "a 'Utility' submenu; restart Resolve if it is not listed yet). If the menu entry does "
             "nothing (Resolve 21.1+ Free limits scripts run from that menu), open Workspace > "
-            "Console, pick the Lua tab, paste console_command and press Enter. Then call "
-            "setup_bridge(action='status') to confirm it is running."
+            "Console, pick the Lua tab (21.1 opens straight at a Lua> prompt), paste "
+            "console_command and press Enter. Then call setup_bridge(action='status') to confirm "
+            "it is running."
         ),
     }
+    can_start, note = _bridge_on_this_resolve(*_resolve_app())
+    if note:
+        out["bridge_can_start"] = can_start
+        out["resolve_note"] = note
     others = sorted(p.name for p in path.parent.glob("*.lua")
                     if p != path and "bridge" in p.name.lower() and "pilot" in p.name.lower())
     if others:
@@ -2199,10 +2233,13 @@ _EDITION_NOTES = {
     "studio": "The Python scripting API (studio channel) is used first; run_lua still needs the "
               "bridge.",
     "resolve_21_1_free": "From Resolve 21.1, Python scripting (and Resolve's own MCP server) are "
-                         "Studio-only, and Free's Lua loses io, os.execute, package and debug. The "
-                         "bridge is written for that (ffi file access) but not yet tried on a 21.1 "
-                         "install. If Workspace > Scripts > ResolvePilotBridge does nothing, paste "
-                         "setup_bridge's console_command into Workspace > Console (Lua tab).",
+                         "Studio-only, Free's Console Lua loses io, os.execute, package and debug, "
+                         "and Workspace > Scripts entries do nothing. Reported per patch release: "
+                         "on 21.1.1 Free the bridge starts when setup_bridge's console_command "
+                         "(dofile) is pasted into Workspace > Console; on 21.1.2 Free dofile, io "
+                         "and ffi are gone too and the bridge cannot start. Use Resolve 20.3.x "
+                         "Free for live control (the bridge is verified there); FCPXML export and "
+                         "the analysis tools work on any version.",
     "verified": "Bridge tools verified live on Resolve 20.3 Free (macOS); see resolve://traps for "
                 "what each measurement turned up.",
 }

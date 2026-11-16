@@ -118,6 +118,38 @@ def test_version_compare_for_the_21_1_note():
     assert mcp_server._version_at_least("22.0", 21, 1)
     assert not mcp_server._version_at_least("20.3.0", 21, 1)
     assert not mcp_server._version_at_least(None, 21, 1)
+    assert mcp_server._version_at_least("21.1.2", 21, 1, 2)
+    assert mcp_server._version_at_least("21.2", 21, 1, 2)
+    assert not mcp_server._version_at_least("21.1.1", 21, 1, 2)
+    assert not mcp_server._version_at_least("21.1", 21, 1, 2)
+
+
+def test_the_bridge_note_follows_the_reported_21_1_patch_releases(monkeypatch):
+    # Issue #4: on 21.1.2 Free the Console has no dofile, io or ffi, so the bridge cannot
+    # start; on 21.1.1 Free pasting console_command was reported to work.
+    from resolve_pilot import bridge, control, mcp_server
+    monkeypatch.setattr(control, "studio_status", lambda refresh=False: (False, "Free edition"))
+    assert not bridge.status().running  # the autouse fixture gives an empty bridge folder
+
+    def steps(version, studio=False):
+        monkeypatch.setattr(mcp_server, "_resolve_app", lambda: (version, studio))
+        return mcp_server.resolve_pilot_status()["next_steps"], mcp_server.setup_bridge("install")
+
+    told, setup = steps("21.1.2")
+    assert not any("setup_bridge(action='install')" in s for s in told)
+    assert any("cannot start" in s and "20.3" in s for s in told)
+    assert setup["bridge_can_start"] is False and "20.3" in setup["resolve_note"]
+
+    told, setup = steps("21.1.1")
+    assert any("setup_bridge(action='install')" in s for s in told)
+    assert any("console_command" in s and "cannot" not in s for s in told)
+    assert setup["bridge_can_start"] is True and "console_command" in setup["resolve_note"]
+
+    for version, studio in (("20.3.3", False), ("21.1.2", True), (None, False)):
+        told, setup = steps(version, studio)
+        assert any("setup_bridge(action='install')" in s for s in told)
+        assert not any("21.1" in s for s in told)
+        assert "resolve_note" not in setup and "bridge_can_start" not in setup
 
 
 def test_explicit_paths_are_not_overwritten_without_consent(tmp_path):

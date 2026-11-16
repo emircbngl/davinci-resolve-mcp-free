@@ -151,12 +151,17 @@ TRAPS: tuple[Trap, ...] = (
     ),
     Trap(
         id="resolve-21-1-free-lua-sandbox",
-        title="Resolve 21.1 Free removes io, os.execute, package and debug from Lua",
-        symptom="Scripts that read or write files, or require modules, fail on 21.1 Free; the "
-                "Workspace > Scripts entry may do nothing.",
-        cause="Resolve 21.1 restricts scripting in the Free edition.",
-        handling="The bridge falls back to LuaJIT's ffi for its files when io is missing; "
-                 "setup_bridge returns a one-line console_command to paste into the Console.",
+        title="Resolve 21.1 Free restricts Console Lua; from 21.1.2 the bridge cannot start",
+        symptom="On 21.1 Free, scripts that read or write files or require modules fail and "
+                "Workspace > Scripts entries do nothing. On 21.1.2 Free, dofile is nil too and "
+                "the pasted bridge stops with \"this Lua has neither io nor ffi\".",
+        cause="Resolve 21.1 restricts scripting in the Free edition, and 21.1.2 tightened it "
+              "again: io, os.execute, package and debug are gone from 21.1; dofile and ffi from "
+              "21.1.2 (reported on 21.1.1 and 21.1.2 Free, macOS).",
+        handling="The bridge falls back to LuaJIT's ffi for its files when io is missing, and "
+                 "setup_bridge returns a console_command (dofile) to paste into the Console; that "
+                 "is reported working on 21.1.1. On 21.1.2+ Free resolve_pilot_status and "
+                 "setup_bridge say the bridge cannot start and point to Resolve 20.3.x Free.",
         source="reported",
         measured_on="",
         tools=("setup_bridge", "run_lua", "resolve_pilot_status"),

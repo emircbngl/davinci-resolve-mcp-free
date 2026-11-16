@@ -2,7 +2,7 @@
 
 **Claude-driven video editing that runs in [DaVinci Resolve Free](https://www.blackmagicdesign.com/products/davinciresolve) — the no-cost edition that Blackmagic ships at $0.** No Studio license required, no API key required.
 
-> ℹ️ **What "free" means here:** DaVinci Resolve ships in two editions — **Free** (no cost) and **Studio** (~$295 one-time license). Studio exposes a Python scripting API for automation; Free does not — and since **Resolve 21.1, Python scripting (and Resolve's own MCP server) are Studio-only**, so MCP servers that drive Free through Python stop working there. This project gets Claude-driven editing working in **Resolve Free too**, through a Lua bridge that runs inside Resolve (verified on 20.3; written for 21.1's restricted Lua, not yet tried on a 21.1 install) plus FCPXML and UI automation:
+> ℹ️ **What "free" means here:** DaVinci Resolve ships in two editions — **Free** (no cost) and **Studio** (~$295 one-time license). Studio exposes a Python scripting API for automation; Free does not — and since **Resolve 21.1, Python scripting (and Resolve's own MCP server) are Studio-only**, so MCP servers that drive Free through Python stop working there. This project gets Claude-driven editing working in **Resolve Free too**, through a Lua bridge that runs inside Resolve (verified on 20.3 Free; reported working from the Console on 21.1.1 Free, but **it cannot start on 21.1.2+ Free**, whose Console Lua has no `dofile`, `io` or `ffi` — use **Resolve 20.3.x Free** for live control) plus FCPXML and UI automation:
 
 | Channel | What it does | Free | Studio |
 |---|---|:---:|:---:|
@@ -178,7 +178,7 @@ The test suite runs against a mock of Resolve's API, so this table records what 
 | `screenshot_resolve` | macOS UI | ✅ 20.3 Free, macOS (macOS UI) |  |
 | `open_ai_feature` | macOS UI | not yet | Studio-only features in Free answer ok: false and leave no dialog open |
 
-No tool has been run through Resolve Studio's Python API (the studio channel), on Windows or Linux, or on Resolve 21.x yet (some API behaviour in resolve://traps was measured with Python on 21.0.4); the bridge's Resolve 21.1+ Free file access is only emulated in tests.
+No tool has been run by the maintainers through Resolve Studio's Python API (the studio channel), on Windows or Linux, or on Resolve 21.x yet (some API behaviour in resolve://traps was measured with Python on 21.0.4). Users report the bridge starting from the Console on 21.1.1 Free and not starting at all on 21.1.2 Free, whose Lua has no dofile, io or ffi: use Resolve 20.3.x Free for live control.
 <!-- verified-matrix:end -->
 
 Tools that don't touch Resolve (analysis, frames from files, plans) run in CI on Linux and macOS; transcription runs there only against a stand-in engine (mlx-whisper and faster-whisper are not exercised in CI). Reports from other Resolve versions, Studio, Windows and Linux are very welcome. Linux/Windows UI automation is not planned — the live bridge covers those platforms.
