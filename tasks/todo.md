@@ -100,3 +100,15 @@ Not fixed, recorded:
   reads as "busy, possibly stuck" instead of gone; only a new bridge clears it.
 - Windows: a heartbeat rename that collides with the server reading the file can drop the
   "busy" marker (older behaviour; the new 10 Hz polling makes it more likely).
+
+# PR #3: add_title picks a font style the family has (dennisiver, 6bcac28)
+
+Text+ keeps "Semibold" when only Font changes; a family without it fails every render. The PR
+checks font and style against Fusion's FontManager before building anything.
+
+- [ ] Merge the PR head as is (`--no-ff`, so GitHub sees the contributor's commit as merged)
+      and resolve conflicts with the bridge/export work merged above
+- [ ] Full pytest + ruff on the merged tree
+- [ ] Follow-up: when FontManager cannot be asked, say so in `warnings` instead of leaving
+      the Semibold trap silently open; test red without it
+- [ ] Fast-forward local main; draft the PR reply for Emir (nothing posted or pushed here)
