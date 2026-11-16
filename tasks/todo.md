@@ -66,3 +66,37 @@ discovery of the installed script on each OS, Resolve's import of the connected-
 These need a manual check on a real install (Free and Studio). The faster-whisper engine was
 installed and reached model loading, but the model download is blocked in this sandbox, so its
 transcription output is untested.
+
+# Merge the pending `claude/nifty-curie-hiir2l` work (5 commits on top of 64ec2f2)
+
+The branch was pushed on 2026-10-15 without a PR: bridge hardening (locks, PID-aware heartbeat,
+sandboxed request globals, result caps), plan/export safety (file locks, no silent overwrite),
+detect_beats fixes, the verified-live ledger (`verified.py`) and trimmed tool schemas.
+
+- [x] Fast-forward this worktree onto the branch (no conflicts: it sits on main)
+- [x] Review the diff: bridge/locking independently, the rest here
+- [x] pytest + ruff on the merged tree (mcp 2.x locally; CI covers 1.x)
+- [x] Fix what the review confirms, each fix with a test that fails without it
+- [x] Fast-forward local main; nothing pushed (pushing waits for Emir and `github-push`)
+
+## Review
+
+Merged tree: 316 passed (284 before the branch), ruff clean; Python 3.13, mcp 2.3. mcp 1.x was
+not run locally.
+
+Fixed (reproduced first):
+- A bridge in another PID namespace (Flatpak, container) was reported "gone" when this server
+  first saw it mid-request: its pid always looks dead from here, and the server only learned to
+  ignore it from an idle heartbeat. Now a dead-looking pid counts only for a bridge whose pid
+  this server has seen alive. The updated heartbeat test fails on the branch's code
+  (`running=False`) and passes with the fix. Trade-off: if Resolve crashes mid-request and the
+  server starts only afterwards, the dead bridge reads as busy for up to 15 minutes, as before
+  the branch.
+- Windows `_pid_alive` read `GetLastError()` without `use_last_error`, so the access-denied
+  answer could be lost. Not run on Windows.
+
+Not fixed, recorded:
+- PID reuse: if Resolve dies mid-request and an unrelated process later gets its pid, the bridge
+  reads as "busy, possibly stuck" instead of gone; only a new bridge clears it.
+- Windows: a heartbeat rename that collides with the server reading the file can drop the
+  "busy" marker (older behaviour; the new 10 Hz polling makes it more likely).
