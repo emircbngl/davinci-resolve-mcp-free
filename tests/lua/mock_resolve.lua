@@ -471,6 +471,23 @@ resolve = {
   OpenPage = function(self, page) self.page = page; return true end,
 }
 
+-- Fusion's FontManager: family -> {style -> file}, as measured on 21.1.1 free (macOS).
+fusion = {
+  FontManager = {
+    GetFontList = function()
+      return {
+        ["Open Sans"] = { Regular = "", Semibold = "", Bold = "" },
+        ["Heiti TC"] = { Light = "/System/Library/Fonts/STHeiti Light.ttc",
+          Medium = "/System/Library/Fonts/STHeiti Medium.ttc" },
+        ["Heiti SC"] = { Light = "/System/Library/Fonts/STHeiti Light.ttc",
+          Medium = "/System/Library/Fonts/STHeiti Medium.ttc" },
+        ["Lantinghei TC"] = { Demibold = "/x/Lantinghei.ttc", Heavy = "/x/Lantinghei.ttc" },
+        ["Hiragino Sans"] = { W3 = "/x/W3.ttc", W6 = "/x/W6.ttc" },
+      }
+    end,
+  },
+}
+
 -- Test hook: lets tests reach the mock's internals through the bridge.
 mock = {
   project = project,
@@ -515,7 +532,8 @@ function Timeline:InsertFusionTitleIntoTimeline(name)
     end
   end
   for _, it in ipairs(out) do if it.start >= at then it.start = it.start + len end end
-  local tool = { inputs = { StyledText = "Title", Size = 0.08, Center = { 0.5, 0.5 } } }
+  local tool = { inputs = { StyledText = "Title", Size = 0.08, Center = { 0.5, 0.5 },
+    Font = "Open Sans", Style = "Semibold" } }
   function tool:SetInput(k, v) self.inputs[k] = v; return true end
   function tool:GetInput(k) return self.inputs[k] end
   local comp = { FindTool = function(_, n) if n == "Template" then return tool end end,

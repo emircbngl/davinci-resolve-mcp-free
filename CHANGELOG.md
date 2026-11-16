@@ -28,6 +28,7 @@ Verified live on Resolve 20.3 (Free, macOS): screenshot_resolve, grab_frames, sc
 - `resolve_pilot_status` reports `see_footage` and `resolve_screenshots` capabilities.
 
 ### Fixed
+- `add_title` with a `font` no longer produces a title that fails every render. Text+ kept its default "Semibold" style when only the font changed, and a family without that style cannot be loaded ("Font Not Found: Heiti TC Semibold"). The font and the new `style` parameter are now checked against Fusion's `FontManager` before anything is built: with no style, one the family has is picked (Regular, Medium, …); an unknown family is refused with `similar_fonts`, an unknown style with the family's `styles`. Verified live on Resolve 21.1.1 Free (macOS): Traditional Chinese titles in Heiti TC, with punctuation and line breaks, render correctly. New trap: `textplus-font-keeps-style`.
 - macOS UI automation no longer types or clicks into another app: `send_keystroke`, `menu_pick` and the page shortcuts act only after verifying Resolve is frontmost, keystrokes are scoped to Resolve's process, unknown modifier names are rejected (`opt` / `ctl` accepted) and menu labels with quotes are escaped. Dialog-opening AI features report `completed: false` plus the step the user still has to take.
 - `probe_media` can no longer hang forever on an unreadable file.
 
