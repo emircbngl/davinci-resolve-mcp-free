@@ -536,6 +536,21 @@ def test_add_title_font_gets_a_style_the_family_has(live_bridge):
 
 @needs_luajit
 @pytest.mark.parametrize("live_bridge", [None, "21.1"], indirect=True)
+def test_add_title_says_when_the_font_could_not_be_checked(live_bridge):
+    # Without a FontManager the font is set as given and Text+ keeps "Semibold": the
+    # trap above may still be open, so the title is built but the caller hears it.
+    from resolve_pilot import mcp_server
+    bridge.exec_lua("fusion.FontManager = nil")
+    out = mcp_server.add_title("x", start_seconds=0.5, duration_seconds=1, font="Heiti TC")
+    assert out["ok"] and out["inputs"]["Font"] == "Heiti TC" and out["inputs"]["Style"] == "Semibold"
+    assert len(out["warnings"]) == 1
+    assert "not checked" in out["warnings"][0] and "'Semibold'" in out["warnings"][0]
+    out = mcp_server.add_title("y", start_seconds=2, duration_seconds=1)  # no font, nothing to check
+    assert out["ok"] and "warnings" not in out
+
+
+@needs_luajit
+@pytest.mark.parametrize("live_bridge", [None, "21.1"], indirect=True)
 def test_checkpoint_save_list_restore_and_backup(live_bridge):
     from resolve_pilot import mcp_server
     saved = mcp_server.checkpoint("save", label="before cut")

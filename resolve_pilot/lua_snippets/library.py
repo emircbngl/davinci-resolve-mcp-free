@@ -430,7 +430,7 @@ def snippet_add_title(
 local want_track, inputs, center = {to_lua(int(track) if track else None)}, {to_lua(inputs)}, {to_lua(center)}
 local want_font, want_style = {to_lua(font)}, {to_lua(style)}
 -- check font + style against what Fusion can load before building anything
-local font_style
+local font_style, font_unchecked
 if want_font then
   local fu = fusion or resolve:Fusion()
   local fm = fu and fu.FontManager
@@ -467,7 +467,7 @@ if want_font then
       font_style = font_style or names[1]
     end
   else
-    font_style = want_style -- no FontManager to ask: trust the caller
+    font_style, font_unchecked = want_style, true -- no FontManager to ask: trust the caller
   end
 end
 local mp = project:GetMediaPool()
@@ -559,9 +559,16 @@ end
 if not placed then
   return finish({{ok = false, error = "Resolve did not place the title on V" .. track, appended = got and #got or 0}})
 end
-return finish({{ok = true, timeline = target:GetName(), track = track, name = placed:GetName(),
+local res = {{ok = true, timeline = target:GetName(), track = track, name = placed:GetName(),
   start_seconds = (placed:GetStart() - tstart) / fps, end_seconds = (placed:GetEnd() - tstart) / fps,
-  media_pool_item = cmpi:GetName(), text_pieces = #items, inputs = set_inputs}})
+  media_pool_item = cmpi:GetName(), text_pieces = #items, inputs = set_inputs}}
+if font_unchecked then
+  -- the title is built, but the Semibold trap may still be open: say so
+  res.warnings = {{"Fusion's FontManager could not be asked, so font '" .. want_font .. "' with style '"
+    .. tostring(set_inputs.Style) .. "' was not checked. If renders fail with \\"Font Not Found\\", "
+    .. "call add_title again with a style this font has."}}
+end
+return finish(res)
 """
 
 
