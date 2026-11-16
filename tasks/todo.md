@@ -106,9 +106,19 @@ Not fixed, recorded:
 Text+ keeps "Semibold" when only Font changes; a family without it fails every render. The PR
 checks font and style against Fusion's FontManager before building anything.
 
-- [ ] Merge the PR head as is (`--no-ff`, so GitHub sees the contributor's commit as merged)
+- [x] Merge the PR head as is (`--no-ff`, so GitHub sees the contributor's commit as merged)
       and resolve conflicts with the bridge/export work merged above
-- [ ] Full pytest + ruff on the merged tree
-- [ ] Follow-up: when FontManager cannot be asked, say so in `warnings` instead of leaving
+- [x] Full pytest + ruff on the merged tree
+- [x] Follow-up: when FontManager cannot be asked, say so in `warnings` instead of leaving
       the Semibold trap silently open; test red without it
-- [ ] Fast-forward local main; draft the PR reply for Emir (nothing posted or pushed here)
+- [x] Fast-forward local main; draft the PR reply for Emir (nothing posted or pushed here)
+
+## Review
+
+The merge had no textual conflicts. The PR's tests pass on top of the reworked bridge,
+including the 21.1-style sandbox, where request globals live in a bridge-owned table: 318
+passed. With the warning follow-up: 320 passed, ruff clean (Python 3.13, mcp 2.3). The new
+test fails with `KeyError: 'warnings'` in both bridge modes without the follow-up.
+
+Not run here: the contributor's live check on Resolve 21.1.1 Free. On Emir's 20.3 Free, a CJK
+title still needs a live render to confirm.
