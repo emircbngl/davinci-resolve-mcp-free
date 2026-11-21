@@ -3,7 +3,9 @@
 SPEECH is a real measurement, not invented numbers: a Turkish recording with known
 pauses, transcribed by mlx-whisper large-v3-turbo with word timestamps, next to the
 pauses ffmpeg's silencedetect found in the same audio. Whisper's word edges are off by
-up to ~0.5 s around pauses, which is what these tests pin down.
+up to ~0.5 s around pauses, which is what these tests pin down. LEVELS is that
+recording's level curve reduced to its essentials: voice outside the pauses, digital
+silence inside them, in the 10 ms blocks the real curve comes in.
 """
 import pytest
 
@@ -38,6 +40,16 @@ SPEECH = [
 PAUSES = [(1.62, 1.839), (4.211, 5.607), (5.984, 6.175), (6.511, 6.709), (8.377, 8.973),
           (9.937, 10.136), (14.138, 15.229), (16.342, 16.56)]
 DURATION = 17.62
+NEAR = 0.011  # one 10 ms block
+
+
+def _levels(pauses, duration, voice=-20.0, silence=-90.0):
+    def quiet(i):
+        return any(a <= i * 0.01 + 1e-9 and (i + 1) * 0.01 <= b + 1e-9 for a, b in pauses)
+    return [silence if quiet(i) else voice for i in range(round(duration * 100))]
+
+
+LEVELS = _levels(PAUSES, DURATION)
 
 
 def _in_a_pause(t):
@@ -45,7 +57,7 @@ def _in_a_pause(t):
 
 
 def test_cuts_between_segments_sit_in_the_real_pauses():
-    spans = wordcut.cut_spans(SPEECH, [0, 1, 2, 3], PAUSES, duration=DURATION)
+    spans = wordcut.cut_spans(SPEECH, [0, 1, 2, 3], LEVELS, duration=DURATION)
     assert [s.seg for s in spans] == [0, 1, 2, 3] and all(s.whole_segment for s in spans)
     inner = [spans[0].end] + [t for s in spans[1:3] for t in (s.start, s.end)] + [spans[3].start]
     assert all(_in_a_pause(t) for t in inner), inner
@@ -58,7 +70,7 @@ def test_a_word_whisper_ends_early_is_not_clipped():
     # Whisper ends "arkadaşlar," at 1.30 s; the sound goes on until 1.62 s. Cutting on
     # Whisper's times (1.30 + pad, capped halfway to the next word = 1.50) clips it.
     keep_two = wordcut.parse_drop_words(["0.2-6"], SPEECH)
-    (span,) = wordcut.cut_spans(SPEECH, [0], PAUSES, keep_two)
+    (span,) = wordcut.cut_spans(SPEECH, [0], LEVELS, keep_two)
     assert span.text == "Merhaba arkadaşlar," and (span.first, span.last) == (0, 1)
     assert span.end >= 1.62 and _in_a_pause(span.end) and span.end_in_pause
     (blind,) = wordcut.cut_spans(SPEECH, [0], None, keep_two)
@@ -67,18 +79,18 @@ def test_a_word_whisper_ends_early_is_not_clipped():
 
 def test_a_word_whisper_starts_early_does_not_drag_the_pause_in():
     # Whisper starts "Şey," at 5.16 s, inside a pause that really lasts until 5.607 s.
-    (span,) = wordcut.cut_spans(SPEECH, [1], PAUSES, pad_seconds=0.2)
-    assert span.start == pytest.approx(5.607 - 0.2)
-    (tight,) = wordcut.cut_spans(SPEECH, [1], PAUSES, pad_seconds=0.05)
-    assert tight.start == pytest.approx(5.607 - 0.05)
+    (span,) = wordcut.cut_spans(SPEECH, [1], LEVELS, pad_seconds=0.2)
+    assert span.start == pytest.approx(5.607 - 0.2, abs=NEAR)
+    (tight,) = wordcut.cut_spans(SPEECH, [1], LEVELS, pad_seconds=0.05)
+    assert tight.start == pytest.approx(5.607 - 0.05, abs=NEAR)
     # A short pause is shared: neither side takes more than half of it.
-    spans = wordcut.cut_spans(SPEECH, [2], PAUSES, wordcut.parse_drop_words(["2.2-10"], SPEECH), pad_seconds=0.5)
-    assert spans[0].end == pytest.approx((9.937 + 10.136) / 2)
+    spans = wordcut.cut_spans(SPEECH, [2], LEVELS, wordcut.parse_drop_words(["2.2-10"], SPEECH), pad_seconds=0.5)
+    assert spans[0].end == pytest.approx((9.937 + 10.136) / 2, abs=NEAR)
 
 
 def test_dropped_words_split_the_clip_and_tight_cuts_are_reported():
     drop = wordcut.parse_drop_words(["1.0-1", "2.0-1", "2.6"], SPEECH)
-    spans = wordcut.cut_spans(SPEECH, [1, 2], PAUSES, drop)
+    spans = wordcut.cut_spans(SPEECH, [1, 2], LEVELS, drop)
     assert [(s.seg, s.first, s.last, s.text) for s in spans] == [
         (1, 2, 4, "önce kurulumu gösterelim."),
         (2, 2, 5, "önce kurulumu gösterelim ve"),
@@ -88,8 +100,10 @@ def test_dropped_words_split_the_clip_and_tight_cuts_are_reported():
     assert 6.511 <= spans[0].start <= 6.709
     # "ve | sonra sonra" is continuous speech: no pause for that cut to sit in.
     assert not spans[1].end_in_pause and not spans[2].start_in_pause
-    assert spans[1].end == pytest.approx(11.90)     # never into the dropped "sonra"
-    assert spans[2].start == pytest.approx(12.28)
+    # A flat stretch gives no quieter point, so the cut stays where Whisper puts the
+    # boundary: never into the dropped "sonra".
+    assert spans[1].end == pytest.approx(11.90, abs=NEAR)
+    assert spans[2].start == pytest.approx(12.28, abs=NEAR)
     report = wordcut.cut_report(spans, True)
     assert report["tight"] == 2 and report["in_a_pause"] == 4
     assert [(t["clip"], t["sides"]) for t in report["tight_clips"]] == [(1, ["end"]), (2, ["start"])]
@@ -99,19 +113,54 @@ def test_dropped_words_split_the_clip_and_tight_cuts_are_reported():
 def test_max_pause_shortens_long_pauses_inside_kept_speech():
     talk = [_seg("so today we build", (0.0, 0.3, "so", 1.0), (0.3, 0.8, "today", 1.0),
                  (3.0, 3.3, "we", 1.0), (3.3, 3.9, "build", 1.0))]
-    pauses = [(0.9, 2.9)]
-    (whole,) = wordcut.cut_spans(talk, [0], pauses)
+    levels = _levels([(0.9, 2.9)], 4.0)
+    (whole,) = wordcut.cut_spans(talk, [0], levels)
     assert whole.end - whole.start > 3.5                                # the 2 s pause stays
-    a, b = wordcut.cut_spans(talk, [0], pauses, max_pause_seconds=0.4)
+    a, b = wordcut.cut_spans(talk, [0], levels, max_pause_seconds=0.4)
     assert (a.text, b.text) == ("so today", "we build")
-    assert a.end == pytest.approx(0.9 + 0.2) and b.start == pytest.approx(2.9 - 0.2)
-    assert len(wordcut.cut_spans(talk, [0], pauses, max_pause_seconds=2.0)) == 1
+    assert a.end == pytest.approx(0.9 + 0.2, abs=NEAR) and b.start == pytest.approx(2.9 - 0.2, abs=NEAR)
+    assert len(wordcut.cut_spans(talk, [0], levels, max_pause_seconds=2.0)) == 1
+
+
+def test_sound_between_far_apart_words_is_left_out():
+    # Measured on vlog footage: 6 s of loud waves between two sentences is no pause by
+    # level, and one shared cut point in it would keep all of it in the edit.
+    talk = [_seg("hello there", (0.0, 0.4, "hello", 1.0), (0.4, 1.0, "there", 1.0)),
+            _seg("moving on", (7.0, 7.4, "moving", 1.0), (7.4, 8.0, "on", 1.0))]
+    waves = [-20.0] * 100 + [-18.0] * 600 + [-20.0] * 100
+    a, b = wordcut.cut_spans(talk, [0, 1], waves, pad_seconds=0.2)
+    assert a.end <= 1.0 + 0.5 and b.start >= 7.0 - 0.5
+    assert not a.end_in_pause and not b.start_in_pause       # said: no quiet to cut in
+    assert (b.end - b.start) + (a.end - a.start) < 3.0
+    # With a breath of quiet next to each word, the cuts sit in it.
+    quiet = [-20.0] * 100 + [-50.0] * 30 + [-18.0] * 540 + [-50.0] * 30 + [-20.0] * 100
+    a, b = wordcut.cut_spans(talk, [0, 1], quiet, pad_seconds=0.2)
+    assert a.end == pytest.approx(1.0 + 0.15, abs=NEAR) and b.start == pytest.approx(7.0 - 0.15, abs=NEAR)
+    assert a.end_in_pause and b.start_in_pause
+    assert wordcut.format_words(talk, quiet)[1] == "[1] 7.00-8.00 (6.0s) 0:moving 1:on"
+
+
+def test_shallow_dips_of_noisy_speech_still_count_as_pauses():
+    # Outdoors the gap between two words is only ~10 dB below them; a fixed silence
+    # threshold finds nothing there (measured: silencedetect, 0 pauses).
+    talk = [_seg("one two", (0.0, 0.5, "one", 1.0), (0.8, 1.3, "two", 1.0))]
+    noisy = [-28.0] * 50 + [-38.0] * 30 + [-28.0] * 50
+    keep_one = wordcut.parse_drop_words(["0.1"], talk)
+    (span,) = wordcut.cut_spans(talk, [0], noisy, keep_one, pad_seconds=0.05)
+    assert span.end == pytest.approx(0.55, abs=NEAR) and span.end_in_pause
+    # A 60 ms dip is a consonant, not a pause: cut at its quietest point, reported tight.
+    blip = [-28.0] * 50 + [-38.0] * 6 + [-28.0] * 74
+    (span,) = wordcut.cut_spans(talk, [0], blip, keep_one, pad_seconds=0.05)
+    assert 0.50 <= span.end <= 0.56 and not span.end_in_pause
 
 
 def test_unmeasured_pauses_are_said_out_loud():
     spans = wordcut.cut_spans(SPEECH, [1, 2], None)
     report = wordcut.cut_report(spans, False)
     assert report["in_a_pause"] == 0 and "not measured" in report["note"]
+    # Segment 1 runs straight into segment 2 (one shared point, nothing cut out):
+    # that join is not a cut, so only the two outer ones are counted.
+    assert spans[0].end == spans[1].start and report["cuts"] == 2 and report["tight"] == 2
 
 
 def test_drop_words_are_validated():
@@ -125,18 +174,18 @@ def test_drop_words_are_validated():
 
 
 def test_words_view_shows_addresses_and_pauses():
-    lines = wordcut.format_words(SPEECH, PAUSES)
+    lines = wordcut.format_words(SPEECH, LEVELS)
     assert lines[0].startswith("[0] 0.00-4.12 0:Merhaba 1:arkadaşlar, 2:bugün")
     assert lines[1] == "[1] 5.16-8.32 (1.4s) 0:Şey, 1:ıh, 2:önce 3:kurulumu 4:gösterelim."
     assert lines[3].startswith("[3] 14.80-17.50 (1.1s) 0:Hepsi")
-    assert wordcut.format_words(SPEECH, PAUSES, offset=2, limit=1)[0].startswith("[2] ")
+    assert wordcut.format_words(SPEECH, LEVELS, offset=2, limit=1)[0].startswith("[2] ")
     assert "(no word timings)" in wordcut.format_words([Segment(0, 1, "plain")], None)[0]
 
 
 def test_scan_finds_pauses_fillers_repeats_and_retakes():
-    out = wordcut.scan(SPEECH, PAUSES, language="tr")
+    out = wordcut.scan(SPEECH, LEVELS, language="tr")
     assert [(p["after_word"], p["before_word"], p["seconds"]) for p in out["long_pauses"]] == [
-        ("0.6", "1.0", 1.4), ("2.10", "3.0", 1.09)]
+        ("0.6", "1.0", 1.38), ("2.10", "3.0", 1.08)]
     assert out["long_pause_seconds_total"] == 2.5
     assert [(f["drop"], f["kind"], f.get("unsure")) for f in out["fillers"]] == [
         ("1.0", "discourse", True), ("1.1", "hesitation", True)]
@@ -145,7 +194,7 @@ def test_scan_finds_pauses_fillers_repeats_and_retakes():
     assert [(r["earlier"], r["later"]) for r in out["retakes"]] == [(1, 2)]
     # Every suggestion can be applied as it is.
     drops = [f["drop"] for f in out["fillers"]] + [d for r in out["repeats"] for d in r["drop"]]
-    spans = wordcut.cut_spans(SPEECH, [1, 2], PAUSES, wordcut.parse_drop_words(drops, SPEECH))
+    spans = wordcut.cut_spans(SPEECH, [1, 2], LEVELS, wordcut.parse_drop_words(drops, SPEECH))
     assert " ".join(s.text for s in spans) == (
         "önce kurulumu gösterelim. önce kurulumu gösterelim ve sonra ilk videoyu keselim.")
 
@@ -171,7 +220,7 @@ def test_transcript_cut_builds_the_plan_and_the_report(monkeypatch):
         video_codec="h264", audio_codec="aac", sample_rate=48000, channels=2, bit_rate=None,
         container="mov"))
     plan, report = roughcut.transcript_cut("/talk.mp4", SPEECH, segment_indices=[0, 2],
-                                           pauses=PAUSES, drop_words=["2.0-1", "2.6"])
+                                           levels=LEVELS, drop_words=["2.0-1", "2.6"])
     assert [c.rationale[:22] for c in plan.clips] == [
         "segment 0: Merhaba ark", "segment 2 words 2-5: ö", "segment 2 words 7-10: "]
     assert plan.notes == "Built from 2 of 4 transcript segments."
@@ -196,31 +245,30 @@ def test_words_from_both_engines():
 
 @pytest.fixture
 def talk(tmp_path, monkeypatch):
-    """A transcribed talk as the tools see it: SPEECH from a stand-in Whisper, PAUSES
-    from a stand-in ffmpeg. Returns (path, calls, state); state["pauses"] can be set
-    to an exception to make the pause measurement fail."""
+    """A transcribed talk as the tools see it: SPEECH from a stand-in Whisper, LEVELS
+    from a stand-in ffmpeg. Returns (path, calls, state); state["levels"] can be set
+    to an exception to make the measurement fail."""
     from resolve_pilot.analyzers import MediaInfo
     from resolve_pilot.transcribe import store
     from resolve_pilot.transcribe.whisper import TranscriptionResult
-    calls, state = [], {"pauses": (PAUSES, -60.0)}
+    calls, state = [], {"levels": LEVELS}
 
     def fake(path, model=None, language=None, word_timestamps=False, engine="auto"):
         calls.append(word_timestamps)
         segs = SPEECH if word_timestamps else [Segment(s.start, s.end, s.text) for s in SPEECH]
         return TranscriptionResult(language="tr", text="", segments=list(segs))
 
-    def pauses(path, duration=None):
-        if isinstance(state["pauses"], Exception):
-            raise state["pauses"]
-        return state["pauses"]
+    def levels(path):
+        if isinstance(state["levels"], Exception):
+            raise state["levels"]
+        return state["levels"]
 
     info = MediaInfo(path="", duration_seconds=DURATION, width=1920, height=1080, fps=25.0,
                      video_codec="h264", audio_codec="aac", sample_rate=48000, channels=2,
                      bit_rate=None, container="mov")
     monkeypatch.setattr(store, "transcribe", fake)
     monkeypatch.setattr(store, "resolve_engine", lambda engine="auto": "mlx")
-    monkeypatch.setattr(store, "detect_pauses", pauses)
-    monkeypatch.setattr(store, "probe_media", lambda p: info)
+    monkeypatch.setattr(store, "voice_levels", levels)
     monkeypatch.setattr(roughcut, "probe_media", lambda p: info)
     path = tmp_path / "talk.mp4"
     path.write_bytes(b"not really a video")
@@ -259,7 +307,7 @@ def test_tools_from_transcript_to_a_cleaned_cut(talk):
 def test_tools_say_so_when_words_or_pauses_are_missing(talk):
     from resolve_pilot import mcp_server
     path, calls, state = talk
-    state["pauses"] = RuntimeError("ffmpeg is not installed")
+    state["levels"] = RuntimeError("ffmpeg is not installed")
     out = mcp_server.transcribe_audio(str(path), language="tr")
     assert out["pauses_measured"] is False and out["pauses_error"] == "ffmpeg is not installed"
     plan = mcp_server.plan_from_transcript(transcript_id=out["transcript_id"])
@@ -273,28 +321,33 @@ def test_tools_say_so_when_words_or_pauses_are_missing(talk):
         mcp_server.plan_from_transcript(transcript_id=plain["transcript_id"], drop_words=["1.0"])
 
 
+def test_levels_survive_storage():
+    from resolve_pilot.analyzers.speech import pack_levels, unpack_levels
+    assert unpack_levels(pack_levels([-0.4, -20.2, -89.6, -140.0, 3.0])) == [-0.0, -20.0, -90.0, -140.0, -0.0]
+    assert len(pack_levels([-30.0] * 360000)) < 500_000  # an hour of audio
+
+
 @pytest.mark.skipif(not FFMPEG, reason="ffmpeg not installed")
-@pytest.mark.parametrize("noise", [0.0, 0.01])
-def test_pauses_are_measured_against_the_files_own_noise_floor(tmp_path, noise):
+@pytest.mark.parametrize("noise", [0.0, 0.03])
+def test_levels_measured_from_audio_show_the_gap_between_words(tmp_path, noise):
     import subprocess
-    from resolve_pilot.analyzers.speech import detect_pauses
-    # Tone 0-1 s, silence 1-1.6 s, tone 1.6-3 s, silence 3-3.4 s, tone 3.4-4 s; with
-    # `noise`, room tone under everything, far above digital silence. The noise is
-    # seeded: unseeded, a random burst now and then shaved 60 ms off a pause.
-    tone = "0.3*sin(2*PI*220*t)*(lt(t,1)+between(t,1.6,3)+gte(t,3.4))"
+    from resolve_pilot.analyzers.speech import voice_levels
+    # A 440 Hz "voice" from 0-1 s and 1.6-3 s with nothing in between; with `noise`,
+    # seeded room tone under all of it, about 15 dB below the voice.
+    tone = "0.3*sin(2*PI*440*t)*(lt(t,1)+between(t,1.6,3))"
     wav = tmp_path / "talk.wav"
-    filters = f"aevalsrc='{tone}':d=4:s=16000[a]"
+    filters = f"aevalsrc='{tone}':d=3:s=16000[a]"
     if noise:
-        filters = (f"aevalsrc='{tone}':d=4:s=16000[t];"
-                   f"anoisesrc=color=pink:amplitude={noise}:d=4:r=16000:seed=7[n];"
+        filters = (f"aevalsrc='{tone}':d=3:s=16000[t];"
+                   f"anoisesrc=color=white:amplitude={noise}:d=3:r=16000:seed=7[n];"
                    "[t][n]amix=inputs=2:normalize=0[a]")
     subprocess.run([FFMPEG, "-loglevel", "error", "-y", "-filter_complex", filters, "-map", "[a]",
                     "-ac", "1", str(wav)], check=True)
-    pauses, threshold = detect_pauses(wav, duration=4.0)
-    assert len(pauses) == 2, (pauses, threshold)
-    # Room tone may eat a little into a pause's edges (the cut then lands deeper inside
-    # the pause, which is the safe side); it must never widen one into the sound.
-    slack = 0.1 if noise else 0.04
-    for (a, b), (ea, eb) in zip(pauses, [(1.0, 1.6), (3.0, 3.4)]):
-        assert ea - 0.04 <= a <= ea + slack and eb - slack <= b <= eb + 0.04, (pauses, threshold)
-    assert (threshold > -55) == bool(noise)  # the threshold follows the room tone
+    levels = voice_levels(wav)
+    assert 295 <= len(levels) <= 300
+    voice, gap = sorted(levels[20:80])[30], sorted(levels[110:150])[20]
+    assert -16 < voice < -12 and (gap < -60 if not noise else -40 < gap < voice - 10), (voice, gap)
+    valley = wordcut.Sound(levels).gap(Word(0.3, 0.9, "one"), Word(1.5, 2.2, "two"))
+    assert valley and abs(valley.start - 1.0) < 0.04 and abs(valley.end - 1.6) < 0.04, valley
+    with pytest.raises(RuntimeError, match="could not read the audio"):
+        voice_levels(tmp_path / "missing.wav")

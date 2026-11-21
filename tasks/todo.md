@@ -161,17 +161,47 @@ cut is 10.9 s; the 6 cuts in a pause measure -87 to -90 dB at the cut point, the
 Design notes:
 - Segments without words count as one word, so transcripts without word timings and inline
   segments take the same path; the old numbers are unchanged (existing tests untouched).
-- Pause threshold = noise floor + 6 dB. Measured against +9 / +12 on 40 seeds of pink noise
-  under a tone and on noisy speech: +6 misses part of a pause in 3 of 40 (safe side: the cut
-  lands deeper in the pause) and reaches 36 ms into speech; +9 misses none but reaches 74 ms.
-- A click splitting one pause in two is merged (seen with seeded noise: 3.0-3.188 / 3.188-3.4).
+- (Dropped, see Review 2) Pause threshold = noise floor + 6 dB, tuned on pink noise under a
+  tone. It held up on synthetic audio and found nothing on real vlog footage.
+
+## Review 2: real speech (Emir's vlog footage) changed the design
+
+Run on 12 clips from the Fethiye vlog (17 min; 10 with enough speech, 1,221 words), read only.
+
+- The first design (ffmpeg silencedetect, threshold = noise floor + 6 dB) found **0 pauses** in
+  the vlog clips: every cut fell back to Whisper's times. Outdoors the gap between two words is
+  only 8-12 dB below the words. Replaced by the voice-band level curve (250-3400 Hz, 10 ms) and
+  a valley search between the two words, relative to how loud those words are. In that band a
+  real gap is a median 240 ms wide, a dip inside continuous speech 90 ms.
+- A valley search across a long gap kept everything in it (a 17 s cut became 35.6 s: waves and
+  music between sentences). Words more than 0.65 s apart now get a cut point each, next to the
+  word.
+- A wide search window (0.5 s into the next word) made one clip worse on the transcribe-again
+  check (133 vs 101 words changed). The window is now Whisper's own gap, widened only while the
+  sound is still quiet where the word is said to start. Same clip after: 101 vs 101.
+- cut_report counted seamless joins between consecutive segments as tight cuts (420 of 626 on
+  the vlog). Joins where nothing is cut out are no longer counted.
+
+Final numbers, cleaned cut (retakes, hesitations and repeats from scan_speech dropped,
+max_pause 0.5 s) vs the same cut on Whisper's word times:
+- cut points in sound (less than 3 dB below the words): 26 of 264 (10%) vs 89 of 288 (31%)
+- words lost or changed when the cut audio is transcribed again: 307 of 1,221 (25.1%) vs 342
+  (28.0%). Noisy measure: per clip it goes both ways (35 vs 63, 13 vs 17, but 22 vs 15).
+
+My own harness was wrong once: the first "transcribe the cut again" run compared two renders
+that were both the whole file (aselect did not shorten the audio), so both methods scored
+exactly the same. Caught by the identical numbers; the render now checks its length against
+the plan.
+
+1 new test per rule, each red without it (far-apart words, shallow dips, tight cut point,
+seamless joins).
 
 Not verified / known limits:
-- Real human speech: only TTS was measured. Whisper's edge errors and room tone differ on a real
-  recording; the first real video should be checked by ear.
+- Nobody has listened to these cuts. The numbers say they land in quieter places than before,
+  not that they sound right; the first real edit still needs ears.
+- The vlog clips auto-detected as Arabic / Russian in two cases (music, short speech): pass
+  `language` when it is known.
 - faster-whisper words are covered by a unit test of the conversion only, not a real run.
-- Tight cuts still use Whisper's word times; snapping them to the local energy minimum is a
-  possible next step.
 - Whisper tends to leave "um" / "uh" out of the text, so those cannot be found from the
   transcript (said in the tool description). Untranscribed sound between words was left out on
   purpose: with edges this far off, it would flag ordinary speech.

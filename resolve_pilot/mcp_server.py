@@ -707,9 +707,9 @@ def transcribe_audio(
         return res
     segs = res["segments"]
     has_words = any(s.get("words") for s in segs)
-    pauses = transcripts.transcript_pauses(res)
+    levels = transcripts.transcript_levels(res)
     if detail == "words":
-        shown = wordcut.format_words(transcripts.transcript_segments(res), pauses, offset, limit)
+        shown = wordcut.format_words(transcripts.transcript_segments(res), levels, offset, limit)
     else:
         shown = transcripts.format_segments(segs, offset, limit)
     out = {
@@ -722,11 +722,11 @@ def transcribe_audio(
         "model": res["model"],
         "segment_count": len(segs),
         "word_timings": has_words,
-        "pauses_measured": pauses is not None,
+        "pauses_measured": levels is not None,
         "segments": shown,
     }
-    if pauses is None and res.get("pauses_error"):
-        out["pauses_error"] = res["pauses_error"]
+    if levels is None and res.get("levels_error"):
+        out["pauses_error"] = res["levels_error"]
     nxt = offset + len(shown)
     if nxt < len(segs):
         out["next_offset"] = nxt
@@ -878,11 +878,11 @@ def plan_from_transcript(
     no pause to sit in (`tight`): look at or listen to those. Returns the stored plan
     (plan_id, clips, warnings).
     """
-    pauses = None
+    levels = None
     if transcript_id:
         data = transcripts.require_transcript(transcript_id)
         segs = transcripts.transcript_segments(data)
-        pauses = transcripts.transcript_pauses(data)
+        levels = transcripts.transcript_levels(data)
         source_path = source_path or data["source_path"]
     elif segments:
         segs = [Segment(s.start, s.end, s.text) for s in segments]
@@ -892,7 +892,7 @@ def plan_from_transcript(
         raise ValueError("source_path is required when passing inline segments.")
     plan, report = roughcut.transcript_cut(
         source_path, segs, title=title, pad_seconds=pad_seconds, fps=fps,
-        segment_indices=segment_indices, pauses=pauses, drop_words=drop_words,
+        segment_indices=segment_indices, levels=levels, drop_words=drop_words,
         max_pause_seconds=max_pause_seconds)
     out = _store_and_summarize(plan)
     out["cut_report"] = report
@@ -916,7 +916,7 @@ def scan_speech(
     missing filler here does not mean it was not said.
     """
     data = transcripts.require_transcript(transcript_id)
-    out = wordcut.scan(transcripts.transcript_segments(data), transcripts.transcript_pauses(data),
+    out = wordcut.scan(transcripts.transcript_segments(data), transcripts.transcript_levels(data),
                        language=data.get("language"), min_pause_seconds=min_pause_seconds,
                        extra_fillers=extra_fillers)
     out["transcript_id"] = transcript_id
@@ -925,7 +925,7 @@ def scan_speech(
                        "found: run transcribe_audio again with word_timestamps=true.")
     elif not out["pauses_measured"]:
         out["note"] = ("Pauses could not be measured in the audio"
-                       + (f" ({data['pauses_error']})" if data.get("pauses_error") else "")
+                       + (f" ({data['levels_error']})" if data.get("levels_error") else "")
                        + ", so long_pauses is empty.")
     return out
 

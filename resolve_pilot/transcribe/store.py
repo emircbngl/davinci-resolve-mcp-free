@@ -18,8 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from resolve_pilot._paths import state_dir
-from resolve_pilot.analyzers.media import probe_media
-from resolve_pilot.analyzers.speech import detect_pauses
+from resolve_pilot.analyzers.speech import pack_levels, unpack_levels, voice_levels
 from resolve_pilot.transcribe.whisper import Segment, Word, model_name_for, resolve_engine, transcribe
 
 _ID_RE = re.compile(r"^t-[0-9a-f]{12}$")
@@ -63,23 +62,21 @@ def transcript_segments(data: dict[str, Any]) -> list[Segment]:
             for s in data["segments"]]
 
 
-def transcript_pauses(data: dict[str, Any]) -> list[tuple[float, float]] | None:
-    """Real pauses measured in the audio, or None when they could not be measured
-    (``pauses_error`` says why) or the transcript predates them."""
-    pauses = data.get("pauses")
-    return None if pauses is None else [(float(a), float(b)) for a, b in pauses]
+def transcript_levels(data: dict[str, Any]) -> list[float] | None:
+    """The audio's voice-band level every 10 ms (see analyzers.speech), or None when it
+    could not be measured (``levels_error`` says why) or the transcript predates it."""
+    packed = data.get("levels")
+    return unpack_levels(packed) if packed else None
 
 
-def _measure_pauses(path: Path, data: dict[str, Any]) -> None:
-    # Never fails the transcript: without pauses, cuts fall back to Whisper's word
+def _measure_levels(path: Path, data: dict[str, Any]) -> None:
+    # Never fails the transcript: without levels, cuts fall back to Whisper's word
     # times and the plan says so.
     try:
-        pauses, threshold = detect_pauses(path, duration=probe_media(path).duration_seconds or None)
-        data["pauses"] = [list(p) for p in pauses]
-        data["pause_threshold_db"] = threshold
+        data["levels"] = pack_levels(voice_levels(path))
     except Exception as e:
-        data["pauses"] = None
-        data["pauses_error"] = str(e) or type(e).__name__
+        data["levels"] = None
+        data["levels_error"] = str(e) or type(e).__name__
 
 
 def _run(tid: str, path: Path, model: str, language: str | None, word_timestamps: bool, engine: str) -> None:
@@ -98,7 +95,7 @@ def _run(tid: str, path: Path, model: str, language: str | None, word_timestamps
             "segments": [s.to_dict() for s in result.segments],
             "text": result.text,
         }
-        _measure_pauses(path, data)
+        _measure_levels(path, data)
         out = transcripts_dir() / f"{tid}.json"
         tmp = out.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")

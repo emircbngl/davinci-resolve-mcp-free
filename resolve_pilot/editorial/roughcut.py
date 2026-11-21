@@ -114,13 +114,13 @@ def plan_from_transcript(
     pad_seconds: float = 0.2,
     fps: float | None = None,
     segment_indices: list[int] | None = None,
-    pauses: list[tuple[float, float]] | None = None,
+    levels: list[float] | None = None,
     drop_words: list[str] | None = None,
     max_pause_seconds: float | None = None,
 ) -> RoughCutPlan:
     """Build a rough cut from transcript segments; see `transcript_cut`."""
     return transcript_cut(source_path, segments, title, pad_seconds, fps, segment_indices,
-                          pauses, drop_words, max_pause_seconds)[0]
+                          levels, drop_words, max_pause_seconds)[0]
 
 
 def transcript_cut(
@@ -130,7 +130,7 @@ def transcript_cut(
     pad_seconds: float = 0.2,
     fps: float | None = None,
     segment_indices: list[int] | None = None,
-    pauses: list[tuple[float, float]] | None = None,
+    levels: list[float] | None = None,
     drop_words: list[str] | None = None,
     max_pause_seconds: float | None = None,
 ) -> tuple[RoughCutPlan, dict]:
@@ -141,8 +141,10 @@ def transcript_cut(
     ("12.3", "12.3-5") removes words inside kept segments, which splits them, and
     `max_pause_seconds` shortens longer pauses between kept words.
 
-    Every cut sits in the real pause next to the word when `pauses` (measured in the
-    audio) has one, otherwise between Whisper's word times; the report counts both.
+    Every cut sits where the voice dips between two words, found in `levels` (the
+    audio's voice-band level, see analyzers.speech): inside the pause when there is one,
+    otherwise at the quietest point (a tight cut). Without `levels` cuts use Whisper's
+    word times. The report counts both kinds.
     Cuts never reach into a neighbouring word, so no words are played twice or clipped
     in from a dropped neighbour.
     """
@@ -161,7 +163,7 @@ def transcript_cut(
         picked = list(segment_indices)
 
     spans = wordcut.cut_spans(
-        segments, picked, pauses, wordcut.parse_drop_words(drop_words, segments),
+        segments, picked, levels, wordcut.parse_drop_words(drop_words, segments),
         pad_seconds, max_pause_seconds, info.duration_seconds or None)
     clips = [
         RoughCutClip(
@@ -182,7 +184,7 @@ def transcript_cut(
         clips=clips,
         notes=f"Built from {len(set(s.seg for s in spans))} of {len(segments)} transcript segments.",
     )
-    return plan, wordcut.cut_report(spans, pauses is not None)
+    return plan, wordcut.cut_report(spans, levels is not None)
 
 
 def plan_from_scenes(
