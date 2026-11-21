@@ -25,7 +25,11 @@ Builds a first-pass timeline from raw footage, deciding what to keep from the tr
    - keep complete thoughts and the strongest delivery; drop false starts, repeats, filler, dead air
    - pacing: 3–5 s clips for energetic edits, 8–15 s for documentary
    - keep a running total against the target length
-5. **Draft** with `plan_from_transcript(transcript_id, segment_indices=[12, 3, 4, 40], title=...)` — indices in playback order. Consecutive segments join seamlessly; no words are repeated.
+   - **`scan_speech(transcript_id)`** lists the mechanical candidates: `retakes` (a line started twice: keep one of the two segments, usually the later), `repeats` and `fillers` (each with a `drop` value), `long_pauses`. They are candidates: read each against the transcript before using it. `transcribe_audio(..., detail="words")` shows every word with its index (`12.3` = segment 12, word 3) when you want to cut something the scan did not list.
+5. **Draft** with `plan_from_transcript(transcript_id, segment_indices=[12, 3, 4, 40], drop_words=["12.0", "40.3-5"], title=...)` — indices in playback order. Consecutive segments join seamlessly; no words are repeated.
+   - Cuts are placed in the real pause next to each word (measured in the audio), never inside a word. Whisper's own word times are up to half a second off around pauses, so do not compute cut points from them yourself.
+   - `max_pause_seconds=0.4` also tightens long pauses inside the lines you keep (talking-head jump cuts); leave it out for interviews and anything that should breathe.
+   - Read `cut_report`: `tight` cuts had no pause to sit in (continuous speech, typically where you dropped a word mid-sentence). They can clip a syllable. Prefer dropping from pause to pause, or check those clips by ear / in Resolve.
 6. **Refine with `edit_plan`** — never rebuild the plan for small changes:
    ```json
    [{"op": "trim", "index": 2, "head_seconds": 0.15},
@@ -44,7 +48,7 @@ Builds a first-pass timeline from raw footage, deciding what to keep from the tr
 ## Conventions
 
 - Always fill `rationale`; it is how the user audits your choices.
-- `pad_seconds=0.2` keeps natural breaths; use 0.05 for punchy social cuts.
+- `pad_seconds=0.2` keeps natural breaths; use 0.05 for punchy social cuts. It is the pause left on each side of a cut, so two clips are never more than twice that apart.
 - The timeline fps follows the source unless the user asks otherwise.
 - Vertical / social: `edit_plan` with `{"op": "set", "width": 1080, "height": 1920}`, then reframe in Resolve (below; Smart Reframe in Studio does it automatically).
 - Ask before transcribing anything over an hour and quote the expected time (turbo runs many times faster than real time on Apple Silicon, slower on CPU).
@@ -69,8 +73,8 @@ User: *"I have a 25-min interview at `~/Footage/jane.mp4`. Give me a 4-minute hi
 
 1. `probe_media` → 1080p30, 25:13, AAC audio.
 2. `transcribe_audio` → `status: running`; call again → 212 segments (`transcript_id: t-…`).
-3. Read the segments, choose 15 (≈240 s total).
-4. `plan_from_transcript(transcript_id, segment_indices=[…], title="Jane — 4 min")`.
+3. Read the segments, choose 15 (≈240 s total). `scan_speech` → 2 retakes (keep the later takes), 6 repeats, 4 fillers.
+4. `plan_from_transcript(transcript_id, segment_indices=[…], drop_words=[…], title="Jane — 4 min")` → `cut_report`: 38 cuts, 36 in a pause, 2 tight.
 5. `edit_plan`: trims on two clips, `set` fades. Warnings: none.
 6. `export_fcpxml` → `~/Footage/Jane_4_min.fcpxml`; `import_timeline` (bridge) → 15 clips, 4:02.
 7. Reply with the table and the timeline name.

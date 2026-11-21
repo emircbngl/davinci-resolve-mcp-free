@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import importlib.util
 import threading
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -30,13 +30,53 @@ _MLX_REPOS = {
 
 
 @dataclass
+class Word:
+    """One spoken word. Whisper's word edges are approximate (measured: up to ~0.5 s off
+    next to a pause), so cuts are snapped to real pauses, see editorial.wordcut."""
+    start: float
+    end: float
+    text: str
+    probability: float | None = None
+
+    def to_dict(self) -> dict:
+        d: dict[str, Any] = {"start": round(self.start, 3), "end": round(self.end, 3), "text": self.text}
+        if self.probability is not None:
+            d["p"] = round(self.probability, 2)
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Word":
+        return cls(float(d["start"]), float(d["end"]), str(d["text"]),
+                   float(d["p"]) if d.get("p") is not None else None)
+
+
+@dataclass
 class Segment:
     start: float
     end: float
     text: str
+    words: list[Word] = field(default_factory=list)  # empty without word_timestamps
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d: dict[str, Any] = {"start": self.start, "end": self.end, "text": self.text}
+        if self.words:
+            d["words"] = [w.to_dict() for w in self.words]
+        return d
+
+
+def _words(raw: Any) -> list[Word]:
+    """Words from either engine: mlx gives dicts, faster-whisper objects; empty text dropped."""
+    out: list[Word] = []
+    for w in raw or []:
+        get = w.get if isinstance(w, dict) else (lambda k, _w=w: getattr(_w, k, None))
+        text = str(get("word") or "").strip()
+        start, end = get("start"), get("end")
+        if not text or start is None or end is None:
+            continue
+        prob = get("probability")
+        out.append(Word(float(start), max(float(start), float(end)), text,
+                        float(prob) if prob is not None else None))
+    return out
 
 
 @dataclass
@@ -113,7 +153,8 @@ def transcribe(
             kwargs["language"] = language
         out = mlx_whisper.transcribe(str(p), **kwargs)
         segs = [
-            Segment(start=float(s["start"]), end=float(s["end"]), text=str(s["text"]).strip())
+            Segment(start=float(s["start"]), end=float(s["end"]), text=str(s["text"]).strip(),
+                    words=_words(s.get("words")))
             for s in out.get("segments", [])
         ]
         return TranscriptionResult(
@@ -131,7 +172,8 @@ def transcribe(
     segments, info = whisper_model.transcribe(
         str(p), language=language, word_timestamps=word_timestamps,
     )
-    segs = [Segment(start=float(s.start), end=float(s.end), text=s.text.strip()) for s in segments]
+    segs = [Segment(start=float(s.start), end=float(s.end), text=s.text.strip(),
+                    words=_words(getattr(s, "words", None))) for s in segments]
     return TranscriptionResult(
         language=str(info.language or language or ""),
         text=" ".join(s.text for s in segs).strip(),

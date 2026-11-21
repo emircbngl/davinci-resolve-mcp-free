@@ -18,7 +18,9 @@ from pathlib import Path
 from typing import Any
 
 from resolve_pilot._paths import state_dir
-from resolve_pilot.transcribe.whisper import Segment, model_name_for, resolve_engine, transcribe
+from resolve_pilot.analyzers.media import probe_media
+from resolve_pilot.analyzers.speech import detect_pauses
+from resolve_pilot.transcribe.whisper import Segment, Word, model_name_for, resolve_engine, transcribe
 
 _ID_RE = re.compile(r"^t-[0-9a-f]{12}$")
 _jobs: dict[str, dict[str, Any]] = {}
@@ -56,7 +58,28 @@ def require_transcript(tid: str) -> dict[str, Any]:
 
 
 def transcript_segments(data: dict[str, Any]) -> list[Segment]:
-    return [Segment(float(s["start"]), float(s["end"]), str(s["text"])) for s in data["segments"]]
+    return [Segment(float(s["start"]), float(s["end"]), str(s["text"]),
+                    [Word.from_dict(w) for w in s.get("words") or []])
+            for s in data["segments"]]
+
+
+def transcript_pauses(data: dict[str, Any]) -> list[tuple[float, float]] | None:
+    """Real pauses measured in the audio, or None when they could not be measured
+    (``pauses_error`` says why) or the transcript predates them."""
+    pauses = data.get("pauses")
+    return None if pauses is None else [(float(a), float(b)) for a, b in pauses]
+
+
+def _measure_pauses(path: Path, data: dict[str, Any]) -> None:
+    # Never fails the transcript: without pauses, cuts fall back to Whisper's word
+    # times and the plan says so.
+    try:
+        pauses, threshold = detect_pauses(path, duration=probe_media(path).duration_seconds or None)
+        data["pauses"] = [list(p) for p in pauses]
+        data["pause_threshold_db"] = threshold
+    except Exception as e:
+        data["pauses"] = None
+        data["pauses_error"] = str(e) or type(e).__name__
 
 
 def _run(tid: str, path: Path, model: str, language: str | None, word_timestamps: bool, engine: str) -> None:
@@ -75,6 +98,7 @@ def _run(tid: str, path: Path, model: str, language: str | None, word_timestamps
             "segments": [s.to_dict() for s in result.segments],
             "text": result.text,
         }
+        _measure_pauses(path, data)
         out = transcripts_dir() / f"{tid}.json"
         tmp = out.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -89,7 +113,7 @@ def get_or_start(
     path: str | Path,
     model: str | None = None,
     language: str | None = None,
-    word_timestamps: bool = False,
+    word_timestamps: bool = True,
     engine: str = "auto",
     wait_seconds: float = 45.0,
     refresh: bool = False,

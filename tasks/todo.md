@@ -123,6 +123,59 @@ test fails with `KeyError: 'warnings'` in both bridge modes without the follow-u
 Not run here: the contributor's live check on Resolve 21.1.1 Free. On Emir's 20.3 Free, a CJK
 title still needs a live render to confirm.
 
+# Word-level cuts (one-prompt video, step 1)
+
+Goal: cuts that never clip a word, and a way to remove pauses, fillers and repeats inside a
+kept line. Today `word_timestamps=true` returns nothing (words are not even cached) and
+`plan_from_transcript` cuts at Whisper segment times ± a fixed pad.
+
+Measured first (Turkish TTS with known pauses, mlx large-v3-turbo vs ffmpeg silencedetect):
+Whisper word edges are off by up to 460 ms (a word after a pause "starts" inside the pause; a
+word before one "ends" up to 290 ms early). Cutting on word times alone would clip words, so
+cut points are snapped into the real pause next to the word, and fall back to the word-gap
+midpoint only where speech is continuous (reported as a tight cut).
+
+- [x] Words: `Word` on `Segment`, filled by both engines, stored with the transcript; pauses
+      (real silences, threshold from the file's own noise floor) stored next to them.
+      `transcribe_audio` records words by default and `detail="words"` shows them with
+      `segment.word` addresses and pause marks
+- [x] `plan_from_transcript`: with words, snap every cut into the neighbouring pause;
+      `drop_words` removes word ranges inside kept segments; `max_pause_seconds` tightens long
+      pauses inside kept speech. Reports snapped vs tight cuts. Without words: as before
+- [x] `scan_speech`: candidates only — long pauses, filler words, immediate repeats, retakes —
+      each with the `drop_words` / segment index that would remove it
+- [x] Tests: pure snapping and scan logic; words through the store; pause detection on real
+      ffmpeg audio; the tools over the server. Red without the change
+- [x] Rough-cut guide, README, CHANGELOG; full pytest + ruff; try on speech; local main
+
+## Review
+
+337 passed (321 before), ruff clean; Python 3.13, mcp 2.3. With the pause lookup switched off,
+8 of the new tests fail (cuts leave the pauses, the clipped-word case comes back).
+
+Run for real (mlx large-v3-turbo + ffmpeg, a 17.6 s Turkish TTS recording with planted fillers,
+repeats and a retake): scan_speech found the retake, both repeats and both fillers; the cleaned
+cut is 10.9 s; the 6 cuts in a pause measure -87 to -90 dB at the cut point, the 2 tight ones
+(a word dropped in continuous speech) sit in sound at about -15 dB and are reported as tight.
+
+Design notes:
+- Segments without words count as one word, so transcripts without word timings and inline
+  segments take the same path; the old numbers are unchanged (existing tests untouched).
+- Pause threshold = noise floor + 6 dB. Measured against +9 / +12 on 40 seeds of pink noise
+  under a tone and on noisy speech: +6 misses part of a pause in 3 of 40 (safe side: the cut
+  lands deeper in the pause) and reaches 36 ms into speech; +9 misses none but reaches 74 ms.
+- A click splitting one pause in two is merged (seen with seeded noise: 3.0-3.188 / 3.188-3.4).
+
+Not verified / known limits:
+- Real human speech: only TTS was measured. Whisper's edge errors and room tone differ on a real
+  recording; the first real video should be checked by ear.
+- faster-whisper words are covered by a unit test of the conversion only, not a real run.
+- Tight cuts still use Whisper's word times; snapping them to the local energy minimum is a
+  possible next step.
+- Whisper tends to leave "um" / "uh" out of the text, so those cannot be found from the
+  transcript (said in the tool description). Untranscribed sound between words was left out on
+  purpose: with edges this far off, it would flag ordinary speech.
+
 # Issue #4: the bridge does not run on Resolve 21.1.2 Free
 
 Reported (Mitch, issue #4, macOS Apple Silicon): on 21.1.2 Free the Scripts-menu entry does

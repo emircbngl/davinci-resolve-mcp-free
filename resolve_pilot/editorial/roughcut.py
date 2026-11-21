@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from resolve_pilot.analyzers import MediaInfo, SceneCut, probe_media, probe_media_cached
+from resolve_pilot.editorial import wordcut
 from resolve_pilot.exporters.fcpxml import AudioBed, Clip, Layout, TimelineSpec, _frames, layout
 from resolve_pilot.transcribe import Segment
 
@@ -113,21 +114,43 @@ def plan_from_transcript(
     pad_seconds: float = 0.2,
     fps: float | None = None,
     segment_indices: list[int] | None = None,
+    pauses: list[tuple[float, float]] | None = None,
+    drop_words: list[str] | None = None,
+    max_pause_seconds: float | None = None,
 ) -> RoughCutPlan:
-    """Build a rough cut from transcript segments: one clip per spoken segment.
+    """Build a rough cut from transcript segments; see `transcript_cut`."""
+    return transcript_cut(source_path, segments, title, pad_seconds, fps, segment_indices,
+                          pauses, drop_words, max_pause_seconds)[0]
+
+
+def transcript_cut(
+    source_path: str | Path,
+    segments: list[Segment],
+    title: str = "Transcript Roughcut",
+    pad_seconds: float = 0.2,
+    fps: float | None = None,
+    segment_indices: list[int] | None = None,
+    pauses: list[tuple[float, float]] | None = None,
+    drop_words: list[str] | None = None,
+    max_pause_seconds: float | None = None,
+) -> tuple[RoughCutPlan, dict]:
+    """(plan, cut report): one clip per kept segment, cut between words.
 
     `segment_indices` keeps only those segments, in that order (an editorial
-    selection); by default every segment is used in source order.
+    selection); by default every segment is used in source order. `drop_words`
+    ("12.3", "12.3-5") removes words inside kept segments, which splits them, and
+    `max_pause_seconds` shortens longer pauses between kept words.
 
-    Padding never makes neighbouring clips overlap: when two clips that follow
-    each other in the plan are also consecutive in the source, the boundary is
-    placed between them, so the same words are never played twice.
+    Every cut sits in the real pause next to the word when `pauses` (measured in the
+    audio) has one, otherwise between Whisper's word times; the report counts both.
+    Cuts never reach into a neighbouring word, so no words are played twice or clipped
+    in from a dropped neighbour.
     """
     src = Path(source_path).expanduser().resolve()
     info = probe_media(src)
     out_fps = fps if fps else (info.fps or 24.0)
     if segment_indices is None:
-        picked = list(enumerate(segments))
+        picked = list(range(len(segments)))
     else:
         bad = [i for i in segment_indices if not 0 <= i < len(segments)]
         if bad:
@@ -135,39 +158,31 @@ def plan_from_transcript(
                 f"segment_indices {bad} out of range: the transcript has {len(segments)} "
                 f"segments (0-{len(segments) - 1})"
             )
-        picked = [(i, segments[i]) for i in segment_indices]
+        picked = list(segment_indices)
 
-    spans: list[tuple[int, Segment, float, float]] = []
-    for k, s in picked:
-        start = max(0.0, s.start - pad_seconds)
-        end = min(info.duration_seconds or s.end + pad_seconds, s.end + pad_seconds)
-        if spans:
-            pk, ps, pstart, pend = spans[-1]
-            if s.start >= ps.start and start < pend:
-                mid = min(max((ps.end + s.start) / 2, pstart), end)
-                spans[-1] = (pk, ps, pstart, mid)
-                start = mid
-        spans.append((k, s, start, end))
-
+    spans = wordcut.cut_spans(
+        segments, picked, pauses, wordcut.parse_drop_words(drop_words, segments),
+        pad_seconds, max_pause_seconds, info.duration_seconds or None)
     clips = [
         RoughCutClip(
             source_path=str(src),
-            in_seconds=start,
-            duration_seconds=end - start,
-            rationale=f"segment {k}: {s.text[:100]}",
-            name=s.text[:40] or f"segment {k}",
+            in_seconds=s.start,
+            duration_seconds=s.end - s.start,
+            rationale=(f"segment {s.seg}: " if s.whole_segment
+                       else f"segment {s.seg} words {s.first}-{s.last}: ") + s.text[:100],
+            name=s.text[:40] or f"segment {s.seg}",
         )
-        for k, s, start, end in spans
-        if end - start > 1e-3
+        for s in spans
     ]
-    return RoughCutPlan(
+    plan = RoughCutPlan(
         title=title,
         fps=out_fps,
         width=info.width or 1920,
         height=info.height or 1080,
         clips=clips,
-        notes=f"Built from {len(clips)} of {len(segments)} transcript segments.",
+        notes=f"Built from {len(set(s.seg for s in spans))} of {len(segments)} transcript segments.",
     )
+    return plan, wordcut.cut_report(spans, pauses is not None)
 
 
 def plan_from_scenes(

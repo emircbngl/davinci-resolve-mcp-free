@@ -85,9 +85,9 @@ After connecting, ask Claude things like:
 | Group | Tools |
 |---|---|
 | Session | `resolve_pilot_status` · `get_workflow_guide` · `setup_bridge` |
-| Analyze | `probe_media` · `detect_scenes` · `detect_beats` · `transcribe_audio` (cached, background jobs) · `analyze_quality` (silence, black, freeze, loud/quiet) |
+| Analyze | `probe_media` · `detect_scenes` · `detect_beats` · `transcribe_audio` (cached, background jobs, word timings) · `scan_speech` (pauses, fillers, repeats, retakes to cut) · `analyze_quality` (silence, black, freeze, loud/quiet) |
 | See | `grab_frames` · `scene_frames` · `read_video` (speech + frames) · `screenshot_resolve` (macOS) · `timeline_frames` (the edit as Resolve renders it, any OS) — images Claude looks at |
-| Plan | `plan_from_transcript` · `plan_from_scenes` · `create_plan` · `get_plan` · `edit_plan` |
+| Plan | `plan_from_transcript` (cuts placed in the real pauses between words; `drop_words`, `max_pause_seconds`) · `plan_from_scenes` · `create_plan` · `get_plan` · `edit_plan` |
 | Export | `export_fcpxml` · `export_srt` |
 | Resolve (auto-routed) | `get_resolve_state` · `import_timeline` · `add_markers` · `edit_markers` (list / delete / update) · `manage_timelines` (list / open / rename / duplicate) · `add_quality_markers` · `set_clip_color` · `apply_lut` · `grade_clips` (CDL by numbers or copy a grade, verified on the frames) · `queue_render` (preset, or format / codec / size / range) · `make_format_version` (9:16, 4:5, 1:1 copy, centre-cropped) · `render_status` · `add_subtitles` · `add_title` · `checkpoint` (save / restore / .drp backup) · `open_page` |
 | Build timelines (auto-routed) | `import_media` (into bins, no duplicates) · `append_clips` (source ranges onto the current, a named or a new timeline, any track) · `remove_clips` (by index, name-checked) |

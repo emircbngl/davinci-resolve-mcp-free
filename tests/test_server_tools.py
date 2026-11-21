@@ -24,7 +24,7 @@ def test_tool_hints_match_what_the_tools_do():
     for name in ("run_lua", "send_keystroke", "menu_pick", "apply_lut", "remove_clips",
                  "export_fcpxml", "export_srt", "export_timeline"):
         assert ann[name]["destructiveHint"] is True, name
-    for name in ("probe_media", "get_plan", "get_resolve_state", "list_lua_snippets"):
+    for name in ("probe_media", "get_plan", "get_resolve_state", "list_lua_snippets", "scan_speech"):
         assert ann[name]["readOnlyHint"] is True, name
 
 
@@ -35,6 +35,7 @@ EXPECTED_TOOLS = {
     "resolve_pilot_status", "get_workflow_guide", "setup_bridge",
     # analyze
     "probe_media", "detect_scenes", "detect_beats", "transcribe_audio", "analyze_quality",
+    "scan_speech",
     # see
     "grab_frames", "scene_frames", "read_video", "screenshot_resolve", "timeline_frames",
     # plan
@@ -55,7 +56,7 @@ EXPECTED_TOOLS = {
 
 def test_server_registers_exactly_the_expected_tools():
     names = set(_annotations())
-    assert len(EXPECTED_TOOLS) == 48
+    assert len(EXPECTED_TOOLS) == 49
     assert names == EXPECTED_TOOLS, (sorted(EXPECTED_TOOLS - names), sorted(names - EXPECTED_TOOLS))
 
 

@@ -57,6 +57,7 @@ from resolve_pilot import __version__, analyzers, bridge, control, luts, traps, 
 from resolve_pilot.analyzers import frames as frame_grab
 from resolve_pilot._paths import state_dir
 from resolve_pilot.editorial import ops as plan_ops
+from resolve_pilot.editorial import wordcut
 from resolve_pilot.editorial import roughcut, store
 from resolve_pilot.exporters import fcpxml as fcpxml_export
 from resolve_pilot.exporters import srt as srt_export
@@ -96,8 +97,9 @@ Resolve's own window.
 Editing loop:
 1. Analyze: probe_media, then detect_scenes / detect_beats / transcribe_audio (cached; returns \
 numbered segments). Look before choosing shots: scene_frames, read_video, grab_frames.
-2. Draft: plan_from_transcript (pick segment_indices), plan_from_scenes, or create_plan (any \
-sources, optional music bed). Plans are stored server-side; you get a plan_id.
+2. Draft: plan_from_transcript (pick segment_indices; for talking footage run scan_speech \
+first and pass its fillers / repeats as drop_words, cuts land in real pauses between words), \
+plan_from_scenes, or create_plan (any sources, optional music bed). Plans are stored server-side; you get a plan_id.
 3. Refine with edit_plan operations (keep/remove/move/trim/update/insert/set) instead of \
 resending the plan. Every plan response lists `errors` and `warnings`; resolve them.
 4. export_fcpxml(plan_id), then import_timeline(path) when live, or tell the user \
@@ -675,7 +677,11 @@ def transcribe_audio(
     language: Annotated[str | None, Field(description="ISO code like 'en' or 'tr'; omit to auto-detect.")] = None,
     model: Annotated[str | None, Field(description="large-v3-turbo (default), large-v3, medium, small, base, tiny.")] = None,
     engine: Literal["auto", "mlx", "faster-whisper"] = "auto",
-    word_timestamps: bool = False,
+    word_timestamps: Annotated[bool, Field(description=(
+        "Record each word's time (needed for word-level cuts). false is a little faster."))] = True,
+    detail: Annotated[Literal["segments", "words"], Field(description=(
+        "'words' lists every word with its index, '[12] 31.20-35.90 0:So 1:today (0.8s) 2:we', "
+        "where (0.8s) is a measured pause; address a word as '12.1' in drop_words."))] = "segments",
     offset: Annotated[int, Field(ge=0, description="First segment to return (for paging).")] = 0,
     limit: Annotated[int, Field(ge=0, description="Segments to return; 0 = all.")] = 300,
     wait_seconds: Annotated[float, Field(ge=0, le=600, description="How long to wait before returning status='running'.")] = 45.0,
@@ -686,7 +692,8 @@ def transcribe_audio(
     Returns `transcript_id` and numbered segments as "[i] start-end text". Long files keep
     transcribing in the background: if `status` is "running", call again with the same
     arguments a little later. Page through long transcripts with offset/limit (cached
-    calls are instant). Pass `transcript_id` + `segment_indices` to plan_from_transcript.
+    calls are instant). Pass `transcript_id` + `segment_indices` to plan_from_transcript;
+    scan_speech lists pauses, fillers, repeats and retakes worth cutting.
     """
     res = transcripts.get_or_start(path, model=model, language=language,
                                    word_timestamps=word_timestamps, engine=engine,
@@ -699,7 +706,12 @@ def transcribe_audio(
                        "is running).")
         return res
     segs = res["segments"]
-    shown = transcripts.format_segments(segs, offset, limit)
+    has_words = any(s.get("words") for s in segs)
+    pauses = transcripts.transcript_pauses(res)
+    if detail == "words":
+        shown = wordcut.format_words(transcripts.transcript_segments(res), pauses, offset, limit)
+    else:
+        shown = transcripts.format_segments(segs, offset, limit)
     out = {
         "status": "done",
         "cached": res["cached"],
@@ -709,8 +721,12 @@ def transcribe_audio(
         "engine": res["engine"],
         "model": res["model"],
         "segment_count": len(segs),
+        "word_timings": has_words,
+        "pauses_measured": pauses is not None,
         "segments": shown,
     }
+    if pauses is None and res.get("pauses_error"):
+        out["pauses_error"] = res["pauses_error"]
     nxt = offset + len(shown)
     if nxt < len(segs):
         out["next_offset"] = nxt
@@ -842,18 +858,31 @@ def plan_from_transcript(
     source_path: Annotated[str | None, Field(description="Defaults to the transcript's file.")] = None,
     segments: Annotated[list[SegmentIn] | None, Field(description="Inline {start, end, text} segments instead of transcript_id.")] = None,
     title: str = "Transcript Roughcut",
-    pad_seconds: Annotated[float, Field(ge=0, le=2, description="Breathing room around each segment.")] = 0.2,
+    pad_seconds: Annotated[float, Field(ge=0, le=2, description=(
+        "Pause kept on each side of a cut (0.2 natural, 0.05 punchy); never reaches into "
+        "a neighbouring word."))] = 0.2,
     fps: Annotated[float | None, Field(gt=0, description="Timeline fps; defaults to the source's.")] = None,
+    drop_words: Annotated[list[str] | None, Field(description=(
+        "Words to cut out of the kept segments: 'segment.word' or 'segment.first-last', "
+        "e.g. ['12.0', '14.3-5']. Indices from transcribe_audio(detail='words') or scan_speech."))] = None,
+    max_pause_seconds: Annotated[float | None, Field(ge=0, le=10, description=(
+        "Shorten longer pauses inside kept speech to this (0.4 = tight jump cuts). "
+        "Default: leave them."))] = None,
 ) -> dict[str, Any]:
     """Draft a rough cut from transcript segments: one clip per kept segment.
 
     Choose the segments editorially (best takes, complete thoughts, no false starts) and
-    pass their indices in the order they should play. Neighbouring segments never
-    overlap, so no words are repeated. Returns the stored plan (plan_id, clips, warnings).
+    pass their indices in the order they should play; drop_words removes fillers, repeats
+    and false starts inside them. Cuts are placed in the real pause next to each word
+    (measured in the audio), never inside a word. `cut_report` counts the cuts that had
+    no pause to sit in (`tight`): look at or listen to those. Returns the stored plan
+    (plan_id, clips, warnings).
     """
+    pauses = None
     if transcript_id:
         data = transcripts.require_transcript(transcript_id)
         segs = transcripts.transcript_segments(data)
+        pauses = transcripts.transcript_pauses(data)
         source_path = source_path or data["source_path"]
     elif segments:
         segs = [Segment(s.start, s.end, s.text) for s in segments]
@@ -861,9 +890,44 @@ def plan_from_transcript(
         raise ValueError("Pass transcript_id (from transcribe_audio) or segments.")
     if not source_path:
         raise ValueError("source_path is required when passing inline segments.")
-    plan = roughcut.plan_from_transcript(source_path, segs, title=title, pad_seconds=pad_seconds,
-                                         fps=fps, segment_indices=segment_indices)
-    return _store_and_summarize(plan)
+    plan, report = roughcut.transcript_cut(
+        source_path, segs, title=title, pad_seconds=pad_seconds, fps=fps,
+        segment_indices=segment_indices, pauses=pauses, drop_words=drop_words,
+        max_pause_seconds=max_pause_seconds)
+    out = _store_and_summarize(plan)
+    out["cut_report"] = report
+    return out
+
+
+@tool(READ, title="Scan speech for cuts")
+def scan_speech(
+    transcript_id: Annotated[str, Field(description="From transcribe_audio.")],
+    min_pause_seconds: Annotated[float, Field(ge=0.2, le=30, description="Report pauses at least this long.")] = 0.7,
+    extra_fillers: Annotated[list[str] | None, Field(description=(
+        "More filler words to flag, e.g. the speaker's habit words."))] = None,
+) -> dict[str, Any]:
+    """List what an editor would consider cutting from a talk: long pauses, filler words,
+    immediate repeats ("the the", "so we, so we") and retakes (a line started twice).
+
+    Candidates, not decisions: read them against the transcript. `drop` values go into
+    plan_from_transcript(drop_words=[...]); for a retake leave one of the two segments
+    out of segment_indices (usually the earlier); long pauses inside a segment shrink
+    with max_pause_seconds. Whisper often leaves "um" / "uh" out of the text, so a
+    missing filler here does not mean it was not said.
+    """
+    data = transcripts.require_transcript(transcript_id)
+    out = wordcut.scan(transcripts.transcript_segments(data), transcripts.transcript_pauses(data),
+                       language=data.get("language"), min_pause_seconds=min_pause_seconds,
+                       extra_fillers=extra_fillers)
+    out["transcript_id"] = transcript_id
+    if not out["word_timings"]:
+        out["note"] = ("This transcript has no word timings, so fillers and repeats cannot be "
+                       "found: run transcribe_audio again with word_timestamps=true.")
+    elif not out["pauses_measured"]:
+        out["note"] = ("Pauses could not be measured in the audio"
+                       + (f" ({data['pauses_error']})" if data.get("pauses_error") else "")
+                       + ", so long_pauses is empty.")
+    return out
 
 
 @tool(WRITE_FILES, title="Plan from scenes")
