@@ -206,6 +206,28 @@ Not verified / known limits:
   transcript (said in the tool description). Untranscribed sound between words was left out on
   purpose: with edges this far off, it would flag ordinary speech.
 
+# Captions that follow the cut (one-prompt video, step 2)
+
+Today captions only fit a timeline that plays the transcribed file from its start:
+`export_srt` / `add_subtitles` write the source's own times. After a rough cut (segments
+picked, reordered, words dropped) every caption is in the wrong place, and the only way out is
+to render the cut and transcribe it again.
+
+- [ ] A plan remembers the transcript it was cut from (`transcript_ids`, per source file)
+- [ ] `editorial/captions.py` (pure): each clip takes the transcript words whose middle lies in
+      its source range and moves them to the clip's place on the timeline, on the exporter's
+      own frame positions (`fcpxml.layout`), so captions match the imported timeline. Words
+      become cues: break at the line limit, at sentence ends and at gaps; short cues get a
+      minimum time; no overlaps. Transcripts without words fall back to whole segments
+- [ ] `export_srt(plan_id=...)` and `add_subtitles(plan_id=...)`; extra `transcript_ids` for
+      plans built with create_plan. Clips whose source has no transcript are reported, and it
+      is an error when no clip has one
+- [ ] Tests: reorder, drop, fade-in offset, frame positions, segment fallback, missing
+      transcripts, edit_plan then export again; red without the mapping
+- [ ] Real check on the vlog cut: transcribe the rendered cut and compare word times with the
+      captions
+- [ ] Guides (subtitle, rough cut), instructions, README, CHANGELOG; full pytest + ruff
+
 # Issue #4: the bridge does not run on Resolve 21.1.2 Free
 
 Reported (Mitch, issue #4, macOS Apple Silicon): on 21.1.2 Free the Scripts-menu entry does
