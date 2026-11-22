@@ -1051,7 +1051,10 @@ def scan_speech(
     plan_from_transcript(drop_words=[...]); for a retake leave one of the two segments
     out of segment_indices (usually the earlier); long pauses inside a segment shrink
     with max_pause_seconds. Whisper often leaves "um" / "uh" out of the text, so a
-    missing filler here does not mean it was not said.
+    missing filler here does not mean it was not said. `likely_invented` are segments
+    that read like the credits and sign-offs Whisper writes over music or silence
+    ("Subtitles by…", "Thanks for watching"): leave them out of segment_indices unless
+    the speaker really says it.
     """
     data = transcripts.require_transcript(transcript_id)
     out = wordcut.scan(transcripts.transcript_segments(data), transcripts.transcript_levels(data),

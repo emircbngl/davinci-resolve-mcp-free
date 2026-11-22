@@ -199,6 +199,18 @@ def test_scan_finds_pauses_fillers_repeats_and_retakes():
         "önce kurulumu gösterelim. önce kurulumu gösterelim ve sonra ilk videoyu keselim.")
 
 
+def test_scan_marks_the_lines_whisper_invents_over_music_and_silence():
+    # All four were transcribed from real vlog clips; nobody says them in the footage.
+    said = SPEECH + [Segment(20.0, 20.3, " Altyazı M.K."), Segment(22.0, 23.0, "İzlediğiniz için teşekkür ederim."),
+                     Segment(25.0, 33.5, "Bu dizinin betimlemesi için teşekkür ederim."),
+                     Segment(40.0, 41.0, "Thanks for watching!"), Segment(42.0, 43.0, "Teşekkür ederim abi.")]
+    out = wordcut.scan(said, None, language="tr")
+    assert [(c["segment"], c["text"]) for c in out["likely_invented"]] == [
+        (4, "Altyazı M.K."), (5, "İzlediğiniz için teşekkür ederim."),
+        (6, "Bu dizinin betimlemesi için teşekkür ederim."), (7, "Thanks for watching!")]
+    assert wordcut.scan(SPEECH, LEVELS, language="tr")["likely_invented"] == []   # real speech, a real thank-you
+
+
 def test_scan_in_english_and_with_the_speakers_own_fillers():
     talk = [_seg("Um so I I think, like, you know it works",
                  (0.0, 0.2, "Um", 0.9), (0.2, 0.4, "so", 1.0), (0.4, 0.5, "I", 1.0), (0.5, 0.6, "I", 1.0),

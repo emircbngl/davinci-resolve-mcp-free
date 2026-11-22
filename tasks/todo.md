@@ -242,6 +242,14 @@ this night takes what can be proven here: a vlog is many files, and today every 
   is now for quarter turns only.
 - Whisper called one 28-word clip Russian and the recitation Arabic (language left to it in
   this run). The guide tells the agent to pass the language when the user names it.
+- The first full run kept six lines nobody says ("Altyazı M.K." and the like), captions
+  included. Measured on the 350 real segments: their word probability (0.87-0.94) and the level
+  under them look like speech, so neither can flag them, and a mean word probability under 0.5 would flag
+  56 segments, one of them invented. `scan_speech` now lists them by wording (`likely_invented`): 6 of 350, all six
+  the invented ones.
+- Second full run with the invented lines left out: 198 clips, 380.0 s, 176 captions, none of
+  the six lines in them. Rendering the same length took 184 s, 331 s (tests running beside
+  it) and 400 s on three runs: say "3 to 7 minutes", not "3".
 - 14 mutations over the new code: 13 red at once; "camera time although one file has none"
   stayed green because the test's two orders agreed. The test now uses orders that differ.
 - Not done: step 4 (audio: fades at cuts, loudness per clip, ducked bed) and the Resolve side of

@@ -368,6 +368,25 @@ def _specs(refs: list[Ref]) -> list[str]:
     return [f"{s}.{a}" if a == b else f"{s}.{a}-{b}" for s, a, b in runs]
 
 
+# Lines Whisper writes over music, noise or silence: the credits and sign-offs of the
+# subtitled videos it learned from. On real vlog footage 6 such segments turned up in 4 of
+# 11 files, with word probabilities of 0.87-0.94 and sound under them, so neither the
+# probability nor the level gives them away; only the wording does. A speaker can really
+# say "thanks for watching", so they are candidates like everything else here.
+_CREDIT_LINES = re.compile(
+    r"altyaz[ıi]\s*m\.?\s*k\b|izlediğiniz için teşekkür|betimlemesi için teşekkür|abone olmayı unutmayın"
+    r"|thanks?( you)? for watching|subtitles? (by|made by|provided by)|please subscribe"
+    r"|amara\.org|untertitel (der|von|im auftrag)|sous-titres? (réalisés|faits|par)"
+    r"|subt[ií]tulos (por|realizados)|www\.\S+\.\w{2,}",
+    re.IGNORECASE)
+
+
+def credit_lines(segments: list[Segment]) -> list[dict]:
+    """Segments that read like subtitle credits or sign-offs Whisper tends to invent."""
+    return [{"segment": i, "text": s.text.strip()[:80], "start": round(s.start, 2)}
+            for i, s in enumerate(segments) if _CREDIT_LINES.search(s.text)]
+
+
 def scan(segments: list[Segment], levels: list[float] | None,
          language: str | None = None, min_pause_seconds: float = 0.7,
          extra_fillers: list[str] | None = None, limit: int = 40) -> dict:
@@ -456,4 +475,5 @@ def scan(segments: list[Segment], levels: list[float] | None,
         **capped("fillers", fillers),
         **capped("repeats", repeats),
         **capped("retakes", retakes),
+        **capped("likely_invented", credit_lines(segments)),
     }
