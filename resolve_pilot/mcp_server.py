@@ -8,7 +8,7 @@ Tool groups:
 - analyze:  probe_media, detect_scenes, detect_beats, transcribe_audio, analyze_quality
 - see:      grab_frames, scene_frames, read_video, screenshot_resolve (macOS)
 - plan:     plan_from_transcript, plan_from_scenes, create_plan, get_plan, edit_plan
-- export:   export_fcpxml, export_srt
+- export:   export_fcpxml, export_srt, render_preview
 - resolve:  get_resolve_state, import_timeline, add_markers, add_quality_markers,
             set_clip_color, apply_lut, queue_render, render_status, open_page, run_lua,
             list_lua_snippets, render_lua_snippet
@@ -53,13 +53,15 @@ except ImportError:  # mcp 1.x
     from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 
-from resolve_pilot import __version__, analyzers, bridge, control, luts, traps, verified
+from resolve_pilot import __version__, _jobs, analyzers, bridge, control, luts, traps, verified
 from resolve_pilot.analyzers import frames as frame_grab
+from resolve_pilot.analyzers import speech as speech_levels
 from resolve_pilot._paths import state_dir
 from resolve_pilot.editorial import ops as plan_ops
-from resolve_pilot.editorial import captions, wordcut
+from resolve_pilot.editorial import captions, review, wordcut
 from resolve_pilot.editorial import roughcut, store
 from resolve_pilot.exporters import fcpxml as fcpxml_export
+from resolve_pilot.exporters import preview as preview_export
 from resolve_pilot.exporters import srt as srt_export
 from resolve_pilot.lua_snippets import library as lua_lib
 from resolve_pilot.transcribe import store as transcripts
@@ -102,14 +104,18 @@ first and pass its fillers / repeats as drop_words, cuts land in real pauses bet
 plan_from_scenes, or create_plan (any sources, optional music bed). Plans are stored server-side; you get a plan_id.
 3. Refine with edit_plan operations (keep/remove/move/trim/update/insert/set) instead of \
 resending the plan. Every plan response lists `errors` and `warnings`; resolve them.
-4. export_fcpxml(plan_id), then import_timeline(path) when live, or tell the user \
+4. render_preview(plan_id): the plan as a small MP4 without Resolve, plus `issues` (flash \
+clips, cuts in sound, level jumps, silence, black or frozen picture, captions too fast). Its \
+times are timeline times: look with grab_frames(path, ...), fix with edit_plan, render again. \
+Give `path` to the user to watch.
+5. export_fcpxml(plan_id), then import_timeline(path) when live, or tell the user \
 File > Import > Timeline.
-5. Verify with get_resolve_state(include_clips=true) and timeline_frames (look at the result), \
+6. Verify with get_resolve_state(include_clips=true) and timeline_frames (look at the result), \
 and iterate. When live, change the open timeline directly instead of re-importing (each import \
 makes a new timeline): append_clips adds source ranges (source seconds; a B-roll shot on track 2 \
 at record_seconds; new_timeline creates one), import_media fills bins, remove_clips deletes by \
 index from get_resolve_state (pass names; ask first). Read their `warnings`.
-6. After queue_render(start=true), render_status(wait_seconds=...) says when it is done.
+7. After queue_render(start=true), render_status(wait_seconds=...) says when it is done.
 
 Subtitles: transcribe_audio, then add_subtitles(transcript_id=...) puts them on the timeline's \
 subtitle track (or export_srt for a file). For a rough cut pass plan_id instead \
@@ -186,12 +192,29 @@ def _compact_schema(node: Any, parent: str | None = None) -> Any:
     return node
 
 
+def _plain_optionals(schema: dict[str, Any]) -> dict[str, Any]:
+    """Advertise an optional parameter as its type, not as `anyOf [type, null]` + `default
+    null`: a sixth of the schema text, and some clients lose the type behind the anyOf.
+    Leaving the parameter out is how it is omitted; pydantic still accepts null. Only the
+    tool's own parameters: inside nested models null can mean something (audio_bed: null).
+    """
+    props = {}
+    for name, prop in (schema.get("properties") or {}).items():
+        kinds = prop.get("anyOf") if isinstance(prop, dict) else None
+        if (kinds and len(kinds) == 2 and {"type": "null"} in kinds
+                and prop.get("default", 0) is None):
+            (kind,) = [k for k in kinds if k != {"type": "null"}]
+            prop = {**kind, **{k: v for k, v in prop.items() if k not in ("anyOf", "default")}}
+        props[name] = prop
+    return {**schema, "properties": props} if props else schema
+
+
 def _compact_registered(name: str) -> None:
     # Both SDKs keep registered tools on a private _tool_manager; if that ever moves,
     # the tool keeps its full schema, which is fine.
     try:
         registered = mcp._tool_manager.get_tool(name)
-        registered.parameters = _compact_schema(registered.parameters)
+        registered.parameters = _plain_optionals(_compact_schema(registered.parameters))
         registered.description = inspect.cleandoc(registered.description or "")
     except Exception:
         pass
@@ -1122,6 +1145,28 @@ def _export_plan_srt(plan_id: str, transcript_ids: list[str], out_path: str | No
     errors = roughcut.validate_plan(plan)["errors"]
     if errors:
         raise ValueError("Fix these plan errors first (edit_plan): " + "; ".join(errors))
+    cues, report, warnings = _plan_cues(plan, transcript_ids, max_chars_per_line, max_lines)
+    missing = report["clips_without_transcript"]
+    if len(missing) == len(plan.clips):
+        raise ValueError(
+            "No clip of this plan has a transcript. Run transcribe_audio on the sources and pass "
+            "transcript_ids. " + " ".join(warnings))
+    if not cues:
+        raise ValueError("Nothing is said in the kept ranges of this plan; there are no captions to write.")
+    if out_path:
+        target, reserved = _explicit_output(out_path, overwrite), False
+    else:
+        target, reserved = _default_output(plan.clips[0].source_path, plan.title, ".srt"), True
+    out = _srt_result(cues, target, reserved)
+    out.update(timed_to_plan=plan_id, timeline_seconds=_r(plan.total_seconds), warnings=warnings)
+    if missing:
+        out["clips_without_transcript"] = missing
+    return out
+
+
+def _plan_cues(plan: roughcut.RoughCutPlan, transcript_ids: list[str], max_chars_per_line: int = 42,
+               max_lines: int = 2) -> tuple[list[srt_export.SrtCue], dict[str, Any], list[str]]:
+    """(captions on the plan's timeline, captions.plan_captions report, warnings)."""
     warnings: list[str] = []
     by_source: dict[str, dict[str, Any]] = {}
     for path, tid in plan.transcript_ids.items():
@@ -1138,29 +1183,15 @@ def _export_plan_srt(plan_id: str, transcript_ids: list[str], out_path: str | No
         plan, {k: transcripts.transcript_segments(d) for k, d in by_source.items()},
         max_chars_per_line=max_chars_per_line, max_lines=max_lines)
     missing = report["clips_without_transcript"]
-    if len(missing) == len(plan.clips):
-        raise ValueError(
-            "No clip of this plan has a transcript. Run transcribe_audio on the sources and pass "
-            "transcript_ids. " + " ".join(warnings))
-    if not cues:
-        raise ValueError("Nothing is said in the kept ranges of this plan; there are no captions to write.")
-    if missing:
+    if 0 < len(missing) < len(plan.clips):
         names = sorted({Path(plan.clips[i].source_path).name for i in missing})
         warnings.append(f"{len(missing)} clip(s) have no transcript and get no captions "
                         f"({', '.join(names)}); transcribe_audio them and pass transcript_ids")
-    if not report["word_level"]:
+    if cues and not report["word_level"]:
         warnings.append("a transcript has no word timings, so its captions move per segment "
                         "and cuts inside a segment are not followed; transcribe_audio again "
                         "(word_timestamps=true)")
-    if out_path:
-        target, reserved = _explicit_output(out_path, overwrite), False
-    else:
-        target, reserved = _default_output(plan.clips[0].source_path, plan.title, ".srt"), True
-    out = _srt_result(cues, target, reserved)
-    out.update(timed_to_plan=plan_id, timeline_seconds=_r(plan.total_seconds), warnings=warnings)
-    if missing:
-        out["clips_without_transcript"] = missing
-    return out
+    return cues, report, warnings
 
 
 @tool(DESTRUCTIVE, title="Export SRT")
@@ -1217,6 +1248,107 @@ def export_srt(
     if len(kept) < len(raw):
         out["dropped_zero_length_cues"] = len(raw) - len(kept)
     return out
+
+
+def _preview_key(plan: roughcut.RoughCutPlan, height: int, cues: list[srt_export.SrtCue]) -> str:
+    """Changes when the plan, its captions or a source file does."""
+    files = []
+    for path in sorted({c.source_path for c in plan.clips} | ({plan.audio_bed.source_path} if plan.audio_bed else set())):
+        try:
+            st = Path(path).expanduser().stat()
+            files.append([path, st.st_size, int(st.st_mtime)])
+        except OSError:
+            files.append([path, None, None])
+    blob = json.dumps([plan.to_dict(), height, [[c.start, c.end, c.text] for c in cues], files],
+                      sort_keys=True, ensure_ascii=False)
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def _render_and_review(plan: roughcut.RoughCutPlan, target: Path, height: int,
+                       cues: list[srt_export.SrtCue], report) -> dict[str, Any]:
+    out = preview_export.render(plan, target, height=height, cues=cues, on_progress=report)
+    lay = fcpxml_export.layout(roughcut.plan_to_timeline_spec(plan))
+    starts = [b * out["seconds"] / out["frames"] for b in lay.bounds]
+    infos = {c.source_path: analyzers.probe_media_cached(c.source_path) for c in plan.clips}
+    issues = review.plan_issues(plan, starts, infos) + review.caption_issues(cues, starts)
+    not_checked = []
+    try:
+        spans, meta = analyzers.analyze_quality(out["path"])
+        issues += review.quality_issues(spans, starts, out["seconds"])
+        if meta["detectors_skipped"]:
+            not_checked.append("this ffmpeg lacks: " + ", ".join(map(str, meta["detectors_skipped"])))
+    except Exception as e:  # the preview exists; say what could not be looked at
+        not_checked.append(f"silence / black / frozen picture: {e}")
+    try:
+        issues += review.cut_issues(plan, starts, speech_levels.voice_levels(out["path"]))
+    except Exception as e:
+        not_checked.append(f"sound at the cuts: {e}")
+    out.update(review.summarize(issues), not_checked=not_checked, cuts=len(review.real_cuts(plan)))
+    return out
+
+
+@tool(WRITE_FILES, title="Render and check a preview")
+def render_preview(
+    plan_id: str,
+    height: Annotated[int, Field(ge=90, le=1080, description="Preview height in pixels (never above the plan's).")] = 540,
+    transcript_ids: Annotated[list[str] | None, Field(description=(
+        "Transcripts of the plan's sources for captions, when the plan does not know them (see export_srt)."))] = None,
+    wait_seconds: Annotated[float, Field(ge=0, le=600, description=(
+        "How long to wait; on `status: running` call again with the same arguments."))] = 60.0,
+    refresh: Annotated[bool, Field(description="Render again even if this plan's preview is up to date.")] = False,
+) -> dict[str, Any]:
+    """Watch a plan without Resolve: render it to a small MP4 and check it automatically.
+
+    The preview has exactly the timeline's frames, so its times are timeline times:
+    look at any moment with grab_frames(path, at_seconds=[...]) or read_video(path), and
+    give `path` to the user to watch. Captions ride along as a subtitle track when the
+    plan's transcripts are known. `issues` lists what to look at or listen to, each with
+    its clip and timeline second: flash_clip, cut_in_sound (no dip to cut in: a clipped
+    syllable or a click), level_jump, silence, black_picture, frozen_picture,
+    fast_caption, rotated_source. They are candidates, not verdicts: check them, fix the
+    plan with edit_plan and render again (one file per plan, replaced). `not_shown` says
+    what the preview leaves out (dissolves, fades); `not_checked` what could not be
+    measured.
+    """
+    plan = store.load_plan(plan_id)
+    validation = roughcut.validate_plan(plan)
+    if validation["errors"]:
+        raise ValueError("Fix these plan errors first (edit_plan): " + "; ".join(validation["errors"]))
+    cues, _, caption_warnings = _plan_cues(plan, list(transcript_ids or []))
+    key = _preview_key(plan, height, cues)
+    target = state_dir("previews") / f"{plan_id}.mp4"
+    note = target.with_suffix(".json")
+
+    def finish(result: dict[str, Any], cached: bool) -> dict[str, Any]:
+        return {"status": "done", "cached": cached, **result,
+                "seconds": _r(result["seconds"]), "plan_warnings": validation["warnings"],
+                "caption_warnings": caption_warnings,
+                "next_step": "Look at the issues with grab_frames(path, at_seconds=[...]) or "
+                             "read_video(path); fix with edit_plan and render again. When it is "
+                             "right: export_fcpxml(plan_id)."}
+
+    if not refresh and target.is_file():
+        try:
+            saved = json.loads(note.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            saved = {}
+        if saved.get("key") == key:
+            return finish(saved["result"], cached=True)
+
+    def work(report) -> dict[str, Any]:
+        result = _render_and_review(plan, target, height, cues, report)
+        tmp = note.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"key": key, "result": result}, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(note)
+        return result
+
+    job = _jobs.run(f"preview-{plan_id}-{key}-{refresh}", work, wait_seconds)
+    if job["status"] == "running":
+        done, total = job["progress"] or [0, len(plan.clips)]
+        return {"status": "running", "elapsed_seconds": job["elapsed_seconds"],
+                "pieces_done": done, "pieces": total,
+                "next_step": "Call render_preview again with the same arguments."}
+    return finish(job["result"], cached=False)
 
 
 # ────────────────────────────────────────────────────────────────────────────

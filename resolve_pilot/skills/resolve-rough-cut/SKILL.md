@@ -38,13 +38,17 @@ Builds a first-pass timeline from raw footage, deciding what to keep from the tr
     {"op": "set", "fade_in_seconds": 0.5, "fade_out_seconds": 1.0}]
    ```
    Fix everything in `errors`; read every `warnings` entry (clip past the end of its source, dissolve without handles, reused footage).
-7. **`export_fcpxml(plan_id)`** → `path`.
-8. **Deliver**
+7. **Watch and check it: `render_preview(plan_id)`** — the cut as a small MP4, without Resolve (on `status: running` call again). Its frames are the timeline's frames, so every time in it is a timeline time.
+   - Read `issues`; each has its clip and timeline second. `cut_in_sound`: no dip in the sound at the cut, a clipped syllable or a click is likely (move the cut with `trim`, or drop from pause to pause). `level_jump`: the voice level steps across the cut (another speaker, another distance). `flash_clip`: under 0.4 s. `silence`, `black_picture`, `frozen_picture`: dead stretches. `fast_caption`: nobody reads that. `rotated_source`: the file is tagged as turned; look at a frame.
+   - They are candidates, not verdicts. Look at the moments yourself: `grab_frames(path, at_seconds=[...])`, or `read_video(path)` for speech next to its frames. Fix with `edit_plan` and render again: one file per plan, replaced.
+   - Tell the user the `path` so they can watch the cut before anything touches Resolve. `not_shown` lists what a preview leaves out (dissolves play as cuts).
+8. **`export_fcpxml(plan_id)`** → `path`.
+9. **Deliver**
    - studio / bridge: `import_timeline(path, timeline_name="...")`, then `get_resolve_state(include_clips=true)` and check clip count and duration against the plan.
    - manual: "In Resolve: File › Import › Timeline… and pick `<path>`."
    - Captions for the cut: `add_subtitles(plan_id=...)` (or `export_srt(plan_id=...)` for a file). They follow the plan's cut; never use the transcript's own times on a cut timeline.
-9. **Iterate live** (studio / bridge) on the imported timeline instead of exporting again, which would create another timeline: `append_clips` adds a missed line or a B-roll shot (`track=2`, `record_seconds=...`), `remove_clips` drops one (read the indices with `get_resolve_state(include_clips=true)` and ask first). Keep the plan in step with what you changed if you may export again.
-10. **Reply** with a short table — #, source in–out, duration, rationale — and the total length.
+10. **Iterate live** (studio / bridge) on the imported timeline instead of exporting again, which would create another timeline: `append_clips` adds a missed line or a B-roll shot (`track=2`, `record_seconds=...`), `remove_clips` drops one (read the indices with `get_resolve_state(include_clips=true)` and ask first). Keep the plan in step with what you changed if you may export again.
+11. **Reply** with a short table — #, source in–out, duration, rationale — and the total length.
 
 ## Conventions
 
@@ -77,9 +81,10 @@ User: *"I have a 25-min interview at `~/Footage/jane.mp4`. Give me a 4-minute hi
 3. Read the segments, choose 15 (≈240 s total). `scan_speech` → 2 retakes (keep the later takes), 6 repeats, 4 fillers.
 4. `plan_from_transcript(transcript_id, segment_indices=[…], drop_words=[…], title="Jane — 4 min")` → `cut_report`: 38 cuts, 36 in a pause, 2 tight.
 5. `edit_plan`: trims on two clips, `set` fades. Warnings: none.
-6. `export_fcpxml` → `~/Footage/Jane_4_min.fcpxml`; `import_timeline` (bridge) → 15 clips, 4:02.
+6. `render_preview` → `…/previews/jane-4-min-….mp4`, 4:02, issues: 1 `cut_in_sound` at 1:12 (clip 5), 2 `level_jump`. `grab_frames` there, `trim` clip 5 by 0.1 s, render again: clean.
+7. `export_fcpxml` → `~/Footage/Jane_4_min.fcpxml`; `import_timeline` (bridge) → 15 clips, 4:02.
    Captions asked for: `add_subtitles(plan_id=...)` → 58 captions on the cut's own times.
-7. Reply with the table and the timeline name.
+8. Reply with the table, the preview path and the timeline name.
 
 ## Failure modes
 

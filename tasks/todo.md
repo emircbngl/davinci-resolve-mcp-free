@@ -206,6 +206,58 @@ Not verified / known limits:
   transcript (said in the tool description). Untranscribed sound between words was left out on
   purpose: with edges this far off, it would flag ordinary speech.
 
+# A preview without Resolve, checked automatically (one-prompt video, step 3)
+
+Today nobody sees a plan until it is imported into Resolve, and nothing looks at the result. An
+agent working from one prompt needs to watch its own cut and be told what is wrong with it.
+
+- [x] Room in the tool list: the advertised schemas are 105 characters under their 50,000
+      budget. Optional top-level parameters are advertised as `anyOf [type, null]` + `default
+      null`; advertise the plain type (pydantic still accepts null). Nested models keep theirs
+      (`audio_bed: null` means "remove")
+- [x] `exporters/preview.py`: render a plan to a small MP4 with ffmpeg alone. Every clip gets
+      exactly the frames `fcpxml.layout` gives it (so times in the preview are timeline times,
+      and captions fit), PCM audio in the intermediates (AAC padding made a 45-clip preview
+      1.6 s too long), fade gaps as black, the audio bed mixed in, sources shown as players show
+      them (rotation tag applied) inside the plan's frame. Dissolves are shown as cuts and said
+      so. Captions as a subtitle track when the plan's transcripts are known
+- [x] `editorial/review.py` (pure): issues from the plan and from the rendered preview, each with
+      the clip and the timeline time: plan errors / warnings, flash clips, silence / black /
+      frozen stretches (analyze_quality on the preview, mapped to clips), level jumps across
+      cuts, captions too fast to read, length differing from the plan, rotated sources
+- [x] Tool `render_preview(plan_id, ...)`: background job like transcribe_audio (`status:
+      running`, call again), a stable file per plan, result = path + issues + how to look at it
+      (grab_frames / read_video take the path)
+- [x] Tests: frame-exact length over many short clips, fades, bed, a source without audio, each
+      issue kind found on synthetic footage; red without the protection
+- [x] Real check: the vlog cuts; read the issues against what is in the footage
+- [x] Guide (rough cut), instructions, README, CHANGELOG; full pytest + ruff
+
+## Review
+
+- The test footage says where it is: frame N is grey of brightness 20 + 4N and the sound is one
+  click, so a test reads back which source frame every preview frame shows and when the click
+  is heard. That is how "frame-exact" is asserted, not by counting frames alone.
+- Real check through the tools (10 vlog cuts, 310 clips, 116 real cuts): 552.6 s of preview in
+  199 s, all with exactly the plan's frames, captions on every one. Issues: 16 `cut_in_sound`,
+  30 `level_jump`, 11 `flash_clip`, 7 `fast_caption`, 8 `rotated_source`; no silence, black or
+  frozen stretch. The level jumps were read against one clip's levels and transcript: lines of
+  a far speaker (-35 dB) next to the one holding the phone (-21 dB), so they are real, and they
+  are what step 4 (loudness per clip) has to even out. The cuts in sound are not confirmed:
+  nobody listened.
+- `cut_in_sound` is stricter than step 1's `tight`: 16 of 116 cuts against 29 of 38 cut points
+  tight on one clip. `tight` says "no pause here", this says "not even a 6 dB dip at the cut".
+- Rotation: 8 of the 10 clips are tagged 90 degrees. On the one looked at (IMG_8139) the
+  picture is stored upright, so players (and the preview) show it on its side inside a
+  landscape frame. Reported, not corrected: the plan's
+  frame still comes from the stored size, and what Resolve does with the tag has not been tried
+  (needs a test project).
+- Every protection removed in turn (27 mutations over preview, review, the tool, probe, jobs
+  and the schema change): the tests went red each time.
+- Not done: dissolves and fades in the preview (cuts and black gaps), burned-in captions (this
+  ffmpeg has no subtitles / drawtext filter), a check that re-transcribes the preview to find
+  lost words (tried in step 1 as a measure: too noisy to be a per-cut verdict).
+
 # Captions that follow the cut (one-prompt video, step 2)
 
 Today captions only fit a timeline that plays the transcribed file from its start:

@@ -41,7 +41,7 @@ EXPECTED_TOOLS = {
     # plan
     "plan_from_transcript", "plan_from_scenes", "create_plan", "get_plan", "edit_plan",
     # export
-    "export_fcpxml", "export_srt",
+    "export_fcpxml", "export_srt", "render_preview",
     # resolve
     "get_resolve_state", "import_timeline", "add_markers", "add_quality_markers", "set_clip_color",
     "apply_lut", "queue_render", "render_status", "add_subtitles", "add_title", "checkpoint", "grade_clips", "make_format_version", "manage_timelines", "edit_markers", "open_page", "run_lua", "list_lua_snippets", "render_lua_snippet",
@@ -56,7 +56,7 @@ EXPECTED_TOOLS = {
 
 def test_server_registers_exactly_the_expected_tools():
     names = set(_annotations())
-    assert len(EXPECTED_TOOLS) == 49
+    assert len(EXPECTED_TOOLS) == 50
     assert names == EXPECTED_TOOLS, (sorted(EXPECTED_TOOLS - names), sorted(names - EXPECTED_TOOLS))
 
 
@@ -201,6 +201,23 @@ def test_paging_does_not_rerun_a_refresh(monkeypatch):
     mcp_server.transcribe_audio("/a.mp4", refresh=True, limit=2)
     mcp_server.transcribe_audio("/a.mp4", refresh=True, offset=2, limit=2)
     assert seen == [True, False]
+
+
+def test_optional_parameters_are_advertised_as_their_plain_type():
+    import asyncio
+
+    listed = {t.name: t.model_dump(by_alias=True)["inputSchema"] for t in asyncio.run(mcp_server.mcp.list_tools())}
+    srt = listed["export_srt"]
+    assert srt["properties"]["plan_id"] == {
+        "type": "string", "description": srt["properties"]["plan_id"]["description"]}
+    assert srt["properties"]["transcript_ids"]["type"] == "array"
+    assert "plan_id" not in srt.get("required", [])
+    assert srt["properties"]["max_lines"]["default"] == 2          # real defaults stay
+    # Inside nested models null can carry meaning ("audio_bed": null removes the bed).
+    bed = listed["edit_plan"]["$defs"]["SetOp"]["properties"]["audio_bed"]
+    assert {"type": "null"} in bed["anyOf"]
+    # The function itself still takes None for an omitted parameter.
+    assert mcp_server.get_workflow_guide(name=None)["guides"]
 
 
 def test_advertised_schemas_carry_no_generated_titles():

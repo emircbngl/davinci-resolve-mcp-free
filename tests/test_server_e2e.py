@@ -72,6 +72,10 @@ async def _session(media, home: Path, tmp_path: Path) -> None:
         assert status["channel"] == "manual" and status["ffmpeg"] is True
         assert any("setup_bridge" in s for s in status["next_steps"])
 
+        # Optional parameters are advertised as their plain type; a client that sends
+        # null for one anyway is still served.
+        assert len((await agent.call("get_workflow_guide", name=None))["guides"]) >= 5
+
         # Errors arrive as readable text, also on mcp 2.x which masks plain exceptions.
         msg = await agent.fail("probe_media", path=str(tmp_path / "missing.mov"))
         assert "File not found" in msg

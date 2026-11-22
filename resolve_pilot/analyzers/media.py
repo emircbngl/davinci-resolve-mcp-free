@@ -23,6 +23,9 @@ class MediaInfo:
     channels: int | None
     bit_rate: int | None
     container: str
+    # Degrees the picture is tagged to be turned for display (phones: 90 / -90 / 180).
+    # width and height are the stored ones; players show a 90-degree clip the other way up.
+    rotation: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -59,6 +62,14 @@ def probe_media(path: str | Path) -> MediaInfo:
               and (s.get("disposition") or {}).get("attached_pic") != 1), None)
     a = next((s for s in streams if s.get("codec_type") == "audio"), None)
 
+    rotation = 0
+    if v:
+        tagged = [d.get("rotation") for d in v.get("side_data_list") or []] + [(v.get("tags") or {}).get("rotate")]
+        try:
+            rotation = next(int(float(r)) for r in tagged if r not in (None, ""))
+        except (StopIteration, ValueError):
+            rotation = 0
+
     fps: float | None = None
     if v and v.get("avg_frame_rate") and v["avg_frame_rate"] != "0/0":
         fps = float(Fraction(v["avg_frame_rate"]))
@@ -75,6 +86,7 @@ def probe_media(path: str | Path) -> MediaInfo:
         channels=int(a["channels"]) if a and a.get("channels") else None,
         bit_rate=int(fmt["bit_rate"]) if fmt.get("bit_rate") else None,
         container=fmt.get("format_name", ""),
+        rotation=rotation,
     )
 
 
