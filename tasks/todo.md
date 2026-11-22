@@ -213,20 +213,49 @@ Today captions only fit a timeline that plays the transcribed file from its star
 picked, reordered, words dropped) every caption is in the wrong place, and the only way out is
 to render the cut and transcribe it again.
 
-- [ ] A plan remembers the transcript it was cut from (`transcript_ids`, per source file)
-- [ ] `editorial/captions.py` (pure): each clip takes the transcript words whose middle lies in
+- [x] A plan remembers the transcript it was cut from (`transcript_ids`, per source file)
+- [x] `editorial/captions.py` (pure): each clip takes the transcript words whose middle lies in
       its source range and moves them to the clip's place on the timeline, on the exporter's
       own frame positions (`fcpxml.layout`), so captions match the imported timeline. Words
       become cues: break at the line limit, at sentence ends and at gaps; short cues get a
       minimum time; no overlaps. Transcripts without words fall back to whole segments
-- [ ] `export_srt(plan_id=...)` and `add_subtitles(plan_id=...)`; extra `transcript_ids` for
+- [x] `export_srt(plan_id=...)` and `add_subtitles(plan_id=...)`; extra `transcript_ids` for
       plans built with create_plan. Clips whose source has no transcript are reported, and it
       is an error when no clip has one
-- [ ] Tests: reorder, drop, fade-in offset, frame positions, segment fallback, missing
+- [x] Tests: reorder, drop, fade-in offset, frame positions, segment fallback, missing
       transcripts, edit_plan then export again; red without the mapping
-- [ ] Real check on the vlog cut: transcribe the rendered cut and compare word times with the
+- [x] Real check on the vlog cut: transcribe the rendered cut and compare word times with the
       captions
-- [ ] Guides (subtitle, rough cut), instructions, README, CHANGELOG; full pytest + ruff
+- [x] Guides (subtitle, rough cut), instructions, README, CHANGELOG; full pytest + ruff
+
+## Review
+
+- Which clip plays a word is decided by the word's middle. Checked against the words the cut
+  really kept on the 10 vlog clips: 1,219 of 1,221 right; the other two were Whisper words with
+  no length (start = end) stacked 5 ms before a cut. Such a word now goes with its neighbour:
+  1,221 of 1,221.
+- Real check (9 clips, 311 pieces, 1,217 caption words): the cut audio rendered and transcribed
+  again, 940 words paired. Within 0.3 s of where the word is heard: 870 (93%), within 0.5 s: 899
+  (96%), median per clip 0.01-0.03 s. At the source's own times: 45 (5%). The pairing itself depends on
+  Whisper hearing the same word twice, so the unpaired 277 say nothing either way.
+- The first cues were not readable everywhere, which the unit tests had not shown: one caption
+  stayed up 20.5 s (slow recitation, no punctuation), 8 of 215 over 7 s, 4 under 0.7 s. Added:
+  6 s maximum, a break at a pause once a line is full, a sentence that flashes by shares a cue
+  with the next, and a hold for reading speed. After: 0 over 7 s, 1 under 0.7 s (a Whisper
+  "subtitles by" hallucination in the last 0.3 s of a clip), cues faster than 20 characters a
+  second 57 -> 31.
+- Found while rendering a preview of a real cut: Whisper had closed the file with an empty
+  17 ms segment, and step 1 made a clip of it (under one frame; `validate_plan` already called
+  it an error, so the export would have been refused, but the plan should not contain it).
+  `transcript_cut` now leaves such segments out and lists them in the cut report. Test red
+  without the fix.
+- Every protection removed in turn (13 mutations): the caption tests went red each time.
+- Not done: tried on a timeline in Resolve (needs a test project; only the SRT is new). Caption
+  starts use Whisper's word times, which are up to ~0.5 s off around pauses; they are clamped to
+  their clip but not corrected with the level curve.
+- The advertised schemas were 142 characters over the 50,000 budget after the new parameters;
+  their descriptions were shortened (49,895 now). The budget is nearly used up: step 6 (schema
+  slimming) is due before more parameters.
 
 # Issue #4: the bridge does not run on Resolve 21.1.2 Free
 

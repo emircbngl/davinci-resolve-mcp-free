@@ -57,7 +57,7 @@ from resolve_pilot import __version__, analyzers, bridge, control, luts, traps, 
 from resolve_pilot.analyzers import frames as frame_grab
 from resolve_pilot._paths import state_dir
 from resolve_pilot.editorial import ops as plan_ops
-from resolve_pilot.editorial import wordcut
+from resolve_pilot.editorial import captions, wordcut
 from resolve_pilot.editorial import roughcut, store
 from resolve_pilot.exporters import fcpxml as fcpxml_export
 from resolve_pilot.exporters import srt as srt_export
@@ -112,7 +112,9 @@ index from get_resolve_state (pass names; ask first). Read their `warnings`.
 6. After queue_render(start=true), render_status(wait_seconds=...) says when it is done.
 
 Subtitles: transcribe_audio, then add_subtitles(transcript_id=...) puts them on the timeline's \
-subtitle track (or export_srt for a file). Never append .srt files with append_clips. Before risky edits (removing clips, \
+subtitle track (or export_srt for a file). For a rough cut pass plan_id instead \
+(add_subtitles(plan_id=...) / export_srt(plan_id=...)): the captions follow the cut. \
+Never append .srt files with append_clips. Before risky edits (removing clips, \
 big rebuilds) call checkpoint(action='save'); the API has no undo. Titles: \
 add_title overlays Text+ on a track above V1; never insert titles any other way, as Resolve's \
 own title insert splits and ripples the edit.
@@ -876,7 +878,8 @@ def plan_from_transcript(
     and false starts inside them. Cuts are placed in the real pause next to each word
     (measured in the audio), never inside a word. `cut_report` counts the cuts that had
     no pause to sit in (`tight`): look at or listen to those. Returns the stored plan
-    (plan_id, clips, warnings).
+    (plan_id, clips, warnings). The plan remembers its transcript: captions for the cut
+    come from export_srt(plan_id=...) or add_subtitles(plan_id=...).
     """
     levels = None
     if transcript_id:
@@ -894,6 +897,8 @@ def plan_from_transcript(
         source_path, segs, title=title, pad_seconds=pad_seconds, fps=fps,
         segment_indices=segment_indices, levels=levels, drop_words=drop_words,
         max_pause_seconds=max_pause_seconds)
+    if transcript_id and plan.clips:  # export_srt(plan_id=...) retimes the captions from it
+        plan.transcript_ids[plan.clips[0].source_path] = transcript_id
     out = _store_and_summarize(plan)
     out["cut_report"] = report
     return out
@@ -1099,22 +1104,95 @@ def export_fcpxml(plan_id: str, out_path: OutPath = None, overwrite: Overwrite =
     }
 
 
+def _srt_result(cues: list[srt_export.SrtCue], target: Path, reserved: bool) -> dict[str, Any]:
+    final = _write_reserved(target, reserved, lambda t: srt_export.write_srt(cues, t))
+    durations = [c.end - c.start for c in cues] or [0.0]
+    return {
+        "path": str(final),
+        "cue_count": len(cues),
+        "average_cue_seconds": _r(sum(durations) / len(durations), 2),
+        "longest_cue_seconds": _r(max(durations), 2),
+    }
+
+
+def _export_plan_srt(plan_id: str, transcript_ids: list[str], out_path: str | None, overwrite: bool,
+                     max_chars_per_line: int, max_lines: int) -> dict[str, Any]:
+    """Captions for a plan's timeline: every clip's words, moved to where the clip plays."""
+    plan = store.load_plan(plan_id)
+    errors = roughcut.validate_plan(plan)["errors"]
+    if errors:
+        raise ValueError("Fix these plan errors first (edit_plan): " + "; ".join(errors))
+    warnings: list[str] = []
+    by_source: dict[str, dict[str, Any]] = {}
+    for path, tid in plan.transcript_ids.items():
+        data = transcripts.load_transcript(tid)
+        if data is None:
+            warnings.append(f"transcript {tid} of {Path(path).name} is no longer stored; "
+                            "run transcribe_audio on it again")
+        else:
+            by_source[captions.source_key(path)] = data
+    for tid in transcript_ids:  # explicit ones win over what the plan remembers
+        data = transcripts.require_transcript(tid)
+        by_source[captions.source_key(data["source_path"])] = data
+    cues, report = captions.plan_captions(
+        plan, {k: transcripts.transcript_segments(d) for k, d in by_source.items()},
+        max_chars_per_line=max_chars_per_line, max_lines=max_lines)
+    missing = report["clips_without_transcript"]
+    if len(missing) == len(plan.clips):
+        raise ValueError(
+            "No clip of this plan has a transcript. Run transcribe_audio on the sources and pass "
+            "transcript_ids. " + " ".join(warnings))
+    if not cues:
+        raise ValueError("Nothing is said in the kept ranges of this plan; there are no captions to write.")
+    if missing:
+        names = sorted({Path(plan.clips[i].source_path).name for i in missing})
+        warnings.append(f"{len(missing)} clip(s) have no transcript and get no captions "
+                        f"({', '.join(names)}); transcribe_audio them and pass transcript_ids")
+    if not report["word_level"]:
+        warnings.append("a transcript has no word timings, so its captions move per segment "
+                        "and cuts inside a segment are not followed; transcribe_audio again "
+                        "(word_timestamps=true)")
+    if out_path:
+        target, reserved = _explicit_output(out_path, overwrite), False
+    else:
+        target, reserved = _default_output(plan.clips[0].source_path, plan.title, ".srt"), True
+    out = _srt_result(cues, target, reserved)
+    out.update(timed_to_plan=plan_id, timeline_seconds=_r(plan.total_seconds), warnings=warnings)
+    if missing:
+        out["clips_without_transcript"] = missing
+    return out
+
+
 @tool(DESTRUCTIVE, title="Export SRT")
 def export_srt(
     transcript_id: Annotated[str | None, Field(description="From transcribe_audio.")] = None,
     segments: Annotated[list[SegmentIn] | None, Field(description="Inline cues instead, e.g. a translation you wrote.")] = None,
     out_path: Annotated[str | None, Field(description=(
-        "Where to write. Defaults to <source>.<language>.srt next to the transcript's source, "
-        "numbered so it never replaces an existing file. Required with inline segments."))] = None,
+        "Where to write. Default: next to the source as <source>.<language>.srt (<plan title>.srt "
+        "with plan_id), numbered so it never replaces a file. Required with inline segments."))] = None,
     overwrite: Overwrite = False,
     max_chars_per_line: Annotated[int, Field(ge=0, description="Wrap lines; 0 disables. 42 broadcast, ~32 vertical video.")] = 42,
     max_lines: Annotated[int, Field(ge=1, le=3)] = 2,
+    plan_id: Annotated[str | None, Field(description=(
+        "Captions timed to this plan's timeline: they follow its cut."))] = None,
+    transcript_ids: Annotated[list[str] | None, Field(description=(
+        "With plan_id: transcripts of its sources, for plans not made by plan_from_transcript."))] = None,
 ) -> dict[str, Any]:
     """Write subtitles as SRT; long cues are wrapped and split into readable chunks.
 
-    Zero-length cues are dropped. Import in Resolve by dragging the .srt onto the timeline
-    or File > Import > Subtitle.
+    After a rough cut pass plan_id: each caption moves with the clip it is spoken in, on
+    the same frame positions export_fcpxml writes, and edit_plan changes are followed (export
+    again after editing). Without plan_id the captions keep the source's own times. Read
+    `warnings`. Zero-length cues are dropped. Import in Resolve with add_subtitles, by
+    dragging the .srt onto the timeline or File > Import > Subtitle.
     """
+    if plan_id:
+        if segments:
+            raise ValueError("plan_id works from transcripts; pass transcript_ids, not inline segments.")
+        ids = list(transcript_ids or []) + ([transcript_id] if transcript_id else [])
+        return _export_plan_srt(plan_id, ids, out_path, overwrite, max_chars_per_line, max_lines)
+    if transcript_ids:
+        raise ValueError("transcript_ids goes with plan_id; without a plan pass one transcript_id.")
     target: Path | None = None
     reserved = False
     if transcript_id:
@@ -1135,14 +1213,7 @@ def export_srt(
         target = _explicit_output(out_path, overwrite)
     kept = [c for c in raw if c.end > c.start]
     cues = srt_export.wrap_cues(kept, max_chars_per_line=max_chars_per_line, max_lines=max_lines)
-    final = _write_reserved(target, reserved, lambda t: srt_export.write_srt(cues, t))
-    durations = [c.end - c.start for c in cues] or [0.0]
-    out = {
-        "path": str(final),
-        "cue_count": len(cues),
-        "average_cue_seconds": _r(sum(durations) / len(durations), 2),
-        "longest_cue_seconds": _r(max(durations), 2),
-    }
+    out = _srt_result(cues, target, reserved)
     if len(kept) < len(raw):
         out["dropped_zero_length_cues"] = len(raw) - len(kept)
     return out
@@ -1860,21 +1931,29 @@ def add_subtitles(
         "Or a transcript from transcribe_audio: written as SRT next to its source first."))] = None,
     replace: Annotated[bool, Field(description=(
         "Swap out captions already on subtitle track 1; otherwise that is refused."))] = False,
-    max_chars_per_line: Annotated[int, Field(ge=0, description="With transcript_id: wrap width (0 = off).")] = 42,
+    max_chars_per_line: Annotated[int, Field(ge=0, description="With transcript_id / plan_id: wrap width (0 = off).")] = 42,
     max_lines: Annotated[int, Field(ge=1, le=3)] = 2,
     channel: Channel = "auto",
+    plan_id: Annotated[str | None, Field(description=(
+        "Or the plan this timeline was imported from: captions follow its cut (see export_srt)."))] = None,
 ) -> dict[str, Any]:
     """Put subtitles on the current timeline's subtitle track, timed from the timeline start.
 
-    Captions keep the SRT's own times, so use it when the timeline plays the transcribed
-    source from its start (a rough cut changes the times: export_srt from the cut's own
-    transcript then). Reads the captions back and warns when they do not match the file.
+    With transcript_id alone the captions keep the source's own times: right only when
+    the timeline plays the transcribed file from its start. After a rough cut pass plan_id,
+    and the captions land where each line is spoken in the cut (a plan that does not know
+    its transcript: add transcript_id, or export_srt(plan_id, transcript_ids) and pass the
+    file). Reads the captions back and warns when they do not match the file.
     """
-    if transcript_id:
-        srt_path = export_srt(transcript_id=transcript_id, max_chars_per_line=max_chars_per_line,
-                              max_lines=max_lines)["path"]
+    written: dict[str, Any] = {}
+    if plan_id or transcript_id:
+        if srt_path:
+            raise ValueError("Pass srt_path, or plan_id / transcript_id to have the file written; not both.")
+        written = export_srt(transcript_id=transcript_id, plan_id=plan_id,
+                             max_chars_per_line=max_chars_per_line, max_lines=max_lines)
+        srt_path = written["path"]
     if not srt_path:
-        raise ValueError("Pass srt_path or transcript_id.")
+        raise ValueError("Pass srt_path, transcript_id or plan_id.")
     full = str(Path(srt_path).expanduser().resolve())
     if not Path(full).is_file():
         raise FileNotFoundError(full)
@@ -1884,11 +1963,14 @@ def add_subtitles(
     out = control.perform(lua_lib.snippet_add_subtitles(full, replace),
                           lambda: _studio().add_subtitles(full, replace), channel)
     out["srt_path"] = full
+    caption_warnings = list(written.get("warnings") or [])
     if out.get("channel") == "manual" or not out.get("ok"):
+        if caption_warnings:
+            out["warnings"] = caption_warnings + list(out.get("warnings") or [])
         return out
     cues = out.pop("cues")
     fps = out.get("fps") or 24
-    warnings = []
+    warnings = caption_warnings
     if len(cues) != len(expected):
         warnings.append(f"the file has {len(expected)} cues but {len(cues)} landed on the track")
     elif abs(cues[0]["start_seconds"] - expected[0][0]) > 1.5 / fps:

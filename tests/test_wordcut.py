@@ -243,38 +243,6 @@ def test_words_from_both_engines():
     assert "words" not in Segment(0.0, 1.0, "plain").to_dict()
 
 
-@pytest.fixture
-def talk(tmp_path, monkeypatch):
-    """A transcribed talk as the tools see it: SPEECH from a stand-in Whisper, LEVELS
-    from a stand-in ffmpeg. Returns (path, calls, state); state["levels"] can be set
-    to an exception to make the measurement fail."""
-    from resolve_pilot.analyzers import MediaInfo
-    from resolve_pilot.transcribe import store
-    from resolve_pilot.transcribe.whisper import TranscriptionResult
-    calls, state = [], {"levels": LEVELS}
-
-    def fake(path, model=None, language=None, word_timestamps=False, engine="auto"):
-        calls.append(word_timestamps)
-        segs = SPEECH if word_timestamps else [Segment(s.start, s.end, s.text) for s in SPEECH]
-        return TranscriptionResult(language="tr", text="", segments=list(segs))
-
-    def levels(path):
-        if isinstance(state["levels"], Exception):
-            raise state["levels"]
-        return state["levels"]
-
-    info = MediaInfo(path="", duration_seconds=DURATION, width=1920, height=1080, fps=25.0,
-                     video_codec="h264", audio_codec="aac", sample_rate=48000, channels=2,
-                     bit_rate=None, container="mov")
-    monkeypatch.setattr(store, "transcribe", fake)
-    monkeypatch.setattr(store, "resolve_engine", lambda engine="auto": "mlx")
-    monkeypatch.setattr(store, "voice_levels", levels)
-    monkeypatch.setattr(roughcut, "probe_media", lambda p: info)
-    path = tmp_path / "talk.mp4"
-    path.write_bytes(b"not really a video")
-    return path, calls, state
-
-
 def test_tools_from_transcript_to_a_cleaned_cut(talk):
     from resolve_pilot import mcp_server
     path, calls, _ = talk
@@ -351,3 +319,17 @@ def test_levels_measured_from_audio_show_the_gap_between_words(tmp_path, noise):
     assert valley and abs(valley.start - 1.0) < 0.04 and abs(valley.end - 1.6) < 0.04, valley
     with pytest.raises(RuntimeError, match="could not read the audio"):
         voice_levels(tmp_path / "missing.wav")
+
+
+def test_a_segment_in_which_nothing_is_said_is_not_a_clip(talk):
+    # Measured on a real vlog: Whisper closed the file with an empty 17 ms segment, which
+    # became a clip of less than half a frame.
+    path = talk[0]
+    segs = SPEECH + [Segment(17.60, 17.617, "")]
+    plan, report = roughcut.transcript_cut(path, segs, levels=LEVELS)
+    assert len(plan.clips) == 4 and report["empty_segments_skipped"] == [4]
+    assert min(c.duration_seconds for c in plan.clips) > 0.5
+    with pytest.raises(ValueError, match="Nothing is said"):
+        roughcut.transcript_cut(path, segs, segment_indices=[4])
+    assert "empty_segments_skipped" not in roughcut.transcript_cut(path, SPEECH, levels=LEVELS)[1]
+

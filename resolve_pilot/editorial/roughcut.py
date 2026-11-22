@@ -164,6 +164,12 @@ def transcript_cut(
                 f"segments (0-{len(segments) - 1})"
             )
         picked = list(segment_indices)
+    # Whisper now and then closes a file with a segment in which nothing is said; as a clip
+    # it is a few milliseconds of picture.
+    empty = [i for i in picked if not segments[i].text.strip()]
+    picked = [i for i in picked if i not in empty]
+    if not picked:
+        raise ValueError("Nothing is said in the chosen segments, so there is nothing to cut.")
 
     spans = wordcut.cut_spans(
         segments, picked, levels, wordcut.parse_drop_words(drop_words, segments),
@@ -187,7 +193,10 @@ def transcript_cut(
         clips=clips,
         notes=f"Built from {len(set(s.seg for s in spans))} of {len(segments)} transcript segments.",
     )
-    return plan, wordcut.cut_report(spans, levels is not None)
+    report = wordcut.cut_report(spans, levels is not None)
+    if empty:
+        report["empty_segments_skipped"] = empty
+    return plan, report
 
 
 def plan_from_scenes(

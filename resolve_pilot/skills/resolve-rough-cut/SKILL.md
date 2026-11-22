@@ -42,6 +42,7 @@ Builds a first-pass timeline from raw footage, deciding what to keep from the tr
 8. **Deliver**
    - studio / bridge: `import_timeline(path, timeline_name="...")`, then `get_resolve_state(include_clips=true)` and check clip count and duration against the plan.
    - manual: "In Resolve: File › Import › Timeline… and pick `<path>`."
+   - Captions for the cut: `add_subtitles(plan_id=...)` (or `export_srt(plan_id=...)` for a file). They follow the plan's cut; never use the transcript's own times on a cut timeline.
 9. **Iterate live** (studio / bridge) on the imported timeline instead of exporting again, which would create another timeline: `append_clips` adds a missed line or a B-roll shot (`track=2`, `record_seconds=...`), `remove_clips` drops one (read the indices with `get_resolve_state(include_clips=true)` and ask first). Keep the plan in step with what you changed if you may export again.
 10. **Reply** with a short table — #, source in–out, duration, rationale — and the total length.
 
@@ -77,6 +78,7 @@ User: *"I have a 25-min interview at `~/Footage/jane.mp4`. Give me a 4-minute hi
 4. `plan_from_transcript(transcript_id, segment_indices=[…], drop_words=[…], title="Jane — 4 min")` → `cut_report`: 38 cuts, 36 in a pause, 2 tight.
 5. `edit_plan`: trims on two clips, `set` fades. Warnings: none.
 6. `export_fcpxml` → `~/Footage/Jane_4_min.fcpxml`; `import_timeline` (bridge) → 15 clips, 4:02.
+   Captions asked for: `add_subtitles(plan_id=...)` → 58 captions on the cut's own times.
 7. Reply with the table and the timeline name.
 
 ## Failure modes

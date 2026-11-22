@@ -23,7 +23,9 @@ Transcribes a video and produces an SRT ready for Resolve's subtitle track.
    - Vertical / social video: `max_chars_per_line=32`.
    - Default output: next to the source as `<name>.<language>.srt`.
 5. **Translation**: read the segments, translate each one yourself keeping `start`/`end`, then `export_srt(segments=[{start, end, text}, ...], out_path=".../name.en.srt")`. An existing file is never replaced unless you pass `overwrite=true` — ask the user first, it may be their own subtitles.
-6. **Into Resolve**: `add_subtitles(srt_path=...)` (or `transcript_id=...`) puts the captions on the current timeline's subtitle track at the SRT's own times and reads them back; it refuses to stack on existing captions unless `replace=true`. The SRT times count from the timeline start, so use it when the timeline plays the transcribed source from its start; for a rough cut, transcribe the cut itself. Without the bridge or Studio: tell the user to drag the `.srt` onto the timeline, or File › Import › Subtitle. Styling: Inspector › Captions.
+6. **Into Resolve**: `add_subtitles(srt_path=...)` (or `transcript_id=...`) puts the captions on the current timeline's subtitle track at the SRT's own times and reads them back; it refuses to stack on existing captions unless `replace=true`. The SRT times count from the timeline start, so a transcript's own times are right only when the timeline plays the transcribed source from its start. Without the bridge or Studio: tell the user to drag the `.srt` onto the timeline, or File › Import › Subtitle. Styling: Inspector › Captions.
+7. **Captions for a rough cut**: pass the plan, `export_srt(plan_id=...)` or `add_subtitles(plan_id=...)`. Every caption moves with the clip it is spoken in (kept segments, new order, dropped words, fades), on the frame positions `export_fcpxml` writes. A plan from `plan_from_transcript` knows its transcript; for a plan from `create_plan` / `plan_from_scenes` add `transcript_ids=[...]` (one per transcribed source). After `edit_plan`, export again. Read `warnings`: clips whose source has no transcript get no captions, and a transcript without word timings can only move whole segments. The captions describe the plan: if you changed the timeline in Resolve afterwards (`append_clips`, `remove_clips`), bring the plan in step first.
+   - Translating a cut: `export_srt(plan_id=...)`, read the file, translate each cue keeping its times, then `export_srt(segments=[...], out_path=...)`.
 
 ## Quality rules
 
@@ -39,6 +41,8 @@ User: *"Add Turkish subtitles to `~/Footage/talk.mp4`."*
 2. `transcribe_audio(path, language="tr")` → `status: running` → call again → 318 segments.
 3. `export_srt(transcript_id, max_chars_per_line=42)` → `~/Footage/talk.tr.srt`, 401 cues, average 3.1 s.
 4. `add_subtitles(srt_path="~/Footage/talk.tr.srt")` → 401 captions on the subtitle track, read back OK.
+
+User: *"Cut the best four minutes of the interview and caption it."* After the rough cut is imported (see the rough cut guide): `add_subtitles(plan_id="p-…")` → captions timed to the cut, read back OK.
 
 ## Burning in
 

@@ -126,3 +126,37 @@ def media(tmp_path_factory):
         str(song),
     ], check=True)
     return {"clip": clip, "song": song}
+
+
+@pytest.fixture
+def talk(tmp_path, monkeypatch):
+    """A transcribed talk as the tools see it: SPEECH from a stand-in Whisper, LEVELS
+    from a stand-in ffmpeg. Returns (path, calls, state); state["levels"] can be set
+    to an exception to make the measurement fail."""
+    from resolve_pilot.analyzers import MediaInfo
+    from resolve_pilot.editorial import roughcut
+    from resolve_pilot.transcribe import store
+    from resolve_pilot.transcribe.whisper import Segment, TranscriptionResult
+    from tests.test_wordcut import DURATION, LEVELS, SPEECH
+    calls, state = [], {"levels": LEVELS}
+
+    def fake(path, model=None, language=None, word_timestamps=False, engine="auto"):
+        calls.append(word_timestamps)
+        segs = SPEECH if word_timestamps else [Segment(s.start, s.end, s.text) for s in SPEECH]
+        return TranscriptionResult(language="tr", text="", segments=list(segs))
+
+    def levels(path):
+        if isinstance(state["levels"], Exception):
+            raise state["levels"]
+        return state["levels"]
+
+    info = MediaInfo(path="", duration_seconds=DURATION, width=1920, height=1080, fps=25.0,
+                     video_codec="h264", audio_codec="aac", sample_rate=48000, channels=2,
+                     bit_rate=None, container="mov")
+    monkeypatch.setattr(store, "transcribe", fake)
+    monkeypatch.setattr(store, "resolve_engine", lambda engine="auto": "mlx")
+    monkeypatch.setattr(store, "voice_levels", levels)
+    monkeypatch.setattr(roughcut, "probe_media", lambda p: info)
+    path = tmp_path / "talk.mp4"
+    path.write_bytes(b"not really a video")
+    return path, calls, state
