@@ -72,15 +72,16 @@ def plan_issues(plan: RoughCutPlan, starts: list[float], infos: dict[str, MediaI
     seen = set()
     for i, c in enumerate(plan.clips):
         info = infos.get(c.source_path)
-        if info and info.rotation % 360 and c.source_path not in seen:
+        # Quarter turns only: that is where a phone held sideways gets the wrong tag (of
+        # eleven real clips, six tagged 90 were on their side, two tagged 180 were fine).
+        # A source the plan already turns has been looked at.
+        if info and info.rotation % 180 and c.source_path not in seen and not plan.source_turns.get(c.source_path):
             seen.add(c.source_path)
-            turned = info.rotation % 180 != 0
-            shape = (f"{info.height}x{info.width}" if turned else f"{info.width}x{info.height}")
             out.append(Issue("rotated_source", starts[i],
                              f"{Path(c.source_path).name} is tagged as turned {info.rotation} degrees: "
-                             f"players show it as {shape} inside the plan's {plan.width}x{plan.height} "
+                             f"players show it as {info.height}x{info.width} inside the plan's {plan.width}x{plan.height} "
                              "frame. Look at a frame; if it is on its side, the tag is wrong for "
-                             "how the camera was held", i))
+                             "how the camera was held: edit_plan [{op: turn, source, degrees}]", i))
     return out
 
 

@@ -206,6 +206,47 @@ Not verified / known limits:
   transcript (said in the tool description). Untranscribed sound between words was left out on
   purpose: with edges this far off, it would flag ordinary speech.
 
+# One request, a folder of clips (one-prompt video, step 5; done before step 4)
+
+Emir went to bed with "handle whatever there is until morning". Step 4 (audio) writes things
+into the FCPXML that only a try in Resolve can confirm, and Resolve is his open project, so
+this night takes what can be proven here: a vlog is many files, and today every tool takes one.
+
+- [x] `scan_folder(folder)`: the media files in recording order with what an editor needs
+      (length, frame, rotation, sound), and with `transcribe=true` their transcripts started in
+      the background and followed by calling again. A client with only MCP tools cannot list a
+      folder at all
+- [x] `plan_from_transcript(append_to=plan_id)`: add a file's cleaned cut to an existing plan,
+      which remembers every source's transcript (captions and the preview already take several)
+- [x] Guide `resolve-one-prompt-edit`: the whole run, from the folder to the preview the user
+      watches, with what to decide and what to report
+- [x] Tests; red without the protection
+- [x] Real run through the tools only: all vlog clips -> one plan -> preview with captions
+- [x] Instructions, README, CHANGELOG; full pytest + ruff
+- [x] Added on the way: `edit_plan` `turn` (see the review)
+
+## Review
+
+- Real run (`scan_folder` -> `scan_speech` / `plan_from_transcript(append_to)` per file ->
+  `edit_plan turn` -> `render_preview` -> `export_srt`), sources read only: 11 files, 787 s;
+  10 used (one has 6 words), 201 clips, 382.6 s, 177 captions, 78 real cuts; rendered in 184 s.
+  Issues listed: 10 `cut_in_sound`, 19 `level_jump`, 5 `flash_clip`, 6 `fast_caption`. The run
+  made only the mechanical choices and did not work through the issues: an agent would.
+- Looking at one frame per file showed that six of the eleven clips play on their side (tagged
+  90 / -90, phone held sideways), two tagged -90 are true vertical shots and two tagged -180 are
+  fine. Nothing could put that right, so `turn` was added: a property of the source file, kept
+  in the plan, shown by the preview. My first guess for one file's direction was wrong
+  (upside down) and the next preview showed it, which is the loop working. FCPXML does not
+  carry the turn; `export_fcpxml` lists the clips to turn in Resolve. That half is not tried.
+- `rotated_source` was listed for the 180-degree tags too, three false alarms in this run; it
+  is now for quarter turns only.
+- Whisper called one 28-word clip Russian and the recitation Arabic (language left to it in
+  this run). The guide tells the agent to pass the language when the user names it.
+- 14 mutations over the new code: 13 red at once; "camera time although one file has none"
+  stayed green because the test's two orders agreed. The test now uses orders that differ.
+- Not done: step 4 (audio: fades at cuts, loudness per clip, ducked bed) and the Resolve side of
+  `turn`. Both write things only a try in Resolve confirms, which needs Emir and a test project.
+
 # A preview without Resolve, checked automatically (one-prompt video, step 3)
 
 Today nobody sees a plan until it is imported into Resolve, and nothing looks at the result. An

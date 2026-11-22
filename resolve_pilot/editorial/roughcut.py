@@ -71,6 +71,9 @@ class RoughCutPlan:
     audio_bed: RoughCutAudioBed | None = None
     # Source file -> the transcript its clips were cut from, so captions can follow the cut.
     transcript_ids: dict[str, str] = field(default_factory=dict)
+    # Source file -> degrees clockwise (90 / 180 / 270) to turn its picture so it is
+    # upright: for footage whose rotation tag is wrong for how the camera was held.
+    source_turns: dict[str, int] = field(default_factory=dict)
 
     @property
     def total_seconds(self) -> float:
@@ -94,6 +97,7 @@ class RoughCutPlan:
             fade_out_seconds=float(data.get("fade_out_seconds", 0.0)),
             audio_bed=RoughCutAudioBed(**_known(RoughCutAudioBed, bed)) if bed else None,
             transcript_ids={str(k): str(v) for k, v in (data.get("transcript_ids") or {}).items()},
+            source_turns={str(k): int(v) for k, v in (data.get("source_turns") or {}).items()},
         )
 
 

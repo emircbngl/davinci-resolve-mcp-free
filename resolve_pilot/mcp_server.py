@@ -5,7 +5,7 @@ Claude Code can drive a video editing session end-to-end without an API key.
 
 Tool groups:
 - session:  resolve_pilot_status, get_workflow_guide, setup_bridge
-- analyze:  probe_media, detect_scenes, detect_beats, transcribe_audio, analyze_quality
+- analyze:  scan_folder, probe_media, detect_scenes, detect_beats, transcribe_audio, analyze_quality
 - see:      grab_frames, scene_frames, read_video, screenshot_resolve (macOS)
 - plan:     plan_from_transcript, plan_from_scenes, create_plan, get_plan, edit_plan
 - export:   export_fcpxml, export_srt, render_preview
@@ -97,10 +97,12 @@ titles, transitions) on any OS; use it to verify edits. On macOS screenshot_reso
 Resolve's own window.
 
 Editing loop:
-1. Analyze: probe_media, then detect_scenes / detect_beats / transcribe_audio (cached; returns \
+1. Analyze: probe_media (a whole folder: scan_folder, in recording order, with transcripts), \
+then detect_scenes / detect_beats / transcribe_audio (cached; returns \
 numbered segments). Look before choosing shots: scene_frames, read_video, grab_frames.
 2. Draft: plan_from_transcript (pick segment_indices; for talking footage run scan_speech \
-first and pass its fillers / repeats as drop_words, cuts land in real pauses between words), \
+first and pass its fillers / repeats as drop_words, cuts land in real pauses between words; \
+append_to adds the next file to the same plan), \
 plan_from_scenes, or create_plan (any sources, optional music bed). Plans are stored server-side; you get a plan_id.
 3. Refine with edit_plan operations (keep/remove/move/trim/update/insert/set) instead of \
 resending the plan. Every plan response lists `errors` and `warnings`; resolve them.
@@ -131,7 +133,8 @@ paths on the machine running this server (~ is expanded).
 Safety: run_lua executes code inside the user's Resolve. Prefer the dedicated tools. Before \
 anything destructive (deleting clips, markers or timelines, replacing grades, rendering over \
 files) ask the user and suggest saving the project first.
-Playbooks: get_workflow_guide() lists step-by-step guides (rough cut, subtitles, music video, \
+Playbooks: get_workflow_guide() lists step-by-step guides (one-prompt edit of a folder of \
+clips, rough cut, subtitles, music video, \
 color grade, markers, live control with a Resolve Lua API cheat sheet, traps). Read the matching \
 one before a multi-step job.
 Resources (read-only, no tool call): resolve://traps (known Resolve traps and what resolve-pilot \
@@ -893,6 +896,9 @@ def plan_from_transcript(
     max_pause_seconds: Annotated[float | None, Field(ge=0, le=10, description=(
         "Shorten longer pauses inside kept speech to this (0.4 = tight jump cuts). "
         "Default: leave them."))] = None,
+    append_to: Annotated[str | None, Field(description=(
+        "plan_id to add these clips to the end of (a cut from several files) instead of "
+        "making a new plan; title and fps are that plan's."))] = None,
 ) -> dict[str, Any]:
     """Draft a rough cut from transcript segments: one clip per kept segment.
 
@@ -902,7 +908,8 @@ def plan_from_transcript(
     (measured in the audio), never inside a word. `cut_report` counts the cuts that had
     no pause to sit in (`tight`): look at or listen to those. Returns the stored plan
     (plan_id, clips, warnings). The plan remembers its transcript: captions for the cut
-    come from export_srt(plan_id=...) or add_subtitles(plan_id=...).
+    come from export_srt(plan_id=...) or add_subtitles(plan_id=...). For a cut from several
+    files call it once per file in playing order, from the second on with append_to.
     """
     levels = None
     if transcript_id:
@@ -922,8 +929,111 @@ def plan_from_transcript(
         max_pause_seconds=max_pause_seconds)
     if transcript_id and plan.clips:  # export_srt(plan_id=...) retimes the captions from it
         plan.transcript_ids[plan.clips[0].source_path] = transcript_id
-    out = _store_and_summarize(plan)
+    if not append_to:
+        out = _store_and_summarize(plan)
+        out["cut_report"] = report
+        return out
+    with store.plan_lock(append_to):
+        whole = store.load_plan(append_to)
+        first = len(whole.clips)
+        whole.clips.extend(plan.clips)
+        whole.transcript_ids.update(plan.transcript_ids)
+        out = _store_and_summarize(whole, plan_id=append_to)
+    for row in report.get("tight_clips", []):  # the report speaks of the plan's clip numbers
+        row["clip"] += first
     out["cut_report"] = report
+    out["appended"] = {"first_clip": first, "clips": len(plan.clips),
+                       "seconds": _r(sum(c.duration_seconds for c in plan.clips))}
+    return out
+
+
+_MEDIA_SUFFIXES = {".mov", ".mp4", ".m4v", ".mkv", ".avi", ".mts", ".m2ts", ".mxf", ".webm",
+                   ".wav", ".mp3", ".m4a", ".aac", ".flac", ".aif", ".aiff"}
+
+
+@tool(READ, title="Scan a folder of footage")
+def scan_folder(
+    folder: Annotated[str, Field(description="Absolute path of a folder with media files (not searched deeper).")],
+    transcribe: Annotated[bool, Field(description=(
+        "Also transcribe every file that has sound, in the background; call again with the "
+        "same arguments to follow it."))] = False,
+    language: Annotated[str | None, Field(description="Spoken language (e.g. 'tr'), as for transcribe_audio.")] = None,
+    wait_seconds: Annotated[float, Field(ge=0, le=600, description="With transcribe: how long to wait before answering.")] = 30.0,
+) -> dict[str, Any]:
+    """The footage of a shoot at a glance: every media file in a folder in recording
+    order (the camera's own time, else the file's), with length, frame, rotation tag
+    and whether it has sound.
+
+    With transcribe=true each file with sound also gets its transcript (the same cached
+    ones transcribe_audio returns): `transcript_id`, word count and how it starts, or
+    `status: running`. Start here when the user points at a folder; then read the
+    transcripts, cut each file with plan_from_transcript (append_to for the second file
+    on) and watch the result with render_preview.
+    """
+    root = Path(folder).expanduser()
+    if not root.is_dir():
+        raise FileNotFoundError(f"Not a folder: {root}")
+    found, unreadable = [], []
+    for p in sorted(root.iterdir()):
+        if p.name.startswith(".") or p.suffix.lower() not in _MEDIA_SUFFIXES or not p.is_file():
+            continue
+        info = analyzers.probe_media_cached(p)
+        if info is None or not (info.video_codec or info.audio_codec):
+            unreadable.append(p.name)
+            continue
+        found.append((info.recorded or "", p.stat().st_mtime, p, info))
+    # Camera time where every file has one; a folder of copies keeps only that order.
+    found.sort(key=(lambda f: (f[0], f[2].name)) if all(f[0] for f in found) else (lambda f: (f[1], f[2].name)))
+    files: list[dict[str, Any]] = []
+    for recorded, _, p, info in found:
+        row: dict[str, Any] = {"path": str(p), "seconds": _r(info.duration_seconds, 1),
+                               "has_sound": info.audio_codec is not None}
+        if info.video_codec:
+            row.update(frame=f"{info.width}x{info.height}", fps=_r(info.fps, 2))
+            if info.rotation % 360:
+                row["rotation"] = info.rotation
+        if recorded:
+            row["recorded"] = recorded
+        files.append(row)
+    out: dict[str, Any] = {"folder": str(root), "file_count": len(files),
+                           "total_seconds": _r(sum(f["seconds"] for f in files), 1), "files": files}
+    if unreadable:
+        out["unreadable"] = unreadable
+    if not transcribe:
+        return out
+
+    import time as _time
+    deadline = _time.monotonic() + wait_seconds
+    with_sound = [f for f in files if f["has_sound"]]
+    # Start them all (they run one after another), then wait for as many as the time allows.
+    for wait in (False, True):
+        for f in with_sound:
+            if f.get("transcript", {}).get("status") in ("done", "failed"):
+                continue
+            try:
+                res = transcripts.get_or_start(
+                    f["path"], language=language,
+                    wait_seconds=max(0.0, deadline - _time.monotonic()) if wait else 0.0)
+            except Exception as e:  # one bad file must not hide the others
+                f["transcript"] = {"status": "failed", "error": _explain(e)}
+                continue
+            if res["status"] != "done":
+                f["transcript"] = {"status": "running"}
+                continue
+            words = sum(len(s.get("words") or s["text"].split()) for s in res["segments"])
+            text = " ".join(s["text"].strip() for s in res["segments"])
+            f["transcript"] = {"status": "done", "transcript_id": res["transcript_id"],
+                               "language": res["language"], "segments": len(res["segments"]),
+                               "words": words, "starts": text[:120]}
+    done = sum(f["transcript"]["status"] == "done" for f in with_sound)
+    failed = sum(f["transcript"]["status"] == "failed" for f in with_sound)
+    out["transcripts"] = {"done": done, "running": len(with_sound) - done - failed, "failed": failed}
+    if done + failed < len(with_sound):
+        out["next_step"] = "Still transcribing: call scan_folder again with the same arguments."
+    else:
+        out["next_step"] = ("Read each transcript (transcribe_audio(path) returns the cached one, "
+                            "scan_speech(transcript_id) the cut candidates), then plan_from_transcript "
+                            "per file in playing order, with append_to from the second file on.")
     return out
 
 
@@ -1035,6 +1145,9 @@ def edit_plan(
     - update {index, in_seconds?, duration_seconds? | out_seconds?, name?, rationale?,
       transition_out_seconds?, source_path?}
     - insert {clip, index?}: index omitted = append
+    - turn {source, degrees}: turn every clip of one source (index into `sources`) by 90 /
+      180 / 270 degrees clockwise, for footage that plays on its side (a phone held
+      sideways but tagged upright). render_preview shows it; FCPXML cannot carry it
     - set {title?, fps?, width?, height?, default_transition_seconds?, fade_in_seconds?,
       fade_out_seconds?, audio_bed?, notes?}: audio_bed=null removes the music bed
     """
@@ -1117,11 +1230,24 @@ def export_fcpxml(plan_id: str, out_path: OutPath = None, overwrite: Overwrite =
     else:
         target, reserved = _default_output(plan.clips[0].source_path, plan.title, ".fcpxml"), True
     final = _write_reserved(target, reserved, lambda t: fcpxml_export.write_fcpxml(spec, t))
+    warnings = list(report["warnings"])
+    turned = []
+    for path, degrees in plan.source_turns.items():
+        clips = [i for i, c in enumerate(plan.clips) if c.source_path == path]
+        if clips and degrees:
+            turned.append({"source": path, "degrees": degrees, "clips": clips})
+    if turned:
+        warnings.append(
+            f"{len(turned)} source(s) are turned in the plan (see `turned_sources`); FCPXML does not "
+            "carry that, so the imported clips still play as their files are tagged. After "
+            "import_timeline turn those clips with set_clip_properties (RotationAngle, then "
+            "ZoomX / ZoomY to fill the frame) and look with timeline_frames. Not tried in Resolve yet.")
     return {
         "path": str(final),
         "clip_count": len(plan.clips),
         "total_seconds": _r(plan.total_seconds),
-        "warnings": report["warnings"],
+        "warnings": warnings,
+        **({"turned_sources": turned} if turned else {}),
         "next_step": f"import_timeline(path={str(final)!r}) or, without a live channel, "
                      "tell the user: File > Import > Timeline.",
     }

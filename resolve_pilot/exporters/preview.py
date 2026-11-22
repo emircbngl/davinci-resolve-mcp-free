@@ -8,7 +8,8 @@ The pieces are encoded with PCM audio first because AAC pads every file it write
 clips joined as AAC came out 1.6 s longer than their plan.
 
 Not shown: cross dissolves (played as cuts) and the fades themselves (their black gap
-is there, so the length is right).
+is there, so the length is right). A source is shown as players show it (its rotation
+tag applied), then turned by the plan's `source_turns`.
 """
 from __future__ import annotations
 
@@ -42,8 +43,11 @@ def _run(args: list[str], what: str, timeout: float = 1800.0) -> None:
         raise RuntimeError(f"ffmpeg could not render {what}: {tail or 'no output'}")
 
 
+_TURN = {90: "transpose=1,", 180: "hflip,vflip,", 270: "transpose=2,"}
+
+
 def _piece(ffmpeg: str, clip: RoughCutClip | None, frames: int, samples: int,
-           size: tuple[int, int], rate: str, out: Path) -> list[str]:
+           size: tuple[int, int], rate: str, out: Path, turn: int = 0) -> list[str]:
     """Command for one clip (or, with clip=None, a black and silent gap) of exactly
     `frames` frames and `samples` audio samples."""
     w, h = size
@@ -56,7 +60,7 @@ def _piece(ffmpeg: str, clip: RoughCutClip | None, frames: int, samples: int,
         args += ["-ss", f"{clip.in_seconds:.6f}", "-t", f"{frames * den / num + 1.0:.6f}",
                  "-i", str(Path(clip.source_path).expanduser())]
     if has_video:  # held on its last frame if the source ends early
-        video = (f"[0:v:0]fps={rate},scale={w}:{h}:force_original_aspect_ratio=decrease,"
+        video = (f"[0:v:0]fps={rate},{_TURN.get(turn % 360, '')}scale={w}:{h}:force_original_aspect_ratio=decrease,"
                  f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,tpad=stop_mode=clone:stop=-1")
     else:
         video = f"color=c=black:s={w}x{h}:r={rate},format=yuv420p"
@@ -117,7 +121,8 @@ def render(plan: RoughCutPlan, out_path: str | Path, height: int = 540,
             nonlocal done
             clip, a, b = parts[n]
             what = "a gap" if clip is None else f"clip {plan.clips.index(clip)} ({Path(clip.source_path).name})"
-            _run(_piece(ffmpeg, clip, b - a, sample(b) - sample(a), size, rate, work / f"{n:05d}.mkv"), what)
+            turn = plan.source_turns.get(clip.source_path, 0) if clip else 0
+            _run(_piece(ffmpeg, clip, b - a, sample(b) - sample(a), size, rate, work / f"{n:05d}.mkv", turn), what)
             done += 1
             if on_progress:
                 on_progress(done, len(parts))

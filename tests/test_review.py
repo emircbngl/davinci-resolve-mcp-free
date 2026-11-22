@@ -54,8 +54,11 @@ def test_flash_clips_and_rotated_sources_come_from_the_plan():
     assert _kinds(issues) == [("flash_clip", 1, 2.0), ("rotated_source", 3, 2.74)]   # 0.5 s is not a flash
     assert "0.24 s (6 frames)" in issues[0].detail
     assert "b.mov is tagged as turned 90 degrees" in issues[1].detail and "2160x3840" in issues[1].detail
-    upside_down = MediaInfo(**{**info.to_dict(), "rotation": 180})
-    assert "3840x2160 inside" in review.plan_issues(plan, _starts(plan), {B: upside_down})[1].detail
+    plan.source_turns[B] = 270                 # the plan turns it: it has been looked at
+    assert _kinds(review.plan_issues(plan, _starts(plan), {A: None, B: info})) == [("flash_clip", 1, 2.0)]
+    plan.source_turns.clear()
+    upside_down = MediaInfo(**{**info.to_dict(), "rotation": -180})   # a phone held the other way up: fine
+    assert _kinds(review.plan_issues(plan, _starts(plan), {B: upside_down})) == [("flash_clip", 1, 2.0)]
 
 
 def test_silence_black_and_frozen_stretches_are_mapped_to_their_clips():

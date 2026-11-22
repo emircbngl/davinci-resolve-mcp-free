@@ -10,6 +10,7 @@ step. A batch is all-or-nothing: if one operation fails, nothing changes.
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, Field, model_validator
@@ -109,6 +110,14 @@ class InsertOp(BaseModel):
     index: int | None = Field(None, description="Insert before this position; omit to append.")
 
 
+class TurnOp(BaseModel):
+    """Turn every clip of one source file: for footage that plays on its side."""
+    op: Literal["turn"]
+    source: int = Field(ge=0, description="Index into the plan's `sources`.")
+    degrees: Literal[0, 90, 180, 270] = Field(description=(
+        "Clockwise, on top of how players show the file. 0 takes the turn off."))
+
+
 class SetOp(BaseModel):
     """Change timeline-level settings. Pass audio_bed=null to remove the music bed."""
     op: Literal["set"]
@@ -124,7 +133,7 @@ class SetOp(BaseModel):
 
 
 PlanOp = Annotated[
-    Union[KeepOp, RemoveOp, MoveOp, TrimOp, UpdateOp, InsertOp, SetOp],
+    Union[KeepOp, RemoveOp, MoveOp, TrimOp, UpdateOp, InsertOp, TurnOp, SetOp],
     Field(discriminator="op"),
 ]
 
@@ -194,6 +203,17 @@ def _apply(plan: RoughCutPlan, op: BaseModel) -> str:
         _check_index(plan, at, allow_end=True)
         plan.clips.insert(at, op.clip.to_clip())
         return f"inserted a clip at {at}"
+    if isinstance(op, TurnOp):
+        sources = list(dict.fromkeys(c.source_path for c in plan.clips))
+        if op.source >= len(sources):
+            raise ValueError(f"turn: source {op.source} does not exist; the plan has "
+                             f"{len(sources)} source(s) (0-{len(sources) - 1})")
+        path = sources[op.source]
+        if op.degrees:
+            plan.source_turns[path] = op.degrees
+        else:
+            plan.source_turns.pop(path, None)
+        return f"turned source {op.source} ({Path(path).name}) by {op.degrees} degrees"
     if isinstance(op, SetOp):
         changed = []
         for name in ("title", "fps", "width", "height", "notes", "default_transition_seconds",

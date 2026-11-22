@@ -112,6 +112,9 @@ def plan_summary(plan_id: str, plan: RoughCutPlan, include_clips: bool | None = 
         **validate_plan(plan),
         "sources": sources,
     }
+    turned = {i: plan.source_turns[s] for i, s in enumerate(sources) if plan.source_turns.get(s)}
+    if turned:
+        out["source_turns"] = turned  # source index -> degrees clockwise
     if include_clips is None:
         include_clips = len(plan.clips) <= AUTO_LIST_MAX_CLIPS
         if not include_clips:

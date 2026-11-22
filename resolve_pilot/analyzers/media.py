@@ -26,6 +26,8 @@ class MediaInfo:
     # Degrees the picture is tagged to be turned for display (phones: 90 / -90 / 180).
     # width and height are the stored ones; players show a 90-degree clip the other way up.
     rotation: int = 0
+    # When the camera says it was recorded (ISO 8601), if it says.
+    recorded: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -87,6 +89,8 @@ def probe_media(path: str | Path) -> MediaInfo:
         bit_rate=int(fmt["bit_rate"]) if fmt.get("bit_rate") else None,
         container=fmt.get("format_name", ""),
         rotation=rotation,
+        recorded=((fmt.get("tags") or {}).get("com.apple.quicktime.creationdate")
+                  or (fmt.get("tags") or {}).get("creation_time") or None),
     )
 
 

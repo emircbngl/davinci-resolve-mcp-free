@@ -25,7 +25,11 @@ def counter(tmp_path_factory):
     subprocess.run(run + picture + clicks + video + ["-c:a", "pcm_s16le", str(d / "counter.mov")], check=True)
     subprocess.run(run + picture + video + [str(d / "mute.mov")], check=True)
     subprocess.run(run + ["-f", "lavfi", "-i", "sine=frequency=300:duration=4", "-ar", "44100", str(d / "tone.wav")], check=True)
-    return {"clip": str(d / "counter.mov"), "mute": str(d / "mute.mov"), "tone": str(d / "tone.wav")}
+    # A picture with a dark left half and a bright right half, to see which way it is turned.
+    halves = "color=c=black:s=160x90:r=25:d=0.4,format=gray,geq=lum='if(lt(X,W/2),40,200)',format=yuv420p"
+    subprocess.run(run + ["-f", "lavfi", "-i", halves] + video + [str(d / "halves.mov")], check=True)
+    return {"clip": str(d / "counter.mov"), "mute": str(d / "mute.mov"), "tone": str(d / "tone.wav"),
+            "halves": str(d / "halves.mov")}
 
 
 def _shown(path) -> list[int | None]:
@@ -92,6 +96,29 @@ def test_captions_ride_along_as_a_subtitle_track(counter, tmp_path):
     srt = subprocess.run([FFMPEG, "-loglevel", "error", "-i", out["path"], "-map", "0:s:0", "-f", "srt", "-"],
                          capture_output=True, text=True, check=True).stdout
     assert "00:00:00,200 --> 00:00:00,900\nMerhaba" in srt and "ikinci satır" in srt
+
+
+def test_a_source_the_plan_turns_is_shown_turned(counter, tmp_path):
+    def sides(turn):
+        plan = _plan((0.0, 0.2), source=counter["halves"])
+        if turn:
+            plan.source_turns[counter["halves"]] = turn
+        out = preview.render(plan, tmp_path / f"t{turn}.mp4", height=90)
+        g = subprocess.run([FFMPEG, "-loglevel", "error", "-i", out["path"], "-frames:v", "1", "-vf", "scale=4:4",
+                            "-pix_fmt", "gray", "-f", "rawvideo", "-"], capture_output=True, check=True).stdout
+        px = [list(g[r * 4:r * 4 + 4]) for r in range(4)]
+        middle = lambda rows: sum(px[r][c] for r in rows for c in (1, 2)) / 2          # noqa: E731
+        edge = lambda cols: sum(px[r][c] for r in (1, 2) for c in cols) / 2            # noqa: E731
+        return {"top": middle((0,)), "bottom": middle((3,)), "left": edge((0,)), "right": edge((3,))}
+
+    flat = sides(0)
+    assert flat["left"] < 70 and flat["right"] > 150                      # as the file is
+    quarter = sides(90)                                                   # clockwise: left goes up
+    assert quarter["top"] < quarter["bottom"] - 60 and quarter["left"] < 30 and quarter["right"] < 30   # bars
+    back = sides(270)
+    assert back["top"] > back["bottom"] + 60
+    over = sides(180)
+    assert over["left"] > 150 and over["right"] < 70
 
 
 def test_a_clip_past_the_end_of_its_source_holds_the_last_frame(counter, tmp_path):
@@ -174,6 +201,26 @@ def test_render_preview_carries_the_captions_of_the_cut(media, isolated_home):
                          capture_output=True, text=True, check=True).stdout
     # Said 0.2 s into the third clip, which starts at 1.25 s on the timeline.
     assert "00:00:01,450 -->" in srt and "Hello there." in srt
+
+
+def test_turning_a_source_is_kept_shown_and_not_silently_lost_on_export(media, tmp_path):
+    from resolve_pilot import mcp_server
+    from resolve_pilot.editorial import ops
+    pid, clip = _demo_plan(media)
+    before = mcp_server.render_preview(pid, wait_seconds=120)
+    out = mcp_server.edit_plan(pid, [ops.TurnOp(op="turn", source=0, degrees=270)])
+    assert out["source_turns"] == {0: 270} and "turned source 0 (two scenes.mp4) by 270 degrees" in out["changes"][0]
+    assert mcp_server.get_plan(pid)["source_turns"] == {0: 270}
+    after = mcp_server.render_preview(pid, wait_seconds=120)
+    assert after["cached"] is False and after["frames"] == before["frames"]
+    exported = mcp_server.export_fcpxml(pid, out_path=str(tmp_path / "cut.fcpxml"))
+    assert exported["turned_sources"] == [{"source": clip, "degrees": 270, "clips": [0, 1, 2]}]
+    assert "FCPXML does not carry that" in exported["warnings"][-1]
+    with pytest.raises(ValueError, match="source 3 does not exist; the plan has 1 source"):
+        mcp_server.edit_plan(pid, [ops.TurnOp(op="turn", source=3, degrees=90)])
+    cleared = mcp_server.edit_plan(pid, [ops.TurnOp(op="turn", source=0, degrees=0)])
+    assert "source_turns" not in cleared
+    assert "turned_sources" not in mcp_server.export_fcpxml(pid, out_path=str(tmp_path / "plain.fcpxml"))
 
 
 def test_render_preview_refuses_a_plan_with_errors(media):
