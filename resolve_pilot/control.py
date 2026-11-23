@@ -1,13 +1,15 @@
 """Act on Resolve through whichever channel reaches it.
 
-Three channels, tried in this order when ``channel="auto"``:
+Four channels, tried in this order when ``channel="auto"``:
 
 - ``studio``  — Resolve Studio's external Python scripting API.
 - ``bridge``  — the resolve-pilot Lua bridge running inside Resolve (Free or Studio).
+- ``console`` — the server types the Lua into Resolve's Console window and reads the
+  answer (macOS). ``auto`` uses it only where the bridge cannot run (Free 21.1.2+).
 - ``manual``  — nothing live: hand back Lua for the user to paste into the Console.
 
-Every action is written once as a self-contained Lua snippet (used by the bridge
-and manual channels) plus a Python equivalent for Studio, and every channel
+Every action is written once as a self-contained Lua snippet (used by the bridge,
+console and manual channels) plus a Python equivalent for Studio, and every channel
 reports results in the same dict shape, tagged with ``channel``.
 """
 from __future__ import annotations
@@ -16,9 +18,9 @@ import time
 from typing import Any, Callable
 
 from resolve_pilot import bridge
-from resolve_pilot.bridge import BridgeError
+from resolve_pilot.bridge import BridgeError, BridgeResult, console
 
-CHANNELS = ("auto", "studio", "bridge", "manual")
+CHANNELS = ("auto", "studio", "bridge", "console", "manual")
 
 PASTE_INSTRUCTIONS = (
     "In DaVinci Resolve open Workspace > Console, choose the Lua tab (Resolve 21 has no tabs: "
@@ -69,12 +71,25 @@ def choose_channel(prefer: str = "auto", studio_supported: bool = True) -> str:
             raise ChannelUnavailable(f"Studio scripting API is not available: {reason}")
     if prefer == "studio" and not studio_supported:
         raise ChannelUnavailable("This action has no Studio API implementation; use channel='auto'.")
-    st = bridge.status()
-    if st.running:
-        return "bridge"
-    if prefer == "bridge":
-        raise bridge.BridgeNotRunning(st.detail)
-    return "manual"
+    if prefer != "console":
+        st = bridge.status()
+        if st.running:
+            return "bridge"
+        if prefer == "bridge":
+            raise bridge.BridgeNotRunning(st.detail)
+    cs = console.status()
+    if prefer == "console":
+        if not cs.usable:
+            raise ChannelUnavailable(f"Resolve's Console cannot be used: {cs.detail}")
+        return "console"
+    return "console" if cs.usable and cs.automatic else "manual"
+
+
+def exec_live(channel: str, lua_code: str, timeout: float) -> BridgeResult:
+    """Run Lua inside Resolve on a channel that carries Lua live ("bridge" or "console")."""
+    if channel == "console":
+        return console.exec_lua(lua_code, timeout=timeout)
+    return bridge.exec_lua(lua_code, timeout=timeout)
 
 
 def perform(
@@ -88,14 +103,14 @@ def perform(
     if channel == "studio":
         assert studio_fn is not None
         return {"channel": "studio", **studio_fn()}
-    if channel == "bridge":
-        r = bridge.exec_lua(lua_code, timeout=timeout)
+    if channel in ("bridge", "console"):
+        r = exec_live(channel, lua_code, timeout)
         if not r.ok:
             raise BridgeError(f"Lua error inside Resolve: {r.error}")
-        out: dict[str, Any] = {"channel": "bridge"}
+        out: dict[str, Any] = {"channel": channel}
         out.update(r.result if isinstance(r.result, dict) else {"result": r.result})
         return out
-    return {
+    manual: dict[str, Any] = {
         "channel": "manual",
         "ok": None,
         "lua_code": lua_code,
@@ -105,3 +120,7 @@ def perform(
             "the instructions verbatim, or offer setup_bridge for hands-free control."
         ),
     }
+    cs = console.status()
+    if cs.automatic and not cs.usable:   # the server would type this itself if it could
+        manual["console"] = cs.detail
+    return manual

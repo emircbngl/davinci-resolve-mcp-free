@@ -54,7 +54,8 @@ except ImportError:  # mcp 1.x
     from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 
-from resolve_pilot import __version__, _jobs, analyzers, bridge, control, luts, traps, verified
+from resolve_pilot import __version__, _jobs, analyzers, bridge, control, luts, resolve_app, traps, verified
+from resolve_pilot.bridge import console
 from resolve_pilot.analyzers import frames as frame_grab
 from resolve_pilot.analyzers import speech as speech_levels
 from resolve_pilot._paths import state_dir
@@ -78,6 +79,11 @@ Start of session: call resolve_pilot_status once. Its `channel` says how Resolve
 - studio: Resolve Studio's Python API, direct control.
 - bridge: the resolve-pilot Lua bridge running inside Resolve (works in Free). The user starts \
 it once per session; setup_bridge installs it into Workspace > Scripts.
+- console: Resolve Free 21.1.2+ cannot run the bridge. On macOS the server types each \
+action's Lua into Resolve's own Console window and reads the answer: live control as with the \
+bridge, but every call brings Resolve to the front for a moment (tell the user; they should \
+not type in Resolve meanwhile). Needs Accessibility permission; resolve_pilot_status says which \
+app to allow.
 - manual: nothing live. Resolve actions return `lua_code` + `instructions`; relay them to the \
 user verbatim and ask them to paste it into Workspace > Console. For hands-free control \
 setup_bridge(action='start') starts Resolve and the bridge as far as the machine allows and \
@@ -317,39 +323,9 @@ def _has_quartz() -> bool:
         return False
 
 
-_MAC_RESOLVE_APPS = (
-    Path("/Applications/DaVinci Resolve/DaVinci Resolve.app"),
-    Path("/Applications/DaVinci Resolve Studio/DaVinci Resolve Studio.app"),
-)
-
-
-def _resolve_app() -> tuple[str | None, bool]:
-    """Installed Resolve version and whether it is Studio, from the app bundle (macOS).
-
-    (None, False) elsewhere or if unknown; with both editions installed, Free is reported.
-    """
-    if platform.system() != "Darwin":
-        return None, False
-    import plistlib
-    for app in _MAC_RESOLVE_APPS:
-        try:
-            with open(app / "Contents" / "Info.plist", "rb") as f:
-                found = str(plistlib.load(f).get("CFBundleShortVersionString") or "") or None
-            return found, "Studio" in app.name
-        except (OSError, plistlib.InvalidFileException):
-            continue
-    return None, False
-
-
-def _version_at_least(text: str | None, major: int, minor: int, patch: int = 0) -> bool:
-    nums: list[int] = []
-    for part in (text or "").split(".")[:3]:
-        if not part.isdigit():
-            break
-        nums.append(int(part))
-    if len(nums) < 2:
-        return False
-    return tuple(nums + [0] * (3 - len(nums))) >= (major, minor, patch)
+_MAC_RESOLVE_APPS = resolve_app.MAC_RESOLVE_APPS
+_resolve_app = resolve_app.installed
+_version_at_least = resolve_app.version_at_least
 
 
 def _bridge_on_this_resolve(resolve_version: str | None, studio: bool) -> tuple[bool, str | None]:
@@ -360,15 +336,17 @@ def _bridge_on_this_resolve(resolve_version: str | None, studio: bool) -> tuple[
     """
     if studio or not _version_at_least(resolve_version, 21, 1):
         return True, None
-    if _version_at_least(resolve_version, 21, 1, 2):
+    if not resolve_app.file_bridge_possible(resolve_version, studio):
         return False, (
             f"Resolve {resolve_version} Free: the bridge cannot start. Workspace > Scripts entries "
             "start nothing, and the Console's Lua cannot reach files: io, ffi, dofile, require and "
             "the bmd file, clipboard and process functions are gone (measured on 21.2.0 Free; "
-            "reported on 21.1.2). What works there: pasting a tool's lua_code into Workspace > "
-            "Console (measured on 21.2.0), export_fcpxml with File > Import > Timeline, and the "
-            "analysis, preview and frame tools. For live control use Resolve 20.3.x Free, where "
-            "the bridge is verified.")
+            "reported on 21.1.2). On macOS the tools reach Resolve through its Console window "
+            "instead (channel 'console', measured on 21.2.0 Free): the server types the Lua into "
+            "Workspace > Console and reads the answer. That needs Accessibility permission and "
+            "brings Resolve to the front on every call. On Windows and Linux: paste a tool's "
+            "lua_code into Workspace > Console, or use export_fcpxml with File > Import > "
+            "Timeline. Resolve 20.3.x Free still runs the bridge.")
     return True, (
         f"Resolve {resolve_version} Free: Workspace > Scripts entries do nothing from 21.1. Have "
         "the user paste setup_bridge's console_command into Workspace > Console and press Enter "
@@ -379,12 +357,14 @@ def _bridge_on_this_resolve(resolve_version: str | None, studio: bool) -> tuple[
 def resolve_pilot_status() -> dict[str, Any]:
     """Report what resolve-pilot can do on this machine and how it reaches Resolve.
 
-    Call once at the start of a session. `channel` is studio / bridge / manual (see the
-    server instructions); `next_steps` says what to set up for missing capabilities.
+    Call once at the start of a session. `channel` is studio / bridge / console / manual (see
+    the server instructions); `next_steps` says what to set up for missing capabilities.
     """
     studio_ok, studio_detail = control.studio_status(refresh=True)
     br = bridge.status()
-    channel = "studio" if studio_ok else ("bridge" if br.running else "manual")
+    cs = console.status(refresh=True)
+    channel = ("studio" if studio_ok else "bridge" if br.running
+               else "console" if cs.usable and cs.automatic else "manual")
     engines = available_engines()
     has_ffmpeg = bool(shutil.which("ffmpeg")) and bool(shutil.which("ffprobe"))
     try:
@@ -407,7 +387,14 @@ def resolve_pilot_status() -> dict[str, Any]:
                 "to paste.")
         if note:
             next_steps.append(note)
+        if cs.automatic and not cs.usable:
+            next_steps.append("The Console channel is not usable yet: " + cs.detail)
     else:
+        if channel == "console":
+            next_steps.append(
+                "Resolve is reached through its Console window: every Resolve tool brings Resolve "
+                "to the front for a moment and types there. Tell the user, and ask them not to "
+                "type in Resolve while a tool runs.")
         next_steps.append("Call get_resolve_state to see the open project and timeline.")
     if not engines:
         next_steps.append("Transcription is not installed. In the resolve-pilot checkout run "
@@ -426,6 +413,7 @@ def resolve_pilot_status() -> dict[str, Any]:
         "channel": channel,
         "studio_api": {"available": studio_ok, "detail": studio_detail},
         "bridge": br.to_dict(),
+        "console": cs.to_dict(),
         "transcription_engines": engines,
         "capabilities": {
             "media_analysis": has_ffmpeg,
@@ -480,9 +468,11 @@ def setup_bridge(
     the bridge. `bridge_running` says whether it worked; `left_for_user` is what to pass on
     when a step could not be done. Resolve starts with an untitled project: open the one
     you need with manage_projects.
+    Where the bridge cannot run (Resolve Free 21.1.2+), 'start' makes sure Resolve's Console
+    answers instead (macOS): `console_ready` says whether it does. No bridge is needed then.
     """
     if action == "status":
-        return bridge.status().to_dict()
+        return {**bridge.status().to_dict(), "console": console.status(refresh=True).to_dict()}
     if action == "start":
         return _start_bridge(idle_minutes, wait_seconds)
     if action == "stop":
@@ -583,8 +573,7 @@ def _start_bridge(idle_minutes: int, wait_seconds: float) -> dict[str, Any]:
         out["resolve_note"] = note
     if not can_start:
         out["bridge_can_start"] = False
-        out["left_for_user"] = [note]
-        return out
+        return _start_console(out, deadline)
     if not _platform_supports_ui():
         out["left_for_user"] = [_CLICK_IT + " (Clicking it for the user is macOS only.)"]
         return out
@@ -614,6 +603,33 @@ def _start_bridge(idle_minutes: int, wait_seconds: float) -> dict[str, Any]:
         out["left_for_user"] = [
             "The menu entry was clicked but the bridge did not answer. Open Workspace > Console, "
             f"pick the Lua tab, paste dofile({lua_lib.lua_string(out['installed'])}) and press Enter."]
+    return out
+
+
+def _start_console(out: dict[str, Any], deadline: float) -> dict[str, Any]:
+    """Where the bridge cannot run: see that Resolve's Console answers a request."""
+    cs = console.status(refresh=True)
+    out["console_ready"] = False
+    if not cs.usable:
+        out["left_for_user"] = [out["resolve_note"], cs.detail]
+        return out
+    while True:   # the Console is there only once Resolve has finished loading
+        try:
+            answer = console.exec_lua("return resolve:GetVersionString()", timeout=15.0)
+            error = answer.error or "no version came back"
+            if answer.ok and answer.result:
+                out.update(console_ready=True, channel="console", resolve_answered=answer.result,
+                           next_step="manage_projects() shows the projects; open the one to work in.")
+                return out
+        except console.ConsoleUnavailable as e:
+            out["left_for_user"] = [str(e)]
+            return out
+        except bridge.BridgeError as e:
+            error = str(e)
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(2.0)
+    out["left_for_user"] = [f"Resolve's Console did not answer: {error}"]
     return out
 
 
@@ -1606,12 +1622,13 @@ def render_preview(
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Acting on Resolve (auto-routed: Studio API → live bridge → paste-able Lua)
+# Acting on Resolve (auto-routed: Studio API → live bridge → Console window → paste-able Lua)
 # ────────────────────────────────────────────────────────────────────────────
 
 Channel = Annotated[
-    Literal["auto", "studio", "bridge", "manual"],
-    Field(description="auto picks Studio API, then the live bridge, else returns Lua to paste."),
+    Literal["auto", "studio", "bridge", "console", "manual"],
+    Field(description="auto picks Studio API, the live bridge or Resolve's Console, else returns "
+                      "Lua to paste."),
 ]
 
 
@@ -2229,7 +2246,8 @@ def run_lua(
     args: Annotated[dict[str, Any] | None, Field(description="Arguments for the snippet.")] = None,
     timeout_seconds: Annotated[float, Field(gt=0, le=600)] = 30.0,
 ) -> dict[str, Any]:
-    """Execute Lua inside the running Resolve through the live bridge (Free or Studio).
+    """Execute Lua inside the running Resolve through the live bridge (Free or Studio), or
+    through its Console window where the bridge cannot run; `channel` says which.
 
     The escape hatch for anything the dedicated tools don't cover. It can change or delete
     anything in the project, so read state first, keep scripts small, and confirm
@@ -2238,7 +2256,12 @@ def run_lua(
     if (code is None) == (snippet is None):
         raise ValueError("Pass exactly one of code or snippet.")
     lua = code if code is not None else lua_lib.render_snippet(snippet, args or {})
-    out = bridge.exec_lua(lua, timeout=timeout_seconds).to_dict()
+    channel = control.choose_channel("auto", studio_supported=False)
+    if channel == "manual":
+        cs = console.status()
+        raise bridge.BridgeNotRunning(bridge.status().detail + (
+            f" Resolve's Console cannot be used either: {cs.detail}" if cs.automatic else ""))
+    out = {"channel": channel, **control.exec_live(channel, lua, timeout_seconds).to_dict()}
     hints = traps.hints_for_lua(lua) if code is not None else []
     if hints:
         out["known_traps"] = hints
@@ -2622,7 +2645,8 @@ def timeline_frames(
     Use it to verify what you changed (a LUT, a title, a cut point). Unlike grab_frames,
     which reads source files, this exports frames of the current timeline from inside
     Resolve, on any OS. The playhead and page are put back afterwards. Needs a live
-    channel (bridge or Studio).
+    channel (Studio, bridge or console). `same_picture` lists positions that came back as
+    the very same picture: right for a still stretch, otherwise ask for them again.
     """
     rows = [p.model_dump(exclude_none=True) for p in positions]
     with tempfile.TemporaryDirectory(prefix="stills-", dir=state_dir("stills")) as tmp:
@@ -2637,12 +2661,17 @@ def timeline_frames(
             out["ok"] = False
             return _content(out)
         frames, labels, dropped = [], [], []
+        first_with: dict[str, int] = {}
+        same: list[list[int]] = []
         for row in out.get("stills", []):
             png = Path(row["path"]) if row.get("path") else None
             if not row.get("ok") or png is None or not png.is_file():
                 dropped.append({"index": row["index"], "seconds": _r(row["seconds"]),
                                 "reason": row.get("error") or "no still was written"})
                 continue
+            digest = hashlib.sha1(png.read_bytes()).hexdigest()
+            if first_with.setdefault(digest, row["index"]) != row["index"]:
+                same.append([first_with[digest], row["index"]])
             jpg = folder / f"frame_{row['index']:03d}.jpg"
             proc = subprocess.run(frame_grab._frame_cmd(png, 0.0, jpg, width),
                                   capture_output=True, text=True, timeout=60)
@@ -2655,6 +2684,12 @@ def timeline_frames(
         header = {"ok": True, "channel": out["channel"], "timeline": out.get("timeline"),
                   "fps": out.get("fps"), "drop_frame": out.get("drop_frame"), "layout": layout,
                   "requested": len(rows), "dropped": dropped}
+        if same:
+            # Seen once on 21.2.0 Free: two positions, the first one's picture twice.
+            header["same_picture"] = same
+            header["note"] = ("Resolve wrote the very same picture for these pairs of positions "
+                              "(indexes). That is right where the picture stands still; if it should "
+                              "differ, Resolve had not drawn the new frame yet: ask for them again.")
         return _frames_result(header, frames, labels, layout, folder)
 
 
@@ -2773,18 +2808,19 @@ def open_ai_feature(
 # Resources: read-only context an agent can load without a tool call
 # ────────────────────────────────────────────────────────────────────────────
 
-_LIVE = ["studio", "bridge", "manual"]
+_LIVE = ["studio", "bridge", "console", "manual"]
+_LUA_ONLY = ["bridge", "console", "manual"]  # no Studio Python path
 # How each tool reaches Resolve, where the `channel` parameter does not say it all.
 # Tools with a `channel` parameter default to _LIVE; tools without one need no Resolve.
 _TOOL_CHANNELS: dict[str, list[str]] = {
-    "run_lua": ["bridge"],
-    "timeline_frames": ["studio", "bridge"],
-    "add_title": ["bridge", "manual"],  # Lua only, no Studio Python path
-    "checkpoint": ["bridge", "manual"],
-    "grade_clips": ["bridge", "manual"],
-    "make_format_version": ["bridge", "manual"],
-    "manage_timelines": ["bridge", "manual"],
-    "edit_markers": ["bridge", "manual"],
+    "run_lua": ["bridge", "console"],
+    "timeline_frames": ["studio", "bridge", "console"],
+    "add_title": _LUA_ONLY,
+    "checkpoint": _LUA_ONLY,
+    "grade_clips": _LUA_ONLY,
+    "make_format_version": _LUA_ONLY,
+    "manage_timelines": _LUA_ONLY,
+    "edit_markers": _LUA_ONLY,
     "open_page": _LIVE + ["macos_ui"],
     "screenshot_resolve": ["macos_ui"],
     "send_keystroke": ["macos_ui"],
@@ -2797,6 +2833,10 @@ _CHANNEL_NOTES = {
     "studio": "Resolve Studio's Python scripting API: direct control. Studio only.",
     "bridge": "The resolve-pilot Lua bridge running inside Resolve (Free and Studio). The user "
               "starts it once per session (setup_bridge installs it into Workspace > Scripts).",
+    "console": "The server types the tool's Lua into Resolve's own Console window and reads the "
+               "printed answer (macOS, Accessibility permission). For Resolve Free 21.1.2+, where "
+               "the bridge cannot run; 'auto' picks it only there. Every call brings Resolve to "
+               "the front for a moment. Measured on 21.2.0 Free.",
     "manual": "Nothing live: the tool returns lua_code + instructions for the user to paste into "
               "Workspace > Console. Nothing changes until they do.",
     "macos_ui": "macOS Accessibility / screen capture of the Resolve window. macOS only; needs "
@@ -2814,9 +2854,10 @@ _EDITION_NOTES = {
                          "and Workspace > Scripts entries do nothing. Reported per patch release: "
                          "on 21.1.1 Free the bridge starts when setup_bridge's console_command "
                          "(dofile) is pasted into Workspace > Console; on 21.1.2 Free dofile, io "
-                         "and ffi are gone too and the bridge cannot start. Use Resolve 20.3.x "
-                         "Free for live control (the bridge is verified there); FCPXML export and "
-                         "the analysis tools work on any version.",
+                         "and ffi are gone too and the bridge cannot start. There the console "
+                         "channel takes its place on macOS (measured on 21.2.0 Free); on Windows "
+                         "and Linux only pasting by hand is left. Resolve 20.3.x Free still runs "
+                         "the bridge; FCPXML export and the analysis tools work on any version.",
     "verified": "Bridge tools verified live on Resolve 20.3 Free (macOS); see resolve://traps for "
                 "what each measurement turned up.",
 }
@@ -2853,7 +2894,8 @@ def capabilities() -> dict[str, Any]:
     return {
         "server_version": __version__,
         "platform": platform.system(),
-        "channel_order": "studio, then bridge, then manual (channel='auto'); "
+        "channel_order": "studio, then bridge, then console (only where the bridge cannot run), "
+                         "then manual (channel='auto'); "
                          "resolve_pilot_status says which one is live",
         "channels": _CHANNEL_NOTES,
         "editions": _EDITION_NOTES,
@@ -2885,6 +2927,10 @@ def _state_snapshot(timeout: float = STATE_TIMEOUT_SECONDS) -> dict[str, Any]:
         channel = control.choose_channel("auto")
         if channel == "manual":
             return {**not_connected, "channel": "manual", "bridge": bridge.status().detail}
+        if channel == "console":   # reading a resource must not bring Resolve to the front
+            return {"connected": True, "channel": "console",
+                    "next_steps": ["Call get_resolve_state: on this channel every read brings "
+                                   "Resolve to the front, so it is only done when asked for."]}
         args = dict(include_clips=False, track_type="video", track_index=1, include_markers=False)
         out = control.perform(lua_lib.snippet_get_state(**args),
                               lambda: _studio().resolve_state(**args), channel, timeout=timeout)
@@ -2912,7 +2958,7 @@ def _register_resources() -> None:
                              "what resolve-pilot does about each. Read before risky edits.",
                  mime_type="text/markdown")(traps.to_markdown)
     mcp.resource("resolve://capabilities", name="capabilities", title="Capability matrix",
-                 description="Which tools work on which channel (studio / bridge / manual / "
+                 description="Which tools work on which channel (studio / bridge / console / manual / "
                              "macos_ui), Free vs Studio and Resolve 21.1+ notes, OS and "
                              "permission notes.",
                  mime_type="application/json")(

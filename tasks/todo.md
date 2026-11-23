@@ -570,3 +570,91 @@ running and `setup_bridge(start)` answered "already running" with Resolve closed
 - Not done: a way to run a tool's `lua_code` in the Console for the user (paste, Enter, read
   the Console from a screenshot). It would need Accessibility and Screen Recording for the
   server's Python, takes the keyboard focus, and cannot read results back as data.
+
+---
+
+# Resolve 21.2 Free: live control through the Console window (2026-11-23)
+
+Emir: "sen 21.2'nin bridge'ini hallet" (going back to 20.3 means uninstalling and installing
+by hand). The bridge itself cannot exist on 21.2 Free (measured above), and what Blackmagic took
+out of the Console's Lua is not put back by a side door. What is still offered to every Free
+user is the Console: type Lua at the prompt, read what it prints. The server can do exactly
+that for the user.
+
+Measured on 21.2.0 Free before planning (macOS, through Accessibility, no screenshots, no
+clipboard):
+- The Console window has two text areas. Setting the value of the small one and pressing
+  Return runs the text (multi-line too, 150 KB tried); the value of the large one is the
+  printed output, read back as text.
+- Globals set in one entry are still there in the next, also after the window was closed and
+  opened again from Workspace > Console.
+- The output keeps the last 131,072 characters; older text goes, and one line longer than
+  that is lost entirely. A 130,000 character line came back whole. Text is not interpreted
+  (`<b>`, `&amp;`, double spaces, Turkish letters and an emoji came back unchanged).
+- Resolve's windows are only visible to Accessibility while Resolve is the front app
+  (0 windows in the background), so every exchange brings Resolve to the front.
+- `setfenv`, `getfenv`, `loadstring`, `xpcall` exist; `debug` does not.
+
+## Plan
+
+- [x] `bridge.lua` gets a Console mode: the same request handling (print capture, JSON,
+      `rp` helpers), answered with `print` instead of a file: `@@rp:<id>:<n>/<parts>:<len>:<chunk>@@`,
+      ASCII only, 60,000 characters a part, further parts on request.
+- [x] `resolve_pilot/bridge/console.py`: `status()` (macOS, Resolve running, Accessibility) and
+      `exec_lua()` with the bridge's result shape: bring Resolve forward, open the Console if
+      it is closed, type, press Return only while the Console's input has the focus in the
+      front app, read, put the earlier front app back. The helper script is pasted once per
+      Resolve session, when the Console answers that it does not know it.
+- [x] `control`: a fourth channel `console`, after the bridge and before `manual`; picked by
+      `auto` only where the bridge cannot start (Free 21.1.2+), because that is where it was
+      measured. `run_lua`, `resolve_pilot_status`, `setup_bridge(start / status)` know it.
+- [x] Tests with a simulated Console running the real script under LuaJIT without `io`, `ffi`
+      and `debug`; each guard shown red when removed.
+- [x] Tried for real on 21.2.0 Free: state, a project and a timeline made by the tools, a
+      large answer in parts.
+- [x] Docs: README, CHANGELOG, trap, verified ledger, live-control guide, server instructions.
+
+## Review
+
+What a client with only the MCP tools can now do on Resolve 21.2.0 Free (macOS): everything
+it could do through the bridge on 20.3, with Resolve coming to the front for about a second
+per call. Run for real, through the tools, in the scratch project `resolve-pilot-21`:
+
+| Step | Result |
+|---|---|
+| `resolve_pilot_status` | `channel: console` |
+| `setup_bridge(start)` | `console_ready: true` in 3.4 s, no bridge |
+| `import_timeline(plan_id=...)`, the 198-clip cut | 198 of 198 on the plan's frames, 22 s |
+| `get_resolve_state(include_clips)` | 198 clips with sources, 1.0 s |
+| `apply_lut("hlg-to-rec709")` | 198 applied; the frame from Resolve has normal colours |
+| `add_markers`, `add_subtitles` | 2 markers read back (Turkish note intact), 176 captions |
+| `timeline_frames` | 3 positions, the same three pictures from Cut, Edit, Color, Media |
+| `checkpoint`, `manage_timelines`, `manage_projects`, `open_page`, `run_lua`, `render_status` | ok |
+
+Speed: first call 1.3 s (the helper is typed once), later calls about 0.7 s, a 370 KB answer
+3.8 s in seven parts.
+
+Found while trying it for real, and fixed:
+- After Resolve changed page, the Console's input refused the focus, so the tool (rightly)
+  typed nothing. The window is now raised before the focus is asked for.
+- `timeline_frames` from the Deliver page failed for every position on 21.2. The stills are
+  taken on Edit now.
+- Once, two positions came back as the same picture (the first one's). Not reproduced in 27
+  further stills; `timeline_frames` now names such pairs instead of passing them on silently.
+- The end-to-end tests start a real server with a hand-made environment. Without
+  `RESOLVE_PILOT_CONSOLE=off` in it they would have typed into the maintainer's open Resolve.
+
+Tests: 29 for the Console (the real script under LuaJIT without io, ffi, debug, behind a
+window that keeps 131,072 characters and shows output one look late), 4 for `start`; 24
+guards removed one at a time, 24 red.
+
+Not done, not verified:
+- The connected MCP server still runs the old code until it is restarted; everything above
+  was run with the new code from a shell (which types through the Claude app's permission).
+  The server's own Python does have Accessibility on this Mac (its `menu_pick` clicked).
+- Windows and Linux: no console channel. Another interface language with the Console closed.
+- 20.x and Studio: `channel="console"` can be asked for but was never tried there.
+- Typing while a tool runs: a key the user presses in Resolve in that second could land in
+  the Console's input. The tool cannot prevent it; the guide tells the agent to say so.
+- Blackmagic has narrowed Free's scripting with every 21.x release. If a later release takes
+  the Console away or closes it to Accessibility, this channel ends with it.

@@ -245,7 +245,9 @@ local function frames_to_tc(total, fps, df)
 end
 """
 
-_PLAYHEAD_PAGES = ("cut", "edit", "color", "fairlight", "deliver")
+# Pages a still can be exported from. Not Deliver: ExportCurrentFrameAsStill fails there
+# (measured on 21.2.0 Free), so the snippet goes to Edit for the stills and comes back.
+_PLAYHEAD_PAGES = ("cut", "edit", "color", "fairlight")
 
 
 @_snippet

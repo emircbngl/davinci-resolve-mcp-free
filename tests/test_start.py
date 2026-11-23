@@ -138,6 +138,55 @@ def test_a_resolve_where_the_bridge_cannot_start_is_not_clicked(world):
     assert "the bridge cannot start" in out["left_for_user"][0] and out["resolve_note"] == out["left_for_user"][0]
 
 
+class _Console:
+    """Resolve's Console as setup_bridge sees it: usable or not, answering after a while."""
+
+    def __init__(self, monkeypatch, world, usable=True, ready_at=0.0, detail="why not"):
+        from resolve_pilot.bridge import BridgeResult, console
+        self.asked = 0
+
+        def exec_lua(code, timeout=30.0):
+            self.asked += 1
+            if world.now < ready_at:
+                raise console.ConsoleError("Resolve's Console window could not be opened")
+            return BridgeResult(True, "21.2.0.6", None, "", 0.5)
+        monkeypatch.setattr(console, "status",
+                            lambda refresh=False: console.ConsoleStatus(usable, True, detail))
+        monkeypatch.setattr(console, "exec_lua", exec_lua)
+
+
+def test_where_the_bridge_cannot_start_the_console_takes_its_place(world, monkeypatch):
+    world.resolve_running, world.version = True, "21.2.0"
+    con = _Console(monkeypatch, world)
+    out = mcp_server.setup_bridge("start")
+    assert out["console_ready"] is True and out["channel"] == "console"
+    assert out["bridge_running"] is False and out["bridge_can_start"] is False
+    assert "left_for_user" not in out and world.clicks == [] and con.asked == 1
+
+
+def test_the_console_is_waited_for_while_resolve_loads(world, monkeypatch):
+    world.version, world.resolve_up_at = "21.2.0", 4.0
+    con = _Console(monkeypatch, world, ready_at=9.0)
+    out = mcp_server.setup_bridge("start", wait_seconds=60)
+    assert world.launched and out["console_ready"] is True and con.asked > 1
+
+
+def test_a_console_that_never_answers_is_reported_with_the_reason(world, monkeypatch):
+    world.resolve_running, world.version = True, "21.2.0"
+    _Console(monkeypatch, world, ready_at=1e9)
+    out = mcp_server.setup_bridge("start", wait_seconds=10)
+    assert out["console_ready"] is False
+    assert "could not be opened" in out["left_for_user"][0] and world.now <= 12
+
+
+def test_a_console_this_server_may_not_use_is_left_to_the_user(world, monkeypatch):
+    world.resolve_running, world.version = True, "21.2.0"
+    con = _Console(monkeypatch, world, usable=False, detail="allow Python.app under Accessibility")
+    out = mcp_server.setup_bridge("start")
+    assert out["console_ready"] is False and con.asked == 0
+    assert out["left_for_user"] == [out["resolve_note"], "allow Python.app under Accessibility"]
+
+
 def test_on_other_systems_the_click_is_left_to_the_user(world):
     world.resolve_running, world.macos = True, False
     out = mcp_server.setup_bridge("start")

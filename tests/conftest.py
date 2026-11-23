@@ -31,6 +31,10 @@ def isolated_home(tmp_path, monkeypatch):
     # installed bridge with one pointing at a pytest folder.
     monkeypatch.setenv("RESOLVE_PILOT_SCRIPTS_DIR", str(tmp_path / "resolve-scripts" / "Utility"))
     monkeypatch.setenv("RESOLVE_PILOT_LUT_DIR", str(tmp_path / "resolve-luts"))
+    # Never type into a Resolve that happens to be open on the machine running the tests.
+    monkeypatch.setenv("RESOLVE_PILOT_CONSOLE", "off")
+    from resolve_pilot.bridge import console
+    monkeypatch.setattr(console, "_status_cache", None)
     return home
 
 

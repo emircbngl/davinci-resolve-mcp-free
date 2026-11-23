@@ -45,8 +45,8 @@ async def _session(home, tmp_path) -> None:
         caps = json.loads(await _read(s, "resolve://capabilities"))
         tools = {t.name for t in (await s.list_tools()).tools}
         assert set(caps["tools"]) == tools
-        assert caps["tools"]["run_lua"]["channels"] == ["bridge"]
-        assert caps["tools"]["add_markers"]["channels"] == ["studio", "bridge", "manual"]
+        assert caps["tools"]["run_lua"]["channels"] == ["bridge", "console"]
+        assert caps["tools"]["add_markers"]["channels"] == ["studio", "bridge", "console", "manual"]
         assert caps["tools"]["probe_media"]["needs_resolve"] is False
         assert caps["tools"]["screenshot_resolve"]["macos_only"] is True
         assert caps["tools"]["remove_clips"]["destructive"] is True
@@ -151,8 +151,8 @@ def test_state_snapshot_reports_errors_instead_of_raising(monkeypatch):
 
 def test_tools_without_a_studio_path_do_not_claim_studio():
     tools = mcp_server.capabilities()["tools"]
-    assert tools["add_title"]["channels"] == ["bridge", "manual"]
-    assert tools["checkpoint"]["channels"] == ["bridge", "manual"]
+    assert tools["add_title"]["channels"] == ["bridge", "console", "manual"]
+    assert tools["checkpoint"]["channels"] == ["bridge", "console", "manual"]
     assert traps.hints_for_lua('tl:InsertFusionTitleIntoTimeline("Text+")')[0].startswith(
         "Known trap (fusion-title-insert-edit)")
 
@@ -165,6 +165,11 @@ def test_every_tool_that_needs_resolve_is_in_the_live_ledger():
     assert needs <= set(verified.LIVE) | set(verified.NOT_YET), sorted(
         needs - set(verified.LIVE) - set(verified.NOT_YET))
     assert tools["run_lua"]["verified_live"]["resolve"] == "20.3 Free"
+    # What was also run through the Console window on 21.2 is listed with the same tools.
+    assert set(verified.LIVE_CONSOLE) <= set(verified.LIVE)
+    also = tools["run_lua"]["verified_live"]["also"]
+    assert [(a["resolve"], a["channel"]) for a in also] == [("21.2.0 Free", "console")]
+    assert "also" not in tools["add_title"]["verified_live"]
     assert tools["send_keystroke"]["verified_live"] is None
     assert tools["probe_media"]["verified_live"] is None
 

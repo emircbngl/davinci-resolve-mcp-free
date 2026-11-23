@@ -50,7 +50,9 @@ async def connect(home: Path):
     params = StdioServerParameters(
         command=sys.executable,
         args=["-m", "resolve_pilot.mcp_server"],
-        env={"RESOLVE_PILOT_HOME": str(home), "PATH": os.environ.get("PATH", "")},
+        # The server must not type into a Resolve that is open on the machine running the tests.
+        env={"RESOLVE_PILOT_HOME": str(home), "PATH": os.environ.get("PATH", ""),
+             "RESOLVE_PILOT_CONSOLE": "off"},
         cwd=str(Path(__file__).resolve().parents[1]),
     )
     async with stdio_client(params) as (read, write):

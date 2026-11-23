@@ -45,11 +45,16 @@ _UPSELL_TEXT = "reached a limitation"
 _UPSELL_DISMISS = "Not Yet"
 
 
-def osascript(script: str, timeout: float = 15.0) -> str:
-    """Run an AppleScript and return its stdout. Raises on non-zero exit."""
+def osascript(script: str, timeout: float = 15.0, on_stdin: bool = False) -> str:
+    """Run an AppleScript and return its stdout. Raises on non-zero exit.
+
+    `on_stdin` hands the script over on standard input instead of the command line,
+    whose length the system limits; for scripts that carry a lot of text.
+    """
     try:
         proc = subprocess.run(
-            ["osascript", "-e", script],
+            ["osascript", "-"] if on_stdin else ["osascript", "-e", script],
+            input=script if on_stdin else None,
             capture_output=True, text=True, timeout=timeout, check=False,
         )
     except subprocess.TimeoutExpired as e:

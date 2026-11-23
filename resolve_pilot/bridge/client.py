@@ -136,16 +136,26 @@ def render_script(idle_minutes: int = DEFAULT_IDLE_MINUTES, directory: Path | No
             "RESOLVE_PILOT_BRIDGE_DIR to an ASCII folder that only you can write to (e.g. one "
             "you create under your own drive), restart the MCP server and set the bridge up again."
         )
-    minutes = max(1, int(idle_minutes))
+    return _render(str(d), max(1, int(idle_minutes)), console=False)
+
+
+def _render(directory: str, minutes: int, console: bool) -> str:
     return (
         _TEMPLATE.read_text(encoding="utf-8")
-        .replace("__RP_BRIDGE_DIR__", lua_string(str(d)))
+        .replace("__RP_BRIDGE_DIR__", lua_string(directory))
         .replace("__RP_SEP__", lua_string(os.sep))
         .replace("__RP_VERSION_TEXT__", __version__)
         .replace("__RP_VERSION__", lua_string(__version__))
         .replace("__RP_IDLE_SECONDS__", str(minutes * 60))
         .replace("__RP_IDLE_MIN__", str(minutes))
+        .replace("__RP_CONSOLE__", "true" if console else "false")
     )
+
+
+def render_console_script() -> str:
+    """The same script in Console mode: it defines ``__rp_console`` and returns, touching
+    no file (see ``console.py``)."""
+    return _render("", DEFAULT_IDLE_MINUTES, console=True)
 
 
 def scripts_menu_dir(scope: str = "user") -> Path:

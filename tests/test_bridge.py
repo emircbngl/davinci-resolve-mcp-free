@@ -200,8 +200,9 @@ def test_bridge_reads_no_undefined_globals(tmp_path):
     reads, writes = _globals(_listing(tmp_path, "bridge", bridge.render_script()))
     assert reads, "luajit -bl output format changed; the check would pass vacuously"
     assert reads - _LUA_BUILTINS - _RESOLVE_GLOBALS == set()
-    # It deliberately sets only these: `print` is swapped while capturing output.
-    assert writes <= {"print", "resolve", "rp"}
+    # It deliberately sets only these: `print` is swapped while capturing output, and
+    # `__rp_console` is what the Console calls in Console mode.
+    assert writes <= {"print", "resolve", "rp", "__rp_console"}
 
 
 @needs_luajit
@@ -408,6 +409,12 @@ def test_timeline_frames_export_stills_and_restore_the_playhead(live_bridge, tmp
     seen = bridge.exec_lua("return {mock.project.stills, mock.project.current:GetCurrentTimecode(), "
                            "resolve.page}").result
     assert seen == [["01:00:01:00", "01:00:01:06"], "01:00:00:00", "media"]  # restored
+    # The mock hands out one picture for every position: said, not passed over.
+    assert header["same_picture"] == [[0, 1]] and "very same picture" in header["note"]
+    # Resolve exports no still from the Deliver page: the stills are taken on Edit.
+    bridge.exec_lua("resolve.page = 'deliver'; mock.project.still_pages = {}")
+    assert _json.loads(mcp_server.timeline_frames([pos(seconds=1)]).content[0].text)["returned"] == 1
+    assert bridge.exec_lua("return {mock.project.still_pages, resolve.page}").result == [["edit"], "deliver"]
 
 
 @needs_luajit

@@ -14,6 +14,12 @@
 --                                   "<epoch> <version> <token> busy <start> pid=<pid>" while
 --                                   a request is running (pid= is left out when unknown)
 --   stop           host -> bridge   its presence makes the bridge exit
+--
+-- Console mode (CONSOLE below): for a Resolve whose Lua cannot reach files (Free 21.1.2+).
+-- Nothing loops and no file is touched. The script only defines __rp_console; the server
+-- types `__rp_console.run(id, code)` at the Console prompt and reads the printed answer,
+--   @@rp:<id>:<n>/<parts>:<length>:<part n of the same JSON as response.json>@@
+-- from the Console's output, asking for the parts after the first one by one.
 
 -- Everything the bridge itself uses is bound locally: request code writes to the
 -- globals, and reassigning one like `type`, `table` or `os` must not break the bridge.
@@ -32,6 +38,7 @@ local log = print
 local DIR = __RP_BRIDGE_DIR__
 local VERSION = __RP_VERSION__
 local IDLE_LIMIT = __RP_IDLE_SECONDS__
+local CONSOLE = __RP_CONSOLE__
 local TICK = 0.2
 local MAX_OUTPUT = 256 * 1024          -- bytes of print() output kept per request
 local MAX_RESULT = 4 * 1024 * 1024     -- bytes of encoded result per request
@@ -331,7 +338,8 @@ local function request_env(capture)
   })
 end
 
-local function handle(id, raw, before_reply)
+-- Runs one request and returns its answer as JSON text.
+local function answer(id, raw)
   -- Compile without the header line so error line numbers match the caller's code.
   local code = raw:match("^%-%- rp%-id: [%w%-_]+\r?\n(.*)$") or raw
   local resp = { id = id }
@@ -381,9 +389,10 @@ local function handle(id, raw, before_reply)
       -- do anything (measured on 20.3); every API call then fails cryptically.
       local r = get_resolve()
       if not (r and type(r.GetProjectManager) == "function") then
-        resp.error = resp.error .. "\nThe bridge has no working Resolve object: it was probably " ..
-          "started while no project was open. Open a project, then start the bridge again " ..
-          "(Workspace > Scripts > ResolvePilotBridge)."
+        resp.error = resp.error .. (CONSOLE and "\nThe Console has no working Resolve object: " ..
+          "open a project in Resolve first." or "\nThe bridge has no working Resolve object: it " ..
+          "was probably started while no project was open. Open a project, then start the " ..
+          "bridge again (Workspace > Scripts > ResolvePilotBridge).")
       end
     end
   end
@@ -404,12 +413,95 @@ local function handle(id, raw, before_reply)
   if not encoded then
     text = '{"id":"' .. id .. '","ok":false,"output":"","error":"The result could not be encoded."}'
   end
+  return text
+end
+
+local function handle(id, raw, before_reply)
+  local text = answer(id, raw)
   -- Clear "busy" before the reply lands: a client that reads the reply and sends its
   -- next request at once must not see the previous request still running.
   if before_reply then pcall(before_reply) end
   if not write_atomic(RESP, text) then
     log("[bridge] could not write " .. RESP)
   end
+end
+
+-- Console mode ---------------------------------------------------------------
+
+if CONSOLE then
+  -- The Console's output keeps its last 131,072 characters and loses a longer line
+  -- entirely (measured on 21.2.0 Free), so an answer is printed in parts, as plain ASCII:
+  -- nothing the window does to other characters can then change it.
+  local PART = 60000
+
+  local HIGH = "[" .. string.char(128) .. "-" .. string.char(255) .. "]+"  -- every byte of UTF-8 beyond ASCII
+  local function ascii(text)
+    return (text:gsub(HIGH, function(run)
+      local out, i, n = {}, 1, #run
+      while i <= n do
+        local b = run:byte(i)
+        local len = (b >= 240 and b <= 244) and 4 or (b >= 224 and b <= 239) and 3
+          or (b >= 194 and b <= 223) and 2 or 0
+        local cp
+        if len > 0 and i + len - 1 <= n then
+          cp = b % (len == 2 and 32 or len == 3 and 16 or 8)
+          for k = 1, len - 1 do
+            local c = run:byte(i + k)
+            if c > 191 then cp = nil break end
+            cp = cp * 64 + (c - 128)
+          end
+        end
+        if not cp then                     -- not UTF-8: one replacement character per byte
+          out[#out + 1] = "\\ufffd"
+          i = i + 1
+        elseif cp < 65536 then
+          out[#out + 1] = format("\\u%04x", cp)
+          i = i + len
+        else
+          cp = cp - 65536
+          out[#out + 1] = format("\\u%04x\\u%04x", 55296 + floor(cp / 1024), 56320 + cp % 1024)
+          i = i + len
+        end
+      end
+      return concat(out)
+    end))
+  end
+
+  local held_id, held = "", ""
+  -- The marker is put together here so that the code the Console echoes never contains it.
+  local MARK = "@@" .. "rp:"
+  local function show(id, n)
+    local parts = floor((#held + PART - 1) / PART)
+    if parts < 1 then parts = 1 end
+    n = tonumber(n) or 0
+    if n < 1 or n > parts or n ~= floor(n) then
+      log(MARK .. id .. ":gone@@")
+      return
+    end
+    local part = held:sub((n - 1) * PART + 1, n * PART)
+    log(MARK .. id .. ":" .. n .. "/" .. parts .. ":" .. #part .. ":" .. part .. "@@")
+  end
+
+  __rp_console = {
+    version = VERSION,
+    run = function(id, code)
+      id = safe_tostring(id)
+      local ok, text = pcall(answer, id, safe_tostring(code))
+      if not ok then
+        text = '{"id":"' .. id .. '","ok":false,"output":"","error":"Internal error: ' ..
+          'the request could not be answered."}'
+      end
+      held_id, held = id, ascii(text)
+      show(id, 1)
+    end,
+    -- A part of the last answer again; "gone" when another request was run since.
+    part = function(id, n)
+      id = safe_tostring(id)
+      if id ~= held_id then log(MARK .. id .. ":gone@@") return end
+      show(id, n)
+    end,
+  }
+  return
 end
 
 -- Main loop ----------------------------------------------------------------

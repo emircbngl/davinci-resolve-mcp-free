@@ -2,7 +2,7 @@
 
 **Claude-driven video editing that runs in [DaVinci Resolve Free](https://www.blackmagicdesign.com/products/davinciresolve) — the no-cost edition that Blackmagic ships at $0.** No Studio license required, no API key required.
 
-> ℹ️ **What "free" means here:** DaVinci Resolve ships in two editions — **Free** (no cost) and **Studio** (~$295 one-time license). Studio exposes a Python scripting API for automation; Free does not — and since **Resolve 21.1, Python scripting (and Resolve's own MCP server) are Studio-only**, so MCP servers that drive Free through Python stop working there. This project gets Claude-driven editing working in **Resolve Free too**, through a Lua bridge that runs inside Resolve (verified on 20.3 Free; reported working from the Console on 21.1.1 Free, but **it cannot start on 21.1.2+ Free**, whose Console Lua has no file access any more (measured on 21.2.0 Free; pasting a tool's Lua into the Console still works there) — use **Resolve 20.3.x Free** for live control) plus FCPXML and UI automation:
+> ℹ️ **What "free" means here:** DaVinci Resolve ships in two editions — **Free** (no cost) and **Studio** (~$295 one-time license). Studio exposes a Python scripting API for automation; Free does not — and since **Resolve 21.1, Python scripting (and Resolve's own MCP server) are Studio-only**, so MCP servers that drive Free through Python stop working there. This project gets Claude-driven editing working in **Resolve Free too**, through a Lua bridge that runs inside Resolve (verified on 20.3 Free; reported working from the Console on 21.1.1 Free). **On 21.1.2+ Free the bridge cannot start**: its Console Lua has no file access any more (measured on 21.2.0 Free). There, on macOS, the server uses Resolve's own Console window instead: it types each tool's Lua at the prompt and reads the printed answer (the `console` channel, measured on 21.2.0 Free; needs Accessibility permission and brings Resolve to the front for a moment on every call). Plus FCPXML and UI automation:
 
 | Channel | What it does | Free | Studio |
 |---|---|:---:|:---:|
@@ -108,7 +108,7 @@ Designed for agents:
 
 ### Resources
 
-Read-only context a client can load without a tool call: `resolve://traps` (the known-traps ledger), `resolve://capabilities` (which tool works on which channel — studio, bridge, paste-Lua, macOS UI — plus Free / Studio / Resolve 21.1+ and permission notes), `resolve://state` (the open project and timeline when live, else how to connect; answers within seconds) and `resolve://guide/{name}` (the workflow guides).
+Read-only context a client can load without a tool call: `resolve://traps` (the known-traps ledger), `resolve://capabilities` (which tool works on which channel — studio, bridge, Console window, paste-Lua, macOS UI — plus Free / Studio / Resolve 21.1+ and permission notes), `resolve://state` (the open project and timeline when live, else how to connect; answers within seconds) and `resolve://guide/{name}` (the workflow guides).
 
 ## Architecture
 
@@ -145,41 +145,41 @@ The test suite runs against a mock of Resolve's API, so this table records what 
 <!-- verified-matrix:start -->
 | Tool | Reaches Resolve through | Run in real Resolve | Covered |
 |---|---|---|---|
-| `resolve_pilot_status` | bridge heartbeat, Resolve's process | ✅ 20.3 Free, macOS (bridge) | channel switches from manual to bridge |
-| `setup_bridge` | Resolve's Scripts folder | ✅ 20.3 Free, macOS (bridge) | install into Workspace › Scripts, status; start with the bridge already running and from a closed Resolve (the menu click: tests only) |
+| `resolve_pilot_status` | bridge heartbeat, Resolve's process | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | channel switches from manual to bridge<br>21.2.0: channel is console |
+| `setup_bridge` | Resolve's Scripts folder | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | install into Workspace › Scripts, status; start with the bridge already running and from a closed Resolve (the menu click: tests only)<br>21.2.0: start with Resolve open: the Console answers, no bridge |
 | `export_fcpxml` | a file you import | ✅ 20.3 Free, macOS (file import) | imported with import_timeline: clips, dissolves, the music bed on its own audio track; a 198-clip cut of 10 phone clips frame for frame, turned sources arriving turned and zoomed to fit |
 | `export_srt` | a file you import | ✅ 20.3 Free, macOS (file import) | non-ASCII captions |
-| `get_resolve_state` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) |  |
-| `import_timeline` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | FCPXML from export_fcpxml; paths with spaces, # and non-ASCII; with plan_id a 198-clip cut passes, a wrong frame rate is named |
-| `import_media` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | bins, files already in the bin reused |
-| `append_clips` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | new timeline, exact source ranges, 23.976 into 24, audio on A2 at a record time |
-| `remove_clips` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | ripple delete |
-| `add_markers` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | seconds and frames on a 24 fps timeline; a second marker on the same frame is skipped. 23.976 / 29.97 DF not yet |
-| `add_quality_markers` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | re-runs replace only their own markers |
-| `set_clip_color` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | that run found transitions being colored too; fixed since, not re-run yet |
-| `set_clip_properties` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | zoom, pan, opacity, flip, scaling, clip enable; read back and checked with timeline_frames |
-| `set_tracks` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | rename, lock, add |
-| `export_timeline` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | FCPXML, EDL, OTIO, DRT, AAF, CSV |
-| `apply_lut` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | a LUT from outside Resolve's LUT folder, copied in; the built-in hlg-to-rec709 on 198 phone HDR clips (37-41 dB against Apple's own conversion), an SDR timeline left alone |
-| `queue_render` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | known preset queued, an unknown one lists the presets; format / codec / size / range: a 3 s 1080×1920 H.264 MP4 |
-| `open_page` | Studio API · bridge · paste Lua · macOS UI | ✅ 20.3 Free, macOS (bridge) | all seven pages |
-| `run_lua` | bridge | ✅ 20.3 Free, macOS (bridge) | results and errors; `return _G` does not hang. print capture and request globals were reworked since, not re-run yet |
+| `get_resolve_state` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | <br>21.2.0: 198 clips with their sources; markers |
+| `import_timeline` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | FCPXML from export_fcpxml; paths with spaces, # and non-ASCII; with plan_id a 198-clip cut passes, a wrong frame rate is named<br>21.2.0: the 198-clip cut with plan_id: every clip on the plan's frames |
+| `import_media` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) | bins, files already in the bin reused |
+| `append_clips` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) | new timeline, exact source ranges, 23.976 into 24, audio on A2 at a record time |
+| `remove_clips` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) | ripple delete |
+| `add_markers` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | seconds and frames on a 24 fps timeline; a second marker on the same frame is skipped. 23.976 / 29.97 DF not yet<br>21.2.0: seconds; a note with Turkish letters read back |
+| `add_quality_markers` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) | re-runs replace only their own markers |
+| `set_clip_color` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) | that run found transitions being colored too; fixed since, not re-run yet |
+| `set_clip_properties` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) | zoom, pan, opacity, flip, scaling, clip enable; read back and checked with timeline_frames |
+| `set_tracks` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) | rename, lock, add |
+| `export_timeline` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) | FCPXML, EDL, OTIO, DRT, AAF, CSV |
+| `apply_lut` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | a LUT from outside Resolve's LUT folder, copied in; the built-in hlg-to-rec709 on 198 phone HDR clips (37-41 dB against Apple's own conversion), an SDR timeline left alone<br>21.2.0: the built-in hlg-to-rec709 on 198 clips, looked at with timeline_frames |
+| `queue_render` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) | known preset queued, an unknown one lists the presets; format / codec / size / range: a 3 s 1080×1920 H.264 MP4 |
+| `open_page` | Studio API · bridge · Console window · paste Lua · macOS UI | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | all seven pages<br>21.2.0: color, edit, deliver, media |
+| `run_lua` | bridge · Console window | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | results and errors; `return _G` does not hang. print capture and request globals were reworked since, not re-run yet<br>21.2.0: values, print output, Lua errors; a 370 KB answer in seven parts |
 | `send_keystroke` | macOS UI | not yet | keystrokes reach Resolve only when it is frontmost |
 | `menu_pick` | macOS UI | ✅ 20.3 Free, macOS (macOS UI) | Workspace › Scripts › ResolvePilotBridge |
-| `add_subtitles` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | timelines starting at 0 and at 01:00:00:00; a plan's 176 captions, each within a frame of the file |
-| `add_title` | bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | overlay above V1, the edit left alone |
-| `checkpoint` | bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | save, list, restore, .drp backup |
-| `grade_clips` | bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | CDL grade, copy, reset; change measured on exported frames |
-| `make_format_version` | bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | 9:16 copy of a 16:9 edit, rendered filled edge to edge |
-| `manage_projects` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | list; create a scratch project (listed once saved); open the test project again with its current timeline; wrong names |
-| `manage_timelines` | bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) |  |
-| `edit_markers` | bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) |  |
-| `timeline_frames` | Studio API · bridge | ✅ 20.3 Free, macOS (bridge) | playhead and page put back |
-| `render_status` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) |  |
+| `add_subtitles` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | timelines starting at 0 and at 01:00:00:00; a plan's 176 captions, each within a frame of the file<br>21.2.0: a plan's 176 captions, then replaced |
+| `add_title` | bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) | overlay above V1, the edit left alone |
+| `checkpoint` | bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | save, list, restore, .drp backup<br>21.2.0: save |
+| `grade_clips` | bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) | CDL grade, copy, reset; change measured on exported frames |
+| `make_format_version` | bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) | 9:16 copy of a 16:9 edit, rendered filled edge to edge |
+| `manage_projects` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | list; create a scratch project (listed once saved); open the test project again with its current timeline; wrong names<br>21.2.0: list |
+| `manage_timelines` | bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | <br>21.2.0: list |
+| `edit_markers` | bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) |  |
+| `timeline_frames` | Studio API · bridge · Console window | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | playhead and page put back<br>21.2.0: three positions from four pages; from Deliver the stills are taken on Edit |
+| `render_status` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | <br>21.2.0: an empty queue |
 | `screenshot_resolve` | macOS UI | ✅ 20.3 Free, macOS (macOS UI) |  |
 | `open_ai_feature` | macOS UI | not yet | Studio-only features in Free answer ok: false and leave no dialog open |
 
-No tool has been run by the maintainers through Resolve Studio's Python API (the studio channel) or on Windows or Linux (some API behaviour in resolve://traps was measured with Python on 21.0.4). On Resolve 21.2.0 Free (macOS) the maintainers measured that the bridge cannot start (the Scripts menu starts nothing; the Console's Lua has no file access) and that Lua pasted into the Console runs; users report the bridge starting from the Console on 21.1.1 Free and not on 21.1.2 Free. Use Resolve 20.3.x Free for live control.
+No tool has been run by the maintainers through Resolve Studio's Python API (the studio channel) or on Windows or Linux (some API behaviour in resolve://traps was measured with Python on 21.0.4). On Resolve 21.2.0 Free (macOS) the maintainers measured that the bridge cannot start (the Scripts menu starts nothing; the Console's Lua has no file access); the tools marked "Console window" were run there through the console channel, the others not yet. Users report the bridge starting from the Console on 21.1.1 Free and not on 21.1.2 Free. On Windows and Linux, Resolve Free 21.1.2+ is left with pasting Lua by hand.
 <!-- verified-matrix:end -->
 
 Tools that don't touch Resolve (analysis, frames from files, plans) run in CI on Linux and macOS; transcription runs there only against a stand-in engine (mlx-whisper and faster-whisper are not exercised in CI). Reports from other Resolve versions, Studio, Windows and Linux are very welcome. Linux/Windows UI automation is not planned — the live bridge covers those platforms.

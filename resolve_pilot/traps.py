@@ -151,7 +151,8 @@ TRAPS: tuple[Trap, ...] = (
     ),
     Trap(
         id="resolve-21-1-free-lua-sandbox",
-        title="Resolve 21.1 Free restricts Console Lua; from 21.1.2 the bridge cannot start",
+        title="Resolve 21.1 Free restricts Console Lua; from 21.1.2 the bridge cannot start "
+              "and the Console window takes its place (macOS)",
         symptom="On 21.1 Free, scripts that read or write files or require modules fail and "
                 "Workspace > Scripts entries do nothing. On 21.1.2 Free, dofile is nil too and "
                 "the pasted bridge stops with \"this Lua has neither io nor ffi\". On 21.2.0 Free "
@@ -167,10 +168,17 @@ TRAPS: tuple[Trap, ...] = (
         handling="The bridge falls back to LuaJIT's ffi for its files when io is missing, and "
                  "setup_bridge returns a console_command (dofile) to paste into the Console; that "
                  "is reported working on 21.1.1. On 21.1.2+ Free resolve_pilot_status and "
-                 "setup_bridge say the bridge cannot start and point to Resolve 20.3.x Free. "
-                 "Lua pasted into the Console still runs with the full Resolve API there "
-                 "(a multi-line snippet from this server, measured on 21.2.0 Free), so the "
-                 "manual channel works: give the user lua_code and the instructions.",
+                 "setup_bridge say the bridge cannot start. Lua typed at the Console prompt "
+                 "still runs with the full Resolve API there, and that is all the console channel "
+                 "uses: on macOS the server puts a tool's Lua into the Console's input through "
+                 "Accessibility, presses Return and reads the printed answer (measured on 21.2.0 "
+                 "Free: a 198-clip import checked against its plan, LUT, markers, subtitles, "
+                 "stills). Nothing is written or read by Lua inside Resolve. The Console keeps "
+                 "its last 131,072 characters and drops a longer line whole, so answers come in "
+                 "parts of 60,000; Resolve's windows are visible to Accessibility only while it "
+                 "is the front app, so each call brings it forward and gives the front back. On "
+                 "Windows and Linux the manual channel is left: give the user lua_code and the "
+                 "instructions.",
         source="measured",
         measured_on="21.2.0 Free, macOS (21.1.x: reported)",
         tools=("setup_bridge", "run_lua", "resolve_pilot_status"),

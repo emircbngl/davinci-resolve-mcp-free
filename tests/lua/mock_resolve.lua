@@ -491,6 +491,8 @@ function Project:ExportCurrentFrameAsStill(path)
   f:close()
   self.stills = self.stills or {}
   table.insert(self.stills, self.current:GetCurrentTimecode())
+  self.still_pages = self.still_pages or {}
+  table.insert(self.still_pages, resolve.page)
   return true
 end
 

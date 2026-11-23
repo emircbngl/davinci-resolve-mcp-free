@@ -80,6 +80,25 @@ LIVE: dict[str, LiveCheck] = {
     "export_srt": _r20("file import", "non-ASCII captions"),
 }
 
+# The same tools on Resolve 21.2.0 Free (macOS), where the bridge cannot run: through the
+# console channel (the server types into Workspace > Console and reads the answer).
+LIVE_CONSOLE: dict[str, str] = {
+    "resolve_pilot_status": "channel is console",
+    "setup_bridge": "start with Resolve open: the Console answers, no bridge",
+    "run_lua": "values, print output, Lua errors; a 370 KB answer in seven parts",
+    "get_resolve_state": "198 clips with their sources; markers",
+    "import_timeline": "the 198-clip cut with plan_id: every clip on the plan's frames",
+    "manage_projects": "list",
+    "manage_timelines": "list",
+    "open_page": "color, edit, deliver, media",
+    "apply_lut": "the built-in hlg-to-rec709 on 198 clips, looked at with timeline_frames",
+    "add_markers": "seconds; a note with Turkish letters read back",
+    "add_subtitles": "a plan's 176 captions, then replaced",
+    "timeline_frames": "three positions from four pages; from Deliver the stills are taken on Edit",
+    "checkpoint": "save",
+    "render_status": "an empty queue",
+}
+
 # Tools that need Resolve but have not been run in it yet, with what to check.
 NOT_YET: dict[str, str] = {
     "send_keystroke": "keystrokes reach Resolve only when it is frontmost",
@@ -90,19 +109,25 @@ UNTESTED = ("No tool has been run by the maintainers through Resolve Studio's Py
             "studio channel) or on Windows or Linux (some API behaviour in resolve://traps was "
             "measured with Python on 21.0.4). On Resolve 21.2.0 Free (macOS) the maintainers "
             "measured that the bridge cannot start (the Scripts menu starts nothing; the "
-            "Console's Lua has no file access) and that Lua pasted into the Console runs; users "
-            "report the bridge starting from the Console on 21.1.1 Free and not on 21.1.2 Free. "
-            "Use Resolve 20.3.x Free for live control.")
+            "Console's Lua has no file access); the tools marked \"Console window\" were run "
+            "there through the console channel, the others not yet. Users report the bridge "
+            "starting from the Console on 21.1.1 Free and not on 21.1.2 Free. On Windows and "
+            "Linux, Resolve Free 21.1.2+ is left with pasting Lua by hand.")
 
 
 def entry(name: str) -> dict[str, Any] | None:
     """The live check for a tool as plain data, or None."""
     check = LIVE.get(name)
-    return asdict(check) if check else None
+    if not check:
+        return None
+    out = asdict(check)
+    if name in LIVE_CONSOLE:
+        out["also"] = [asdict(LiveCheck("21.2.0 Free", "macOS", "console", LIVE_CONSOLE[name]))]
+    return out
 
 
-_CHANNEL_LABEL = {"studio": "Studio API", "bridge": "bridge", "manual": "paste Lua",
-                  "macos_ui": "macOS UI"}
+_CHANNEL_LABEL = {"studio": "Studio API", "bridge": "bridge", "console": "Console window",
+                  "manual": "paste Lua", "macos_ui": "macOS UI"}
 
 # For tools that reach Resolve some other way than a channel.
 _VIA = {"resolve_pilot_status": "bridge heartbeat, Resolve's process",
@@ -124,6 +149,9 @@ def markdown_table(tools: dict[str, dict[str, Any]]) -> str:
         if check:
             ran = f"✅ {check.resolve}, {check.os} ({_CHANNEL_LABEL.get(check.channel, check.channel)})"
             covered = check.scope
+            if name in LIVE_CONSOLE:
+                ran += "<br>✅ 21.2.0 Free, macOS (Console window)"
+                covered += f"<br>21.2.0: {LIVE_CONSOLE[name]}"
         else:
             ran, covered = "not yet", NOT_YET.get(name, "")
         rows.append(f"| `{name}` | {via} | {ran} | {covered} |")
