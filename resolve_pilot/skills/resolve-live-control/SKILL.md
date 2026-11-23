@@ -13,7 +13,8 @@ Resolve Free has no external scripting API, but Lua typed into its Console (or s
    - `studio`: Resolve Studio's API is reachable; dedicated tools already work. `run_lua` still needs the bridge.
    - `bridge`: connected.
    - `manual`: not connected.
-2. To connect: `setup_bridge(action="install")`, then tell the user:
+2. To connect, first try `setup_bridge(action="start")`: it starts Resolve when it is closed, clicks the bridge's menu entry (macOS, when this server has Accessibility permission) and waits for the bridge. `bridge_running: true` means done; otherwise pass `left_for_user` on word for word. Resolve starts with an untitled project: `manage_projects()` lists the projects, `manage_projects(action="open", name=...)` opens one (the open project is saved first), `action="create"` makes an empty one to try things in.
+   By hand: `setup_bridge(action="install")`, then tell the user:
    > In Resolve choose **Workspace › Scripts › ResolvePilotBridge** (restart Resolve if it is not listed yet). Keep Resolve open.
 
    Alternative without installing: `setup_bridge(action="show_script")` and ask the user to paste it into **Workspace › Console** (Lua tab) and press Enter.

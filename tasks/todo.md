@@ -481,3 +481,49 @@ downscale and took 623 s (with tests running beside it); after the downscale a 6
   davinciYRGB, Rec.709 (Scene), no DRT). Every clip of "vlog otomatik 4" now has the LUT on node 1.
 - Nobody has watched the corrected preview or timeline play; eight stills were compared and
   three before / after / phone rows looked at.
+
+# What was done by hand around the tools becomes part of the server
+
+Emir, 2026-11-23: "mümkün olduğunca mcp içine dahil ederek onları yap ... insanlar da bizim
+kullandığımız gibi kullanabilmeli." Four things in the Resolve trial were done by side routes
+(a shell `open`, another tool's AppleScript, raw `run_lua`, a scratch compare script).
+
+- [x] `import_timeline(plan_id=...)`: after the import, read the timeline back and compare it
+      with the plan: clip count, every clip's frames, source file and in-point, turns
+      (`plan_check`); a live channel only, and the result says so otherwise
+- [x] `manage_projects` (list / open / create): open saves the current project first and reads
+      the new current project back; a wrong name returns the names there are
+- [x] `setup_bridge(action="start")`: start Resolve when it is not running, click the bridge's
+      menu entry where the OS lets us, wait for the heartbeat, and say exactly what is left
+      for the user when a step could not be done
+- [x] Tried in Resolve (test project only; Resolve and the bridge are not closed)
+- [x] Tests red without each change; guides, README, CHANGELOG, matrix; full pytest + ruff
+
+## Review
+
+457 passed (428 before), ruff clean. 36 mutations over the plan check, the import read-back, the project
+snippet and the start sequence: the tests went red each time (one stayed green at first: no
+case had another frame rate with everything else equal; it got one).
+
+In Resolve 20.3 Free, project resolve-pilot-test, through the tools:
+
+- `import_timeline(plan_id)`: the exported cut passes, 198 of 198 ("vlog otomatik 5
+  (denetimli)"); the old 23.9989 file comes back `ok: false` with 57 positions and 135 turns
+  off ("vlog otomatik 6 (eski kare hizi)").
+- `manage_projects`: list; create "resolve-pilot-scratch" (the test project saved first; the
+  new one appeared in the list only after it was saved, so create now saves it at once);
+  open the test project again (34 timelines, its current timeline kept); opening it twice
+  and wrong / taken names answered without switching.
+- `setup_bridge(start)`: only the "already running" answer. Starting Resolve and the menu
+  click are tested against a simulated machine: Resolve was open and is not closed for a test,
+  and this server's Python has no Accessibility permission on this machine (the click that
+  started the bridge today went through another app that has it).
+
+- The mock's import now reads the exporter's FCPXML (clips, frames, sources, transforms), so an
+  import in the tests is a stand-in for the real one; two older expectations followed (two
+  clips coloured, not one).
+- During the work Emir updated the installed Resolve to 21.2 (the running one is still 20.3).
+  On 21.1.2+ Free the bridge is reported not to start (issue #4); nobody here has run it. The
+  end-to-end test no longer depends on which Resolve is installed.
+- Left in Resolve: the project "resolve-pilot-scratch" (empty) and two more timelines in the
+  test project. Nothing was deleted.

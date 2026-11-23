@@ -290,7 +290,7 @@ def add_markers_batch(markers: list[dict], replace_owned_prefix: str | None = No
 
 
 def import_timeline(path: str, timeline_name: str | None = None,
-                    import_source_clips: bool = True) -> dict[str, Any]:
+                    import_source_clips: bool = True, read_clips: bool = False) -> dict[str, Any]:
     """Import FCPXML/EDL/AAF/DRT/OTIO as a new timeline and make it current."""
     import os
     p = _current_project()
@@ -305,8 +305,22 @@ def import_timeline(path: str, timeline_name: str | None = None,
     p.SetCurrentTimeline(tl)
     n = sum(len(clip_items(tl, "video", t))
             for t in range(1, int(tl.GetTrackCount("video") or 0) + 1))
-    return {"ok": True, "timeline": tl.GetName(), "video_clip_count": n,
-            "start_frame": tl.GetStartFrame(), "end_frame": tl.GetEndFrame()}
+    out = {"ok": True, "timeline": tl.GetName(), "video_clip_count": n,
+           "start_frame": tl.GetStartFrame(), "end_frame": tl.GetEndFrame()}
+    if read_clips:  # the same rows as the Lua snippet
+        first, rows = tl.GetStartFrame(), []
+        for it in clip_items(tl, "video", 1):
+            mpi = it.GetMediaPoolItem()
+            rows.append([it.GetStart() - first, it.GetEnd() - first, it.GetLeftOffset() or 0,
+                         (mpi.GetClipProperty("File Path") if mpi else "") or "",
+                         it.GetProperty("RotationAngle") or 0, it.GetProperty("ZoomX") or 1,
+                         it.GetProperty("ZoomY") or 1])
+        out["clips"] = rows
+        try:
+            out["fps"] = float(tl.GetSetting("timelineFrameRate") or p.GetSetting("timelineFrameRate") or 24)
+        except (TypeError, ValueError):
+            out["fps"] = 24.0
+    return out
 
 
 def render_current_timeline(preset: str = "H.264 Master", target_dir: str = "~/Desktop/Renders",

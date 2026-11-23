@@ -33,11 +33,13 @@ def _r20(channel: str, scope: str = "") -> LiveCheck:
 
 LIVE: dict[str, LiveCheck] = {
     "resolve_pilot_status": _r20("bridge", "channel switches from manual to bridge"),
-    "setup_bridge": _r20("bridge", "install into Workspace › Scripts, status"),
+    "setup_bridge": _r20("bridge", "install into Workspace › Scripts, status; start with the bridge "
+                                   "already running (starting Resolve and clicking the menu: tests only)"),
     "run_lua": _r20("bridge", "results and errors; `return _G` does not hang. print capture and "
                               "request globals were reworked since, not re-run yet"),
     "get_resolve_state": _r20("bridge"),
-    "import_timeline": _r20("bridge", "FCPXML from export_fcpxml; paths with spaces, # and non-ASCII"),
+    "import_timeline": _r20("bridge", "FCPXML from export_fcpxml; paths with spaces, # and non-ASCII; "
+                                      "with plan_id a 198-clip cut passes, a wrong frame rate is named"),
     "add_markers": _r20("bridge", "seconds and frames on a 24 fps timeline; a second marker on "
                                   "the same frame is skipped. 23.976 / 29.97 DF not yet"),
     "add_quality_markers": _r20("bridge", "re-runs replace only their own markers"),
@@ -51,6 +53,8 @@ LIVE: dict[str, LiveCheck] = {
                                    "format / codec / size / range: a 3 s 1080×1920 H.264 MP4"),
     "make_format_version": _r20("bridge", "9:16 copy of a 16:9 edit, rendered filled edge to edge"),
     "manage_timelines": _r20("bridge"),
+    "manage_projects": _r20("bridge", "list; create a scratch project (listed once saved); open the "
+                                      "test project again with its current timeline; wrong names"),
     "edit_markers": _r20("bridge"),
     "render_status": _r20("bridge"),
     "open_page": _r20("bridge", "all seven pages"),

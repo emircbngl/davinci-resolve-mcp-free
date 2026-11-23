@@ -38,6 +38,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -61,6 +62,7 @@ from resolve_pilot.editorial import ops as plan_ops
 from resolve_pilot.editorial import captions, review, wordcut
 from resolve_pilot.editorial import roughcut, store
 from resolve_pilot.exporters import fcpxml as fcpxml_export
+from resolve_pilot.editorial import timeline_check
 from resolve_pilot.exporters import preview as preview_export
 from resolve_pilot.exporters import srt as srt_export
 from resolve_pilot.lua_snippets import library as lua_lib
@@ -77,8 +79,10 @@ Start of session: call resolve_pilot_status once. Its `channel` says how Resolve
 - bridge: the resolve-pilot Lua bridge running inside Resolve (works in Free). The user starts \
 it once per session; setup_bridge installs it into Workspace > Scripts.
 - manual: nothing live. Resolve actions return `lua_code` + `instructions`; relay them to the \
-user verbatim and ask them to paste it into Workspace > Console. Offer setup_bridge if they \
-want hands-free control.
+user verbatim and ask them to paste it into Workspace > Console. For hands-free control \
+setup_bridge(action='start') starts Resolve and the bridge as far as the machine allows and \
+says what is left for the user. Resolve starts with an untitled project: manage_projects \
+lists the projects and opens (or creates) the one to work in.
 Resolve actions (get_resolve_state, import_timeline, import_media, append_clips, remove_clips, \
 add_markers, add_quality_markers, add_subtitles, set_clip_color, apply_lut, queue_render, open_page, \
 set_clip_properties, set_tracks, export_timeline) choose the channel automatically and report \
@@ -110,8 +114,9 @@ resending the plan. Every plan response lists `errors` and `warnings`; resolve t
 clips, cuts in sound, level jumps, silence, black or frozen picture, captions too fast). Its \
 times are timeline times: look with grab_frames(path, ...), fix with edit_plan, render again. \
 Give `path` to the user to watch.
-5. export_fcpxml(plan_id), then import_timeline(path) when live, or tell the user \
-File > Import > Timeline.
+5. export_fcpxml(plan_id), then import_timeline(path, plan_id=...) when live (its \
+`plan_check` says whether the timeline Resolve built is the plan: do not go on past \
+`ok: false`), or tell the user File > Import > Timeline.
 6. Verify with get_resolve_state(include_clips=true) and timeline_frames (look at the result), \
 and iterate. When live, change the open timeline directly instead of re-importing (each import \
 makes a new timeline): append_clips adds source ranges (source seconds; a B-roll shot on track 2 \
@@ -450,13 +455,16 @@ def get_workflow_guide(
 @tool(WRITE_FILES, title="Set up the live bridge")
 def setup_bridge(
     action: Annotated[
-        Literal["install", "show_script", "status", "stop"],
+        Literal["install", "show_script", "status", "stop", "start"],
         Field(description="install: put the bridge in Resolve's Workspace > Scripts menu. "
                           "show_script: return Lua to paste into the Console. "
-                          "status: is a bridge running. stop: ask the running bridge to exit."),
+                          "status: is a bridge running. stop: ask the running bridge to exit. "
+                          "start: start Resolve if it is closed, then the bridge."),
     ] = "install",
     idle_minutes: Annotated[int, Field(ge=1, le=24 * 60,
                                        description="Bridge exits after this long without requests.")] = 60,
+    wait_seconds: Annotated[int, Field(ge=0, le=300, description=(
+        "start: how long to wait for Resolve and the bridge to come up."))] = 90,
 ) -> dict[str, Any]:
     """Set up the live Lua bridge that lets you control Resolve directly — in the Free edition too.
 
@@ -465,9 +473,16 @@ def setup_bridge(
     action='install' and tell the user: "In Resolve choose Workspace > Scripts >
     ResolvePilotBridge (restart Resolve if it is not listed yet)". Then check with
     action='status'.
+    action='start' does it for the user as far as the machine allows: starts Resolve when it
+    is closed, clicks the menu entry (macOS, with Accessibility permission) and waits for
+    the bridge. `bridge_running` says whether it worked; `left_for_user` is what to pass on
+    when a step could not be done. Resolve starts with an untitled project: open the one
+    you need with manage_projects.
     """
     if action == "status":
         return bridge.status().to_dict()
+    if action == "start":
+        return _start_bridge(idle_minutes, wait_seconds)
     if action == "stop":
         return {"was_running": bridge.stop()}
     if action == "show_script":
@@ -502,6 +517,101 @@ def setup_bridge(
         out["other_bridge_scripts"] = others
         out["note"] = (f"{', '.join(others)} in {path.parent} look like older resolve-pilot bridges. "
                        "Tell the user to start ResolvePilotBridge, not those; they can delete them.")
+    return out
+
+
+_RESOLVE_PROGRAMS = {
+    "Darwin": [str(app) for app in _MAC_RESOLVE_APPS],
+    "Windows": [r"C:\Program Files\Blackmagic Design\DaVinci Resolve\Resolve.exe"],
+    "Linux": ["/opt/resolve/bin/resolve"],
+}
+_BRIDGE_MENU = ["Workspace", "Scripts", "ResolvePilotBridge"]
+_CLICK_IT = "In DaVinci Resolve choose Workspace > Scripts > ResolvePilotBridge."
+
+
+def _launch_resolve() -> str | None:
+    """Start the installed Resolve and return what was started; None when it is not in
+    its usual place."""
+    system = platform.system()
+    for program in _RESOLVE_PROGRAMS.get(system, []):
+        if not Path(program).exists():
+            continue
+        if system == "Darwin":
+            subprocess.run(["open", "-a", program], check=True, capture_output=True, timeout=30)
+        elif system == "Windows":
+            os.startfile(program)
+        else:
+            subprocess.Popen([program], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+        return program
+    return None
+
+
+def _start_bridge(idle_minutes: int, wait_seconds: float) -> dict[str, Any]:
+    """Resolve up, bridge installed, its menu entry clicked, heartbeat seen: as many of
+    these as this machine lets us do, and plain words for the rest."""
+    if bridge.status().running:
+        return {"bridge_running": True, "already_running": True}
+    out: dict[str, Any] = {"bridge_running": False, "installed": str(bridge.install_script(idle_minutes))}
+    deadline = time.monotonic() + wait_seconds
+
+    def wait_for(done) -> bool:
+        while not done():
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(1.0)
+        return True
+
+    if not _resolve_running():
+        try:
+            out["resolve_started"] = _launch_resolve()
+        except (OSError, subprocess.SubprocessError) as e:
+            out["resolve_started"] = None
+            out["error"] = f"Resolve could not be started: {e}"
+        if not out["resolve_started"]:
+            out["left_for_user"] = ["Start DaVinci Resolve (it was not found where it is usually "
+                                    "installed), then call setup_bridge(action='start') again."]
+            return out
+        if not wait_for(lambda: bool(_resolve_running())):
+            out["left_for_user"] = ["Resolve was started but is not up yet. Call "
+                                    "setup_bridge(action='start') again in a moment."]
+            return out
+    can_start, note = _bridge_on_this_resolve(*_resolve_app())
+    if note:
+        out["resolve_note"] = note
+    if not can_start:
+        out["bridge_can_start"] = False
+        out["left_for_user"] = [note]
+        return out
+    if not _platform_supports_ui():
+        out["left_for_user"] = [_CLICK_IT + " (Clicking it for the user is macOS only.)"]
+        return out
+    from resolve_pilot.ui_automation import menu_pick as click_menu
+    from resolve_pilot.ui_automation.applescript import UIAutomationError
+    from resolve_pilot.ui_automation.permissions import permission_hint
+    clicked, error = False, ""
+    while not clicked:   # the menu is there only once Resolve has finished loading
+        try:
+            click_menu(_BRIDGE_MENU)
+            clicked = True
+        except UIAutomationError as e:
+            error = str(e)
+            if "assistive access" in error or time.monotonic() >= deadline:
+                break    # no permission: trying again changes nothing
+            time.sleep(2.0)
+    out["menu_clicked"] = clicked
+    if not clicked:
+        why = ("this server may not click in other apps: " + permission_hint("Accessibility")
+               if "assistive access" in error else f"the click failed ({error})")
+        out["left_for_user"] = [f"{_CLICK_IT} It could not be clicked for you because {why}"]
+        return out
+    out["bridge_running"] = wait_for(lambda: bridge.status().running)
+    if out["bridge_running"]:
+        out["next_step"] = "manage_projects() shows the projects; open the one to work in."
+    else:
+        out["left_for_user"] = [
+            "The menu entry was clicked but the bridge did not answer. Open Workspace > Console, "
+            f"pick the Lua tab, paste dofile({lua_lib.lua_string(out['installed'])}) and press Enter."]
     return out
 
 
@@ -1250,8 +1360,8 @@ def export_fcpxml(plan_id: str, out_path: OutPath = None, overwrite: Overwrite =
     warnings = list(report["warnings"])
     turned = sum(1 for c in plan.clips if plan.source_turns.get(c.source_path))
     hdr = _hdr_sources(plan)
-    next_step = (f"import_timeline(path={str(final)!r}) or, without a live channel, "
-                 "tell the user: File > Import > Timeline.")
+    next_step = (f"import_timeline(path={str(final)!r}, plan_id={plan_id!r}) or, without a live "
+                 "channel, tell the user: File > Import > Timeline.")
     if hdr.get("hlg"):
         next_step += (f" {hdr['hlg']} source(s) are phone HDR (HLG) and look pale in a project without "
                       "colour management: after the import, apply_lut(lut_path='hlg-to-rec709').")
@@ -1542,17 +1652,35 @@ def import_timeline(
     timeline_name: Annotated[str | None, Field(description="Must not clash with an existing timeline.")] = None,
     import_source_clips: Annotated[bool, Field(description="Also add the source media to the media pool.")] = True,
     channel: Channel = "auto",
+    plan_id: Annotated[str | None, Field(description=(
+        "The plan the file was exported from: the imported timeline is compared with it."))] = None,
 ) -> dict[str, Any]:
-    """Import a timeline file into the open project and make it the current timeline."""
+    """Import a timeline file into the open project and make it the current timeline.
+
+    With plan_id the clips are read back and compared with the plan (`plan_check`): the
+    count, every clip's frames, its source file and in-point, and the turns. `ok: false`
+    there lists what differs (`positions_off`, `sources_off`, `turns_off`, `frame_rate`);
+    do not go on as if the timeline were the plan. Needs a live channel.
+    """
     full = str(Path(path).expanduser().resolve())
     if not Path(full).exists():
         raise FileNotFoundError(full)
-    return control.perform(
-        lua_lib.snippet_import_timeline(full, timeline_name, import_source_clips),
-        lambda: _studio().import_timeline(full, timeline_name, import_source_clips),
+    plan = store.load_plan(plan_id) if plan_id else None   # a wrong id fails before anything is imported
+    check = plan is not None
+    out = control.perform(
+        lua_lib.snippet_import_timeline(full, timeline_name, import_source_clips, check),
+        lambda: _studio().import_timeline(full, timeline_name, import_source_clips, check),
         channel,
         timeout=180.0,
     )
+    if plan is not None:
+        if out.get("channel") == "manual":
+            out["plan_check"] = None
+            out["note"] += (" The timeline cannot be compared with the plan without a live "
+                            "connection; verify it with get_resolve_state(include_clips=true).")
+        elif out.get("ok"):
+            out["plan_check"] = timeline_check.check(plan, out.pop("clips", None), out.pop("fps", None))
+    return out
 
 
 def _existing_file(path: str) -> str:
@@ -2416,6 +2544,23 @@ def make_format_version(
     """
     return control.perform(lua_lib.snippet_make_format_version(aspect, name, fill, width, height),
                            None, channel, timeout=60.0)
+
+
+@tool(EDIT_RESOLVE, title="Projects: list, open, create")
+def manage_projects(
+    action: Literal["list", "open", "create"] = "list",
+    name: Annotated[str | None, Field(description="open / create: the project's name.")] = None,
+    channel: Channel = "auto",
+) -> dict[str, Any]:
+    """The projects in Resolve's current project folder and which one is open; open another
+    or create an empty one (for a first cut, or a scratch project to try things in).
+
+    Opening or creating replaces the open project: it is saved first (`saved_previous`),
+    and if that fails while it has timelines nothing is switched. Ask before leaving a
+    project the user is working in. Right after Resolve starts, an untitled project is
+    open; open the one you need.
+    """
+    return control.perform(lua_lib.snippet_manage_projects(action, name), None, channel)
 
 
 @tool(EDIT_RESOLVE, title="Timelines: list, open, rename, duplicate")

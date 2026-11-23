@@ -70,7 +70,9 @@ async def _session(media, home: Path, tmp_path: Path) -> None:
 
         status = await agent.call("resolve_pilot_status")
         assert status["channel"] == "manual" and status["ffmpeg"] is True
-        assert any("setup_bridge" in s for s in status["next_steps"])
+        # What it says about the bridge depends on the Resolve installed on this machine:
+        # how to set it up, or (21.1.2+ Free) that it cannot start there.
+        assert any("setup_bridge" in s or "the bridge cannot start" in s for s in status["next_steps"])
 
         # Optional parameters are advertised as their plain type; a client that sends
         # null for one anyway is still served.
@@ -163,7 +165,7 @@ async def _session(media, home: Path, tmp_path: Path) -> None:
             assert ran["ok"] and ran["result"] == 24 and ran["output"] == "Promo"
 
             ran = await agent.call("run_lua", snippet="set_clip_color", args={"clip_color": "Teal"})
-            assert ran["result"]["colored"] == 1
+            assert ran["result"]["colored"] == 2      # the two clips of the plan that was imported
 
             assert (await agent.call("open_page", page="color"))["ok"] is True
         finally:

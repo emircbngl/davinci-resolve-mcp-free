@@ -84,12 +84,12 @@ After connecting, ask Claude things like:
 
 | Group | Tools |
 |---|---|
-| Session | `resolve_pilot_status` · `get_workflow_guide` · `setup_bridge` |
+| Session | `resolve_pilot_status` · `get_workflow_guide` · `setup_bridge` (install, or `start`: Resolve and the bridge up as far as the machine allows) · `manage_projects` (list / open / create) |
 | Analyze | `scan_folder` (a shoot's files in recording order, transcribed in the background) · `probe_media` · `detect_scenes` · `detect_beats` · `transcribe_audio` (cached, background jobs, word timings) · `scan_speech` (pauses, fillers, repeats, retakes to cut) · `analyze_quality` (silence, black, freeze, loud/quiet) |
 | See | `grab_frames` · `scene_frames` · `read_video` (speech + frames) · `screenshot_resolve` (macOS) · `timeline_frames` (the edit as Resolve renders it, any OS) — images Claude looks at |
 | Plan | `plan_from_transcript` (cuts placed in the real pauses between words; `drop_words`, `max_pause_seconds`; `append_to` cuts several files into one plan) · `plan_from_scenes` · `create_plan` · `get_plan` · `edit_plan` |
 | Export | `export_fcpxml` · `export_srt` (a transcript's own times, or with `plan_id` captions that follow the rough cut) · `render_preview` (the plan as a small MP4 without Resolve, checked automatically: cuts in sound, level jumps, flash clips, dead stretches) |
-| Resolve (auto-routed) | `get_resolve_state` · `import_timeline` · `add_markers` · `edit_markers` (list / delete / update) · `manage_timelines` (list / open / rename / duplicate) · `add_quality_markers` · `set_clip_color` · `apply_lut` (a LUT file, or the built-in `hlg-to-rec709` for pale phone HDR clips) · `grade_clips` (CDL by numbers or copy a grade, verified on the frames) · `queue_render` (preset, or format / codec / size / range) · `make_format_version` (9:16, 4:5, 1:1 copy, centre-cropped) · `render_status` · `add_subtitles` · `add_title` · `checkpoint` (save / restore / .drp backup) · `open_page` |
+| Resolve (auto-routed) | `get_resolve_state` · `import_timeline` (with `plan_id`: the timeline is compared with the plan) · `add_markers` · `edit_markers` (list / delete / update) · `manage_timelines` (list / open / rename / duplicate) · `add_quality_markers` · `set_clip_color` · `apply_lut` (a LUT file, or the built-in `hlg-to-rec709` for pale phone HDR clips) · `grade_clips` (CDL by numbers or copy a grade, verified on the frames) · `queue_render` (preset, or format / codec / size / range) · `make_format_version` (9:16, 4:5, 1:1 copy, centre-cropped) · `render_status` · `add_subtitles` · `add_title` · `checkpoint` (save / restore / .drp backup) · `open_page` |
 | Build timelines (auto-routed) | `import_media` (into bins, no duplicates) · `append_clips` (source ranges onto the current, a named or a new timeline, any track) · `remove_clips` (by index, name-checked) |
 | Inspector & tracks (auto-routed) | `set_clip_properties` (zoom, pan, crop, opacity, scaling, enable; read back) · `set_tracks` (add, rename, mute/hide, lock) · `export_timeline` (FCPXML, EDL, AAF, OTIO, DRT, CSV) |
 | Lua | `run_lua` (live) · `list_lua_snippets` · `render_lua_snippet` (paste) |
@@ -146,11 +146,11 @@ The test suite runs against a mock of Resolve's API, so this table records what 
 | Tool | Reaches Resolve through | Run in real Resolve | Covered |
 |---|---|---|---|
 | `resolve_pilot_status` | bridge heartbeat, Resolve's process | ✅ 20.3 Free, macOS (bridge) | channel switches from manual to bridge |
-| `setup_bridge` | Resolve's Scripts folder | ✅ 20.3 Free, macOS (bridge) | install into Workspace › Scripts, status |
+| `setup_bridge` | Resolve's Scripts folder | ✅ 20.3 Free, macOS (bridge) | install into Workspace › Scripts, status; start with the bridge already running (starting Resolve and clicking the menu: tests only) |
 | `export_fcpxml` | a file you import | ✅ 20.3 Free, macOS (file import) | imported with import_timeline: clips, dissolves, the music bed on its own audio track; a 198-clip cut of 10 phone clips frame for frame, turned sources arriving turned and zoomed to fit |
 | `export_srt` | a file you import | ✅ 20.3 Free, macOS (file import) | non-ASCII captions |
 | `get_resolve_state` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) |  |
-| `import_timeline` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | FCPXML from export_fcpxml; paths with spaces, # and non-ASCII |
+| `import_timeline` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | FCPXML from export_fcpxml; paths with spaces, # and non-ASCII; with plan_id a 198-clip cut passes, a wrong frame rate is named |
 | `import_media` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | bins, files already in the bin reused |
 | `append_clips` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | new timeline, exact source ranges, 23.976 into 24, audio on A2 at a record time |
 | `remove_clips` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | ripple delete |
@@ -171,6 +171,7 @@ The test suite runs against a mock of Resolve's API, so this table records what 
 | `checkpoint` | bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | save, list, restore, .drp backup |
 | `grade_clips` | bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | CDL grade, copy, reset; change measured on exported frames |
 | `make_format_version` | bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | 9:16 copy of a 16:9 edit, rendered filled edge to edge |
+| `manage_projects` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | list; create a scratch project (listed once saved); open the test project again with its current timeline; wrong names |
 | `manage_timelines` | bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) |  |
 | `edit_markers` | bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) |  |
 | `timeline_frames` | Studio API · bridge | ✅ 20.3 Free, macOS (bridge) | playhead and page put back |

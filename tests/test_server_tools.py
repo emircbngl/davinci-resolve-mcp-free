@@ -44,7 +44,7 @@ EXPECTED_TOOLS = {
     "export_fcpxml", "export_srt", "render_preview",
     # resolve
     "get_resolve_state", "import_timeline", "add_markers", "add_quality_markers", "set_clip_color",
-    "apply_lut", "queue_render", "render_status", "add_subtitles", "add_title", "checkpoint", "grade_clips", "make_format_version", "manage_timelines", "edit_markers", "open_page", "run_lua", "list_lua_snippets", "render_lua_snippet",
+    "apply_lut", "queue_render", "render_status", "add_subtitles", "add_title", "checkpoint", "grade_clips", "make_format_version", "manage_timelines", "manage_projects", "edit_markers", "open_page", "run_lua", "list_lua_snippets", "render_lua_snippet",
     # live timeline building
     "import_media", "append_clips", "remove_clips",
     # macOS UI
@@ -56,7 +56,7 @@ EXPECTED_TOOLS = {
 
 def test_server_registers_exactly_the_expected_tools():
     names = set(_annotations())
-    assert len(EXPECTED_TOOLS) == 51
+    assert len(EXPECTED_TOOLS) == 52
     assert names == EXPECTED_TOOLS, (sorted(EXPECTED_TOOLS - names), sorted(names - EXPECTED_TOOLS))
 
 

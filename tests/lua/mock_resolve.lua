@@ -262,11 +262,52 @@ Project.__index = Project
 local MediaPool = {}
 MediaPool.__index = MediaPool
 
+-- Reads what resolve-pilot's exporter writes: the spine's clips (lane 0) with their
+-- frames, source files and transforms. Anything else imports as one 48-frame clip.
+local function fcpxml_clips(text)
+  local den, num = text:match('frameDuration="(%d+)/(%d+)s"')
+  if not den then return nil end
+  local function frames(value)
+    local n, d = value:match("^(%d+)/(%d+)s$")
+    return math.floor(tonumber(n) * tonumber(num) / (tonumber(d) * tonumber(den)) + 0.5)
+  end
+  local assets, clips = {}, {}
+  for attrs in text:gmatch("<asset ([^>]*)>") do
+    local src = attrs:match('src="file://([^"]*)"') or ""
+    assets[attrs:match('id="([^"]*)"')] = src:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end)
+  end
+  for tag, attrs in text:gmatch("<([%w%-]+) ([^>]*)>") do
+    if tag == "asset-clip" and attrs:match('lane="0"') then
+      clips[#clips + 1] = { name = attrs:match('name="([^"]*)"'), path = assets[attrs:match('ref="([^"]*)"')],
+        offset = frames(attrs:match('offset="([^"]*)"')), left = frames(attrs:match('start="([^"]*)"')),
+        dur = frames(attrs:match('duration="([^"]*)"')) }
+    elseif tag == "adjust-transform" and #clips > 0 then
+      clips[#clips].rotation = tonumber(attrs:match('rotation="([^"]*)"'))
+      clips[#clips].zoom = tonumber(attrs:match('scale="([%d%.]+)'))
+    end
+  end
+  return #clips > 0 and clips or nil
+end
+
 function MediaPool:ImportTimelineFromFile(path, opts)
   local f = io.open(path, "r")
   if not f then return nil end
+  local clips = fcpxml_clips(f:read("*a"))
   f:close()
-  local tl = Timeline.new((opts or {}).timelineName or basename(path), { { "imported", 48, path } })
+  local name = (opts or {}).timelineName or basename(path)
+  local tl
+  if clips then
+    tl = Timeline.new(name, {})
+    for _, c in ipairs(clips) do
+      local it = Item.new(c.name, tl.start + c.offset, c.dur, c.path)
+      it.track_type, it.track_index, it.left = "video", 1, c.left
+      if c.rotation then it.props.RotationAngle = c.rotation end
+      if c.zoom then it.props.ZoomX, it.props.ZoomY = c.zoom, c.zoom end
+      table.insert(tl.tracks.video[1], it)
+    end
+  else
+    tl = Timeline.new(name, { { "imported", 48, path } })
+  end
   table.insert(self.project.timelines, tl)
   return tl
 end
@@ -617,7 +658,30 @@ function Timeline:GetMediaPoolItem()
   self.pool_item = self.pool_item or setmetatable({ name = self.name, timeline = true }, Mpi)
   return self.pool_item
 end
-pm.SaveProject = function() project.saved = (project.saved or 0) + 1; return true end
+pm.SaveProject = function()
+  if mock.save_fails then return false end
+  project.saved = (project.saved or 0) + 1
+  return true
+end
+-- The project "database": opening or creating one replaces the open project.
+local projects = { project }
+local function switch(p) project = p; mock.project = p; return p end
+pm.GetProjectListInCurrentFolder = function()
+  local out = { __flags = 1 }
+  for i, p in ipairs(projects) do out[i] = p.name end
+  return out
+end
+pm.LoadProject = function(_, name)
+  for _, p in ipairs(projects) do if p.name == name then return switch(p) end end
+  return nil
+end
+pm.CreateProject = function(_, name)
+  for _, p in ipairs(projects) do if p.name == name then return nil end end
+  local p = Project.new(name)
+  p.timelines, p.current = {}, nil
+  table.insert(projects, p)
+  return switch(p)
+end
 pm.ExportProject = function(_, name, path, with_stills)
   local f = io.open(path, "wb")
   if not f then return false end

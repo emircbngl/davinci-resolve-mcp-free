@@ -44,7 +44,7 @@ Builds a first-pass timeline from raw footage, deciding what to keep from the tr
    - Tell the user the `path` so they can watch the cut before anything touches Resolve. `not_shown` lists what a preview leaves out (dissolves play as cuts).
 8. **`export_fcpxml(plan_id)`** → `path`.
 9. **Deliver**
-   - studio / bridge: `import_timeline(path, timeline_name="...")`, then `get_resolve_state(include_clips=true)` and check clip count and duration against the plan.
+   - studio / bridge: `import_timeline(path, timeline_name="...", plan_id=...)`. Read `plan_check`: `ok: true` means every clip is on the plan's frames, plays the plan's file from the plan's in-point and is turned as planned. `ok: false` lists what differs (`positions_off`, `sources_off`, `turns_off`, `frame_rate`); fix the plan or the import before anything else.
    - manual: "In Resolve: File › Import › Timeline… and pick `<path>`."
    - Captions for the cut: `add_subtitles(plan_id=...)` (or `export_srt(plan_id=...)` for a file). They follow the plan's cut; never use the transcript's own times on a cut timeline.
 10. **Iterate live** (studio / bridge) on the imported timeline instead of exporting again, which would create another timeline: `append_clips` adds a missed line or a B-roll shot (`track=2`, `record_seconds=...`), `remove_clips` drops one (read the indices with `get_resolve_state(include_clips=true)` and ask first). Keep the plan in step with what you changed if you may export again.

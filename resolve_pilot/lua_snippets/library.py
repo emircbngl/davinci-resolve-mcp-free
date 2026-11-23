@@ -786,6 +786,61 @@ return {{ok = got.width == w and got.height == h, timeline = v:GetName(), source
 
 
 @_snippet
+def snippet_manage_projects(action: str = "list", name: str | None = None) -> str:
+    """List the projects in Resolve's current project folder, open one or create an empty one.
+
+    Opening or creating replaces the open project, so the open one is saved first; if that
+    save fails while it has timelines, nothing is switched.
+    """
+    action = _pick(action, ("list", "open", "create"), "action")
+    if action != "list" and not (name or "").strip():
+        raise ValueError(f"{action} needs the project name (see action='list')")
+    return f"""-- resolve-pilot: manage_projects
+local pm = resolve:GetProjectManager()
+local action, name = {to_lua(action)}, {to_lua(name)}
+local function names()
+  local out = {{}}
+  for _, n in ipairs(pm:GetProjectListInCurrentFolder() or {{}}) do out[#out + 1] = n end
+  return out
+end
+local function current() local p = pm:GetCurrentProject(); return p and p:GetName() or nil end
+if action == "list" then return {{ok = true, current = current(), projects = names()}} end
+local known = false
+for _, n in ipairs(names()) do if n == name then known = true end end
+local before = pm:GetCurrentProject()
+local previous = before and before:GetName() or nil
+if action == "open" and previous == name then
+  return {{ok = true, project = name, already_open = true, timeline_count = before:GetTimelineCount()}}
+end
+if action == "open" and not known then
+  return {{ok = false, error = "There is no project named '" .. name .. "' in Resolve's current project folder.",
+    projects = names(), current = previous}}
+end
+if action == "create" and known then
+  return {{ok = false, error = "A project named '" .. name .. "' already exists; open it, or pick another name.",
+    projects = names(), current = previous}}
+end
+-- The open project is replaced: save it, and do not go on if that fails while it holds work.
+local saved = before ~= nil and pm:SaveProject() == true
+if before and not saved and (before:GetTimelineCount() or 0) > 0 then
+  return {{ok = false, current = previous, error = "The open project '" .. previous .. "' could not be saved, and " ..
+    "switching would discard its unsaved changes. Save it in Resolve (File > Save Project), then call again."}}
+end
+local project = action == "open" and pm:LoadProject(name) or (action == "create" and pm:CreateProject(name)) or nil
+if not project or current() ~= name then
+  return {{ok = false, current = current(), previous = previous, saved_previous = saved,
+    error = "Resolve did not " .. action .. " the project '" .. name .. "'."}}
+end
+-- A new project is not in the project list (and not on disk) until it is saved once.
+if action == "create" then pm:SaveProject() end
+local tl = project:GetCurrentTimeline()
+print(string.format("[resolve-pilot] %s project '%s'", action == "open" and "Opened" or "Created", name))
+return {{ok = true, project = name, created = action == "create" or nil, previous = previous, saved_previous = saved,
+  timeline_count = project:GetTimelineCount(), current_timeline = tl and tl:GetName() or nil}}
+"""
+
+
+@_snippet
 def snippet_manage_timelines(action: str = "list", name: str | None = None,
                              new_name: str | None = None) -> str:
     """List, open (make current), rename or duplicate timelines in the open project."""
@@ -1055,8 +1110,14 @@ def snippet_import_timeline(
     path: str,
     timeline_name: str | None = None,
     import_source_clips: bool = True,
+    read_clips: bool = False,
 ) -> str:
-    """Import an FCPXML / EDL / AAF / DRT / OTIO file as a new timeline and open it."""
+    """Import an FCPXML / EDL / AAF / DRT / OTIO file as a new timeline and open it.
+
+    With `read_clips` the result also carries `fps` and `clips`: every clip on video track 1
+    as [start, end, source in (frames from the timeline start / into the source), file path,
+    RotationAngle, ZoomX, ZoomY], for comparing the timeline with the plan it came from.
+    """
     opts: dict[str, Any] = {"importSourceClips": bool(import_source_clips)}
     if timeline_name:
         opts["timelineName"] = timeline_name
@@ -1073,8 +1134,20 @@ project:SetCurrentTimeline(tl)
 local n = 0
 for t = 1, tl:GetTrackCount("video") do n = n + #clip_items(tl, "video", t) end
 print(string.format("[resolve-pilot] Imported '%s' (%d video clips)", tl:GetName(), n))
-return {{ok = true, timeline = tl:GetName(), video_clip_count = n,
+local out = {{ok = true, timeline = tl:GetName(), video_clip_count = n,
   start_frame = tl:GetStartFrame(), end_frame = tl:GetEndFrame()}}
+if {to_lua(bool(read_clips))} then
+  local first, rows = tl:GetStartFrame(), {{}}
+  for _, it in ipairs(clip_items(tl, "video", 1)) do
+    local mpi = it:GetMediaPoolItem()
+    rows[#rows + 1] = {{it:GetStart() - first, it:GetEnd() - first, it:GetLeftOffset() or 0,
+      mpi and mpi:GetClipProperty("File Path") or "", it:GetProperty("RotationAngle") or 0,
+      it:GetProperty("ZoomX") or 1, it:GetProperty("ZoomY") or 1}}
+  end
+  out.clips = rows
+  out.fps = tonumber(tl:GetSetting("timelineFrameRate")) or tonumber(project:GetSetting("timelineFrameRate")) or 24
+end
+return out
 """
 
 
