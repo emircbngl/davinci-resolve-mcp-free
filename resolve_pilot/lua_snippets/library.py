@@ -1698,24 +1698,37 @@ end
 
 
 @_snippet
-def snippet_apply_lut_to_clips(lut_path: str, track: int = 1, node_index: int = 1) -> str:
-    """Apply a LUT to all clips on a video track at a specific color node index."""
+def snippet_apply_lut_to_clips(lut_path: str, track: int = 1, node_index: int = 1,
+                               only_color_space: str | None = None) -> str:
+    """Apply a LUT to the clips on a video track at a specific color node index.
+
+    With `only_color_space` (e.g. "Rec.2100 HLG") only clips whose media pool item reports
+    that "Input Color Space" get it; the others are counted as `skipped`.
+    """
     lut_path = os.path.expanduser(lut_path)
     return f"""-- resolve-pilot: apply_lut
 {_TIMELINE_PREAMBLE}{_CLIP_ITEMS}local items = clip_items(timeline, "video", {int(track)})
 -- Resolve only sees LUTs added to its LUT folder after a refresh.
 if type(project.RefreshLUTList) == "function" then project:RefreshLUTList() end
-local applied = 0
+local only = {to_lua(only_color_space)}
+local applied, skipped = 0, 0
 for _, item in ipairs(items) do
-  if item:SetLUT({int(node_index)}, {to_lua(lut_path)}) then applied = applied + 1 end
+  local mpi = item:GetMediaPoolItem()
+  if only and not (mpi and mpi:GetClipProperty("Input Color Space") == only) then
+    skipped = skipped + 1
+  elseif item:SetLUT({int(node_index)}, {to_lua(lut_path)}) then
+    applied = applied + 1
+  end
 end
 print(string.format("[resolve-pilot] Applied LUT to %d / %d clips at node %d", applied, #items, {int(node_index)}))
-if applied == 0 and #items > 0 then
-  return {{ok = false, applied = 0, total = #items, node_index = {int(node_index)},
-    error = "Resolve rejected the LUT for every clip. It must sit inside Resolve's LUT folder, " ..
-      "and the node index must exist on each clip."}}
+local out = {{ok = true, applied = applied, total = #items, node_index = {int(node_index)}}}
+if only then out.skipped = skipped end
+if applied == 0 and #items > skipped then
+  out.ok = false
+  out.error = "Resolve rejected the LUT for every clip. It must sit inside Resolve's LUT folder, " ..
+    "and the node index must exist on each clip."
 end
-return {{ok = true, applied = applied, total = #items, node_index = {int(node_index)}}}
+return out
 """
 
 

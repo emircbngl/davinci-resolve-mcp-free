@@ -22,7 +22,7 @@ Read the request for what it fixes: target length, what must be in or out, langu
 ## Workflow
 
 1. **`resolve_pilot_status`** once. The whole run up to the preview needs no Resolve.
-2. **Intake: `scan_folder(folder, transcribe=true, language=...)`** — every file in recording order, with length, frame, rotation tag and its transcript. On `next_step: still transcribing` call it again with the same arguments. Note files that are `failed` or `unreadable` and say so in the reply.
+2. **Intake: `scan_folder(folder, transcribe=true, language=...)`** — every file in recording order, with length, frame, rotation tag, `hdr` (phone HDR) and its transcript. On `next_step: still transcribing` call it again with the same arguments. Note files that are `failed` or `unreadable` and say so in the reply.
 3. **Look before you cut.** For each file: `transcribe_audio(path)` returns the cached transcript with numbered segments; `grab_frames(path, at_seconds=[...])` or `scene_frames(path)` shows what is in the picture.
    - A file with a `rotation` tag: look at one frame. If the picture is on its side (a phone held sideways but tagged upright; common in selfie shots), remember it for step 6.
    - Files with no speech worth keeping (a few words, wind, a song playing) are B-roll or nothing: leave them out of the talking cut and say so.
@@ -44,7 +44,7 @@ Read the request for what it fixes: target length, what must be in or out, langu
 8. **Captions** when asked: they are already in the preview as a subtitle track (the plan knows its transcripts). `export_srt(plan_id=...)` writes the file.
 9. **Deliver**
    - Always: the preview `path` for the user to watch, before anything touches Resolve.
-   - Into Resolve when it is live (studio / bridge) and the user wants it: `checkpoint(action="save")` if a timeline is open, `export_fcpxml(plan_id)`, `import_timeline(path)`, verify with `get_resolve_state(include_clips=true)`, then `add_subtitles(plan_id=...)`. Turned sources arrive turned and zoomed to fit (the file carries it); look at a few with `timeline_frames`, which shows the picture but does not draw the captions.
+   - Into Resolve when it is live (studio / bridge) and the user wants it: `checkpoint(action="save")` if a timeline is open, `export_fcpxml(plan_id)`, `import_timeline(path)`, verify with `get_resolve_state(include_clips=true)`, then `add_subtitles(plan_id=...)`. Turned sources arrive turned and zoomed to fit (the file carries it). If `export_fcpxml` returned `hdr_sources` with `hlg` (phone HDR, pale in Resolve otherwise): `apply_lut(lut_path="hlg-to-rec709")`, see the `phone-hdr` guide. Look at a few moments with `timeline_frames`, which shows the picture but does not draw the captions.
    - Not live: give the `.fcpxml` path and "File › Import › Timeline".
 10. **Reply** short: what the video is now (length, how many clips from how many files), what you cut and why in one or two lines, what you left out, the issues that remain, and what you did not verify (nobody listened to the cuts; Resolve import not done). Then the preview path.
 

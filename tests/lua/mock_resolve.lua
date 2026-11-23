@@ -45,6 +45,8 @@ function Mpi:GetClipProperty(key)
   end
   if key == "FPS" then return self.video and tostring(self.fps) or nil end
   if key == "Frames" then return tostring(self.frames) end
+  -- What Resolve reads from the file: "Project" for ordinary footage, "Rec.2100 HLG" for iPhone HDR.
+  if key == "Input Color Space" then return self.color_space or "Project" end
   if key == nil then return { ["File Path"] = self.path, FPS = tostring(self.fps), Frames = tostring(self.frames) } end
   return nil
 end
@@ -78,8 +80,11 @@ function Item:SetLUT(node, path) self.lut = { node = node, path = path }; return
 function Item:GetTrackTypeAndIndex() return { self.track_type, self.track_index } end
 function Item:GetMediaPoolItem()
   if self.mpi then return self.mpi end
-  local path = self.path
-  return { GetClipProperty = function(_, key) if key == "File Path" then return path end end }
+  local item = self
+  return { GetClipProperty = function(_, key)
+    if key == "File Path" then return item.path end
+    if key == "Input Color Space" then return item.color_space or "Project" end
+  end }
 end
 -- GetProperty() returns every property; GetProperty(key) one value (nil if unknown).
 function Item:GetProperty(key)

@@ -9,7 +9,8 @@ clips joined as AAC came out 1.6 s longer than their plan.
 
 Not shown: cross dissolves (played as cuts) and the fades themselves (their black gap
 is there, so the length is right). A source is shown as players show it (its rotation
-tag applied), then turned by the plan's `source_turns`.
+tag applied), then turned by the plan's `source_turns`. Phone HDR (HLG) sources go
+through the built-in hlg-to-rec709 LUT, the one apply_lut puts on them in Resolve.
 """
 from __future__ import annotations
 
@@ -18,14 +19,18 @@ import subprocess
 import tempfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from pathlib import Path
 
+from resolve_pilot import luts
 from resolve_pilot.analyzers.media import probe_media_cached
 from resolve_pilot.editorial.roughcut import RoughCutClip, RoughCutPlan, plan_to_timeline_spec
 from resolve_pilot.exporters.fcpxml import _fps_rational, layout
 from resolve_pilot.exporters.srt import SrtCue, write_srt
 
+RENDER_VERSION = 2  # part of the preview cache key: raise it when the picture changes
 SAMPLE_RATE = 48000
+_REC709 = "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709"
 _AUDIO = f"aresample={SAMPLE_RATE},aformat=sample_fmts=s16:channel_layouts=stereo"
 _WORKERS = 3  # pieces encoded at once; each ffmpeg is itself multi-threaded
 
@@ -46,6 +51,23 @@ def _run(args: list[str], what: str, timeout: float = 1800.0) -> None:
 _TURN = {90: "transpose=1,", 180: "hflip,vflip,", 270: "transpose=2,"}
 
 
+@lru_cache(maxsize=4)
+def _has_filter(ffmpeg: str, name: str) -> bool:
+    done = subprocess.run([ffmpeg, "-hide_banner", "-filters"], capture_output=True, text=True, timeout=60, check=False)
+    return any(line.split()[1:2] == [name] for line in done.stdout.splitlines())
+
+
+def _filter_path(path: Path) -> str:
+    """A file path as a filter option inside -filter_complex: escaped for the option
+    parser (backslash, colon, quote), then quoted for the graph parser."""
+    text = path.as_posix().replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+    return "'" + text.replace("'", "'\\''") + "'"
+
+
+def converts_hlg(ffmpeg: str) -> bool:
+    return _has_filter(ffmpeg, "lut3d")
+
+
 def _piece(ffmpeg: str, clip: RoughCutClip | None, frames: int, samples: int,
            size: tuple[int, int], rate: str, out: Path, turn: int = 0) -> list[str]:
     """Command for one clip (or, with clip=None, a black and silent gap) of exactly
@@ -60,7 +82,14 @@ def _piece(ffmpeg: str, clip: RoughCutClip | None, frames: int, samples: int,
         args += ["-ss", f"{clip.in_seconds:.6f}", "-t", f"{frames * den / num + 1.0:.6f}",
                  "-i", str(Path(clip.source_path).expanduser())]
     if has_video:  # held on its last frame if the source ends early
-        video = (f"[0:v:0]fps={rate},{_TURN.get(turn % 360, '')}scale={w}:{h}:force_original_aspect_ratio=decrease,"
+        lut = ""
+        if info is not None and info.hdr == "hlg" and converts_hlg(ffmpeg):
+            # After the downscale (a 4K frame through the LUT took 3.6 times as long), and
+            # written as Rec.709 YUV, which is what render() tags the file as.
+            lut = (f"lut3d=file={_filter_path(luts.builtin_lut(luts.HLG_TO_REC709))},"
+                   "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,")
+        video = (f"[0:v:0]fps={rate},{_TURN.get(turn % 360, '')}"
+                 f"scale={w}:{h}:force_original_aspect_ratio=decrease,{lut}"
                  f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,tpad=stop_mode=clone:stop=-1")
     else:
         video = f"color=c=black:s={w}x{h}:r={rate},format=yuv420p"
@@ -111,6 +140,12 @@ def render(plan: RoughCutPlan, out_path: str | Path, height: int = 540,
         parts.append((None, lay.bounds[-1], lay.total_frames))
     parts = [p for p in parts if p[2] > p[1]]
 
+    hdr: dict[str, int] = {}
+    for path in dict.fromkeys(c.source_path for c in plan.clips):
+        info = probe_media_cached(path)
+        if info and info.hdr:
+            hdr[info.hdr] = hdr.get(info.hdr, 0) + 1
+    converted = converts_hlg(ffmpeg)
     target = Path(out_path).expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="preview-", dir=target.parent) as tmp:
@@ -150,6 +185,8 @@ def render(plan: RoughCutPlan, out_path: str | Path, height: int = 540,
         args += ["-map", "0:v:0", "-map", audio_map]
         if cues:
             args += ["-map", f"{inputs}:s:0", "-c:s", "mov_text"]
+        if hdr.get("hlg") and converted:  # the converted pieces are Rec.709: say so for the whole file
+            args += ["-vf", _REC709]
         partial = work / "preview.mp4"
         args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
                  "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(partial)]
@@ -161,10 +198,15 @@ def render(plan: RoughCutPlan, out_path: str | Path, height: int = 540,
         partial.replace(target)
 
     not_shown = []
+    if hdr.get("hlg") and not converted:
+        not_shown.append("phone HDR (HLG) sources are not converted to Rec.709 (this ffmpeg has no lut3d filter)")
+    if hdr.get("pq"):
+        not_shown.append("HDR10 (PQ) sources are not converted to Rec.709")
     if any(lay.edges[1:-1]):
         not_shown.append("cross dissolves are played as cuts")
     if lay.edges[0] or lay.edges[-1]:
         not_shown.append("fades are a black gap and a cut")
     return {"path": str(target), "frames": lay.total_frames, "fps": plan.fps,
             "seconds": lay.total_frames * den / num, "width": size[0], "height": size[1],
-            "captions": len(cues) if cues else 0, "not_shown": not_shown}
+            "captions": len(cues) if cues else 0, "not_shown": not_shown,
+            **({"hlg_sources_converted": hdr["hlg"]} if hdr.get("hlg") and converted else {})}

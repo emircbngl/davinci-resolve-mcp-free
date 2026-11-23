@@ -14,6 +14,8 @@ Applies color treatments across a timeline: LUT files, saved grades (`.drx`), an
 - "Grade this footage like a moody noir film"
 - "Copy the grade from this clip to the rest"
 
+Phone footage that looks pale and grey is not a grading job: it is HDR read as Rec.709. Convert it first with `apply_lut(lut_path="hlg-to-rec709")` (guide `phone-hdr`), then grade.
+
 ## Three modes
 
 ### 1. LUT (deterministic, fastest)

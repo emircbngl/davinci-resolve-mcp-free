@@ -43,8 +43,9 @@ LIVE: dict[str, LiveCheck] = {
     "add_quality_markers": _r20("bridge", "re-runs replace only their own markers"),
     "set_clip_color": _r20("bridge", "that run found transitions being colored too; fixed since, "
                                       "not re-run yet"),
-    "apply_lut": _r20("bridge", "that run found LUTs outside Resolve's LUT folder rejected; "
-                            "they are copied in since, not re-run yet"),
+    "apply_lut": _r20("bridge", "a LUT from outside Resolve's LUT folder, copied in; the built-in "
+                            "hlg-to-rec709 on 198 phone HDR clips (37-41 dB against Apple's "
+                            "own conversion), an SDR timeline left alone"),
     "grade_clips": _r20("bridge", "CDL grade, copy, reset; change measured on exported frames"),
     "queue_render": _r20("bridge", "known preset queued, an unknown one lists the presets; "
                                    "format / codec / size / range: a 3 s 1080×1920 H.264 MP4"),

@@ -431,3 +431,53 @@ a 180° turn, dissolves, a fade-in, and a music bed on a turned first clip all a
   (the hand-edited FCPXML), "vlog otomatik 4", "turn test 1 / 2". Nothing was deleted.
 - The connected MCP server still runs the old code; the new tools were driven from Python
   against the same bridge.
+
+# Phone HDR clips look pale in Resolve: a built-in conversion
+
+Emir's vlog clips are iPhone HDR (HLG, BT.2020). In a Resolve project without colour management
+their code values are shown as Rec.709: pale, bright, grey sky. Reference for "how it should
+look": Apple's own SDR conversion of the same files (`avconvert`), eight frames of three
+sources, five to fit on and three held out. Measured against it (PSNR, same frames):
+
+- as Resolve shows them: 17.3-20.2 dB
+- Resolve colour managed (RCM v2, HLG input, Rec.709 out, DaVinci tone mapping): 13.1-13.7 dB,
+  brighter still; "Saturation Preserving" gets the colour but not the brightness
+- one CDL (slope 0.90, power 1.22, saturation 1.62), applied in Resolve: 28.7-29.7 dB
+- undo HLG, BT.2020 -> BT.709, power 0.40, saturation 1.14 (what a LUT can hold): 35.4-39.3 dB
+
+- [x] `luts.hlg_to_rec709_cube()`: the conversion as a .cube, written without numpy
+- [x] `apply_lut(lut_path="hlg-to-rec709")`: the built-in LUT, only on clips Resolve itself
+      tags Rec.2100 HLG; the others are counted as skipped
+- [x] `probe_media` / `scan_folder` say `hdr`; `export_fcpxml` says what to do after the import
+- [x] `render_preview` shows HLG sources through the same LUT (ffmpeg `lut3d`), or says it does not
+- [x] Guide `resolve-phone-hdr`; one-prompt guide step; README, CHANGELOG, verified matrix
+- [x] Tests red without each change; measured in Resolve against Apple's frames; full pytest + ruff
+
+## Review
+
+428 passed (411 before), ruff clean. 32 mutations over the probe, the LUT maths, the cube file, the Lua snippet,
+the Studio path, the tool, scan_folder / export_fcpxml and the preview: the tests went red each
+time. One stayed green at first (an input clamp nothing could reach); the clamp was removed.
+
+Measured against Apple's SDR conversion of the same eight frames (five fitted, three held out):
+
+| | PSNR |
+|---|---|
+| Resolve 20.3, unmanaged project, untouched | 17.3-20.2 dB |
+| Resolve colour managed, DaVinci tone mapping | 13.1-13.7 dB |
+| one CDL through grade_clips, in Resolve | 28.7-29.7 dB |
+| the built-in LUT through apply_lut, in Resolve | 36.8-40.7 dB |
+| the real preview (ffmpeg lut3d), 9,119 frames, rendered in 369 s | 34.4-37.0 dB |
+
+In Resolve through the tool: "vlog otomatik 4" 198 applied, 0 skipped; "rp cut 1" (ordinary
+H.264 clips) 0 applied, 9 skipped, with the note. The first preview chain put the LUT before the
+downscale and took 623 s (with tests running beside it); after the downscale a 6 s piece takes
+2.1 s instead of 5.8 s.
+
+- One iPhone 14 Pro, daylight. Night footage, other phones and Dolby Vision trims not tried.
+- A project that is colour managed would convert twice; the guide says so, the tool does not check.
+- HDR10 (PQ) is recognised and reported, not converted.
+- The test project's colour settings were changed while trying and put back (read back:
+  davinciYRGB, Rec.709 (Scene), no DRT). Every clip of "vlog otomatik 4" now has the LUT on node 1.
+- Nobody has watched the corrected preview or timeline play; eight stills were compared and
+  three before / after / phone rows looked at.

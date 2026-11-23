@@ -125,7 +125,8 @@ subtitle track (or export_srt for a file). For a rough cut pass plan_id instead 
 Never append .srt files with append_clips. Before risky edits (removing clips, \
 big rebuilds) call checkpoint(action='save'); the API has no undo. Titles: \
 add_title overlays Text+ on a track above V1; never insert titles any other way, as Resolve's \
-own title insert splits and ripples the edit.
+own title insert splits and ripples the edit. Phone HDR clips (`hdr: hlg` in scan_folder / \
+probe_media) look pale in Resolve: after the import, apply_lut(lut_path='hlg-to-rec709').
 
 Conventions: times are seconds unless a parameter says frames. Marker positions can be given \
 in seconds; Resolve converts them with the timeline's real frame rate. Paths must be absolute \
@@ -135,7 +136,7 @@ anything destructive (deleting clips, markers or timelines, replacing grades, re
 files) ask the user and suggest saving the project first.
 Playbooks: get_workflow_guide() lists step-by-step guides (one-prompt edit of a folder of \
 clips, rough cut, subtitles, music video, \
-color grade, markers, live control with a Resolve Lua API cheat sheet, traps). Read the matching \
+color grade, phone HDR, markers, live control with a Resolve Lua API cheat sheet, traps). Read the matching \
 one before a multi-step job.
 Resources (read-only, no tool call): resolve://traps (known Resolve traps and what resolve-pilot \
 does about them; read it before risky edits or run_lua code), resolve://capabilities (which tools \
@@ -992,6 +993,8 @@ def scan_folder(
             row.update(frame=f"{info.width}x{info.height}", fps=_r(info.fps, 2))
             if info.rotation % 360:
                 row["rotation"] = info.rotation
+            if info.hdr:
+                row["hdr"] = info.hdr
         if recorded:
             row["recorded"] = recorded
         files.append(row)
@@ -1216,6 +1219,16 @@ OutPath = Annotated[str | None, Field(description=(
 Overwrite = Annotated[bool, Field(description="Replace out_path if it already exists.")]
 
 
+def _hdr_sources(plan: roughcut.RoughCutPlan) -> dict[str, int]:
+    """How many of the plan's source files are HDR, by kind ("hlg" / "pq")."""
+    kinds: dict[str, int] = {}
+    for path in dict.fromkeys(c.source_path for c in plan.clips):
+        info = analyzers.probe_media_cached(path)
+        if info and info.hdr:
+            kinds[info.hdr] = kinds.get(info.hdr, 0) + 1
+    return kinds
+
+
 @tool(DESTRUCTIVE, title="Export FCPXML")
 def export_fcpxml(plan_id: str, out_path: OutPath = None, overwrite: Overwrite = False) -> dict[str, Any]:
     """Write a stored plan as FCPXML 1.10 (Resolve Free & Studio: File > Import > Timeline).
@@ -1236,14 +1249,23 @@ def export_fcpxml(plan_id: str, out_path: OutPath = None, overwrite: Overwrite =
     final = _write_reserved(target, reserved, lambda t: fcpxml_export.write_fcpxml(spec, t))
     warnings = list(report["warnings"])
     turned = sum(1 for c in plan.clips if plan.source_turns.get(c.source_path))
+    hdr = _hdr_sources(plan)
+    next_step = (f"import_timeline(path={str(final)!r}) or, without a live channel, "
+                 "tell the user: File > Import > Timeline.")
+    if hdr.get("hlg"):
+        next_step += (f" {hdr['hlg']} source(s) are phone HDR (HLG) and look pale in a project without "
+                      "colour management: after the import, apply_lut(lut_path='hlg-to-rec709').")
+    if hdr.get("pq"):
+        warnings.append(f"{hdr['pq']} source(s) are HDR10 (PQ); there is no built-in conversion for "
+                        "them, so they need Resolve's colour management or a grade")
     return {
         "path": str(final),
         "clip_count": len(plan.clips),
         "total_seconds": _r(plan.total_seconds),
         "warnings": warnings,
         **({"turned_clips": turned} if turned else {}),
-        "next_step": f"import_timeline(path={str(final)!r}) or, without a live channel, "
-                     "tell the user: File > Import > Timeline.",
+        **({"hdr_sources": hdr} if hdr else {}),
+        "next_step": next_step,
     }
 
 
@@ -1379,8 +1401,8 @@ def _preview_key(plan: roughcut.RoughCutPlan, height: int, cues: list[srt_export
             files.append([path, st.st_size, int(st.st_mtime)])
         except OSError:
             files.append([path, None, None])
-    blob = json.dumps([plan.to_dict(), height, [[c.start, c.end, c.text] for c in cues], files],
-                      sort_keys=True, ensure_ascii=False)
+    blob = json.dumps([preview_export.RENDER_VERSION, plan.to_dict(), height,
+                       [[c.start, c.end, c.text] for c in cues], files], sort_keys=True, ensure_ascii=False)
     return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
 
 
@@ -1985,7 +2007,8 @@ def export_timeline(
 
 @tool(DESTRUCTIVE, title="Apply LUT")
 def apply_lut(
-    lut_path: Annotated[str, Field(description="Absolute path of a .cube / .dat LUT.")],
+    lut_path: Annotated[str, Field(description=(
+        "Absolute path of a .cube / .dat LUT, or the built-in 'hlg-to-rec709'."))],
     track: Annotated[int, Field(ge=1)] = 1,
     node_index: Annotated[int, Field(ge=1, description="Color node that receives the LUT (replaces its LUT).")] = 1,
     channel: Channel = "auto",
@@ -1994,12 +2017,21 @@ def apply_lut(
 
     LUTs outside Resolve's LUT folder are copied into <LUT folder>/resolve-pilot first;
     Resolve silently refuses LUTs anywhere else.
+    lut_path='hlg-to-rec709': phone HDR clips (iPhone HLG) look pale and grey in a project
+    without colour management. This built-in LUT converts them to Rec.709, fitted to
+    Apple's own SDR conversion, and only touches clips Resolve tags Rec.2100 HLG (the
+    others are `skipped`). Look with timeline_frames. See get_workflow_guide('phone-hdr').
     """
-    full, copied = luts.stage_lut(lut_path)
-    out = control.perform(lua_lib.snippet_apply_lut_to_clips(full, track, node_index),
-                          lambda: _studio().apply_lut_report(full, track, node_index), channel)
+    builtin = lut_path in luts.BUILTIN_LUTS
+    full, copied = luts.stage_lut(luts.builtin_lut(lut_path) if builtin else lut_path)
+    only = luts.HLG_COLOR_SPACE if builtin else None
+    out = control.perform(lua_lib.snippet_apply_lut_to_clips(full, track, node_index, only),
+                          lambda: _studio().apply_lut_report(full, track, node_index, only), channel)
     if copied and isinstance(out, dict):
         out["staged_lut"] = full
+    if builtin and isinstance(out, dict) and out.get("ok") and out.get("applied") == 0:
+        out["note"] = (f"No clip on video track {track} is tagged {luts.HLG_COLOR_SPACE} in Resolve, "
+                       "so nothing was changed.")
     return out
 
 

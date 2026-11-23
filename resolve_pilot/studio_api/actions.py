@@ -333,16 +333,25 @@ def open_page(page: str) -> dict[str, Any]:
     return {"ok": bool(get_resolve().OpenPage(page)), "page": page}
 
 
-def apply_lut_report(lut_path: str, track: int = 1, node_index: int = 1) -> dict[str, Any]:
+def apply_lut_report(lut_path: str, track: int = 1, node_index: int = 1,
+                     only_color_space: str | None = None) -> dict[str, Any]:
     """apply_lut with the same result shape as the Lua snippet."""
     tl = _current_timeline()
     project = _current_project()
     if hasattr(project, "RefreshLUTList"):
         project.RefreshLUTList()
     items = clip_items(tl, "video", int(track))
-    applied = sum(1 for it in items if it.SetLUT(int(node_index), lut_path))
-    out = {"ok": applied > 0 or not items, "applied": applied, "total": len(items),
+    applied = skipped = 0
+    for it in items:
+        mpi = it.GetMediaPoolItem()
+        if only_color_space and not (mpi and mpi.GetClipProperty("Input Color Space") == only_color_space):
+            skipped += 1
+        elif it.SetLUT(int(node_index), lut_path):
+            applied += 1
+    out = {"ok": applied > 0 or len(items) == skipped, "applied": applied, "total": len(items),
            "node_index": int(node_index)}
+    if only_color_space:
+        out["skipped"] = skipped
     if not out["ok"]:
         out["error"] = ("Resolve rejected the LUT for every clip. It must sit inside Resolve's LUT "
                         "folder, and the node index must exist on each clip.")

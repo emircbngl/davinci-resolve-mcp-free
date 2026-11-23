@@ -28,6 +28,8 @@ class MediaInfo:
     rotation: int = 0
     # When the camera says it was recorded (ISO 8601), if it says.
     recorded: str | None = None
+    # "hlg" (iPhone HDR) or "pq" (HDR10): the picture is not Rec.709 and looks pale shown as such.
+    hdr: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -119,6 +121,7 @@ def probe_media(path: str | Path) -> MediaInfo:
         rotation=rotation,
         recorded=((fmt.get("tags") or {}).get("com.apple.quicktime.creationdate")
                   or (fmt.get("tags") or {}).get("creation_time") or None),
+        hdr={"arib-std-b67": "hlg", "smpte2084": "pq"}.get(v.get("color_transfer")) if v else None,
     )
 
 
