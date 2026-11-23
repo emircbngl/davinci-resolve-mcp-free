@@ -22,6 +22,7 @@ class World:
         self.menu_ready_at = 0.0                      # before this the menu click fails (still loading)
         self.permission = True
         self.clicks: list[list[str]] = []
+        self.click_attempts = 0
         self.bridge_up_after_click: float | None = 3.0
         self.bridge_running = False
         self.clicked_at: float | None = None
@@ -54,6 +55,7 @@ class World:
         return self.app
 
     def click(self, path):
+        self.click_attempts += 1
         if not self.permission:
             raise applescript.UIAutomationError(
                 "osascript failed (exit 1): System Events got an error: osascript is not allowed "
@@ -95,7 +97,7 @@ def test_no_permission_to_click_is_said_once_with_what_to_do(world):
     world.resolve_running, world.permission = True, False
     out = mcp_server.setup_bridge("start", wait_seconds=90)
     assert out["bridge_running"] is False and out["menu_clicked"] is False
-    assert world.now == 0                                    # it does not keep trying a click it may not make
+    assert world.click_attempts == 1                         # it does not keep trying a click it may not make
     (left,) = out["left_for_user"]
     assert left.startswith("In DaVinci Resolve choose Workspace > Scripts > ResolvePilotBridge.")
     assert "Privacy & Security > Accessibility" in left
@@ -104,7 +106,7 @@ def test_no_permission_to_click_is_said_once_with_what_to_do(world):
 def test_a_resolve_that_never_finishes_loading_stops_at_the_deadline(world):
     world.resolve_running, world.menu_ready_at = True, 10_000.0
     out = mcp_server.setup_bridge("start", wait_seconds=30)
-    assert out["menu_clicked"] is False and 30 <= world.now <= 32
+    assert out["menu_clicked"] is False and 30 <= world.now <= 32 and world.click_attempts == 16
     assert "did not become frontmost" in out["left_for_user"][0]
 
 
