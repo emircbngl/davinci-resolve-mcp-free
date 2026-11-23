@@ -287,14 +287,37 @@ def test_return_is_pressed_only_with_the_focus_in_the_console():
     script = console._TYPE
     guard = script.index("if not ((focused of input) and frontmost) then")
     assert script.count("key code 36") == 1 and guard < script.index("key code 36")
-    assert script.index("if not frontmost then return") < script.index("set value of input")
+    assert script.index("if steady < 3 then return") < script.index("set value of input")
     assert "keystroke" not in script and "clipboard" not in script
-    # Raising the Console renumbers Resolve's windows: it is looked up again before use,
-    # and a lookup that fails is tried again instead of ending the request.
+    # Raising the Console renumbers Resolve's windows: it is looked up again before use.
     raised = script.index('perform action "AXRaise"')
     assert raised < script.index("set w to my consoleWindow()", raised) < script.index("set input to")
-    assert script.index("repeat 10 times") < script.index("set state to my typeIt(") < script.index("on typeIt(")
     assert script.rindex("key code 36") > script.rindex("set focused of input to true")
+    # An attempt that loses its footing starts over, bringing Resolve forward again, and
+    # Resolve has to stay in front before anything is looked up.
+    assert script.index("repeat 6 times") < script.index("set state to my attempt(") < script.index("on attempt(")
+    start = script.index("on attempt(")
+    assert start < script.index('tell application "DaVinci Resolve" to activate') < script.index("if steady is 3")
+    assert script.index("if steady < 3 then return") < script.index("my consoleWindow()", start)
+
+
+def test_giving_the_front_back_waits_until_the_app_is_there(monkeypatch):
+    asked, looks = [], iter([RESOLVE_BUNDLE_ID, RESOLVE_BUNDLE_ID, OTHER_APP])
+    monkeypatch.setattr(console.applescript, "osascript", lambda script, **kw: asked.append(script) or "")
+    monkeypatch.setattr(console, "_frontmost", lambda: next(looks))
+    console._activate(OTHER_APP)
+    assert OTHER_APP in asked[0] and next(looks, None) is None        # looked until it was in front
+    # An app that never comes forward does not hold the request up for long.
+    monkeypatch.setattr(console, "_frontmost", lambda: RESOLVE_BUNDLE_ID)
+    console._activate(OTHER_APP, settle_seconds=0.2)
+
+
+def test_an_app_that_quit_is_not_waited_for(monkeypatch):
+    def gone(script, **kw):
+        raise UIAutomationError("no such app")
+    monkeypatch.setattr(console.applescript, "osascript", gone)
+    monkeypatch.setattr(console, "_frontmost", lambda: pytest.fail("looked for an app that is gone"))
+    console._activate(OTHER_APP)
 
 
 # ── whether the channel is there ─────────────────────────────────────────────

@@ -98,51 +98,61 @@ end tell
 # Return is pressed only while Resolve is the front app and the Console's input has the
 # keyboard focus; otherwise it would go to whatever else is focused (a dialog's default
 # button, another app).
-# System Events knows windows by their position in the stack, so a number found a moment
-# ago can mean another window by now: raising the Console renumbers them, and so does any
-# window that comes or goes (seen once on 21.2.0 Free: "Can't get text area 1 of window 1").
-# typeIt therefore looks the Console up again after raising it, and the whole step is
-# tried again when a lookup fails. Nothing has been typed at that point: Return is the
-# last thing typeIt does.
+# Two things move under this script (both seen on 21.2.0 Free):
+# - System Events knows windows by their position in the stack, so a number found a moment
+#   ago can mean another window by now: raising the Console renumbers them, and so does any
+#   window that comes or goes ("Can't get text area 1 of window 1").
+# - Bringing Resolve forward does not always hold: right after another app was given the
+#   front (the previous request handing it back), that app's activation can land after
+#   ours, and Resolve's windows are gone again.
+# So one attempt is: bring Resolve forward, wait until it stays in front, find the Console
+# (again after raising it), type. An attempt that loses its footing is made again from
+# the start. Nothing has been typed at that point: Return is the last thing an attempt does.
 _TYPE = _FIND + '''
 on run
-	tell application "DaVinci Resolve" to activate
+	set state to "NOTFRONT"
+	repeat 6 times
+		try
+			set state to my attempt(__TEXT__)
+		on error msg number n
+			-- no Accessibility permission will not get better by trying again: say so
+			if msg contains "assistive access" or n is -25211 then error msg number n
+			set state to "UNSTEADY"
+		end try
+		if state is "SENT" then exit repeat
+		delay 0.2
+	end repeat
+	return state
+end run
+
+on attempt(theText)
+	-- Asked again every few looks: an activation of another app that was still on its
+	-- way takes the front back once, not every time.
+	set steady to 0
+	repeat 8 times
+		tell application "DaVinci Resolve" to activate
+		tell application "System Events" to tell process "Resolve"
+			repeat 8 times
+				if frontmost and (count of windows) > 0 then
+					set steady to steady + 1
+					if steady is 3 then exit repeat
+				else
+					set steady to 0
+				end if
+				delay 0.05
+			end repeat
+		end tell
+		if steady is 3 then exit repeat
+	end repeat
 	tell application "System Events" to tell process "Resolve"
-		repeat 60 times
-			if frontmost and (count of windows) > 0 then exit repeat
-			delay 0.05
-		end repeat
-		if not frontmost then return "NOTFRONT"
+		if steady < 3 then return "NOTFRONT"
 		if (my consoleWindow()) is 0 then
-			try
-				click menu item "Console" of menu 1 of menu bar item "Workspace" of menu bar 1
-			on error msg number n
-				-- no Accessibility permission is not a missing window: say so
-				if msg contains "assistive access" or n is -25211 then error msg number n
-				return "NOCONSOLE"
-			end try
+			click menu item "Console" of menu 1 of menu bar item "Workspace" of menu bar 1
 			repeat 30 times
 				delay 0.1
 				if (my consoleWindow()) is not 0 then exit repeat
 			end repeat
 		end if
-	end tell
-	set state to "NOCONSOLE"
-	repeat 10 times
-		try
-			set state to my typeIt(__TEXT__)
-		on error msg number n
-			if msg contains "assistive access" or n is -25211 then error msg number n
-			set state to "NOFOCUS"
-		end try
-		if state is "SENT" then exit repeat
-		delay 0.1
-	end repeat
-	return state
-end run
-
-on typeIt(theText)
-	tell application "System Events" to tell process "Resolve"
 		set w to my consoleWindow()
 		if w is 0 then return "NOCONSOLE"
 		-- After Resolve changed page or opened a timeline the Console is no longer the
@@ -160,7 +170,7 @@ on typeIt(theText)
 		key code 36
 		return "SENT"
 	end tell
-end typeIt
+end attempt
 '''
 
 _READ = _FIND + '''
@@ -206,11 +216,17 @@ def _frontmost() -> str | None:
     return applescript.frontmost_bundle_id()
 
 
-def _activate(bundle_id: str) -> None:
+def _activate(bundle_id: str, settle_seconds: float = 1.5) -> None:
+    """Bring an app to the front and wait until it is there. Returning earlier lets the
+    next request bring Resolve forward while this activation is still on its way, and the
+    two then take the front from each other."""
     try:
         applescript.osascript(f"tell application id {applescript._as_quoted(bundle_id)} to activate")
     except UIAutomationError:
-        pass   # the app quit meanwhile: nothing to give the front back to
+        return   # the app quit meanwhile: nothing to give the front back to
+    deadline = time.monotonic() + settle_seconds
+    while _frontmost() != bundle_id and time.monotonic() < deadline:
+        time.sleep(0.05)
 
 
 def _probe() -> str:
@@ -299,6 +315,9 @@ _TYPE_ERRORS = {
                  "the Console by hand once.",
     "NOFOCUS": "The Console's input did not take the keyboard focus, so Return was not pressed "
                "and nothing ran. " + MODAL_HINT,
+    "UNSTEADY": "Resolve's windows kept changing while the Console was looked up, so nothing was "
+                "typed. Is another app taking the front, or Resolve opening or closing windows? "
+                "Try again.",
 }
 
 
