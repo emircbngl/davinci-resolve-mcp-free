@@ -154,16 +154,25 @@ TRAPS: tuple[Trap, ...] = (
         title="Resolve 21.1 Free restricts Console Lua; from 21.1.2 the bridge cannot start",
         symptom="On 21.1 Free, scripts that read or write files or require modules fail and "
                 "Workspace > Scripts entries do nothing. On 21.1.2 Free, dofile is nil too and "
-                "the pasted bridge stops with \"this Lua has neither io nor ffi\".",
-        cause="Resolve 21.1 restricts scripting in the Free edition, and 21.1.2 tightened it "
-              "again: io, os.execute, package and debug are gone from 21.1; dofile and ffi from "
-              "21.1.2 (reported on 21.1.1 and 21.1.2 Free, macOS).",
+                "the pasted bridge stops with \"this Lua has neither io nor ffi\". On 21.2.0 Free "
+                "clicking the bridge in Workspace > Scripts starts no script process at all.",
+        cause="Resolve 21 takes file access away from scripting in the Free edition, step by "
+              "step: io, os.execute, package and debug from 21.1; dofile and ffi from 21.1.2 "
+              "(reported on 21.1.1 and 21.1.2 Free, macOS). Measured in the Console of 21.2.0 "
+              "Free (macOS): io, ffi, dofile, require, package, os.execute, os.remove, os.rename "
+              "and bmd.readfile / writefile / readdir / createdir / getclipboard / setclipboard / "
+              "executebg are nil; resolve, fusion, loadstring, os.getenv, bmd.wait, "
+              "bmd.fileexists, bmd.readstring and bmd.writestring are there. That is a removal "
+              "on purpose, so resolve-pilot does not look for a way around it.",
         handling="The bridge falls back to LuaJIT's ffi for its files when io is missing, and "
                  "setup_bridge returns a console_command (dofile) to paste into the Console; that "
                  "is reported working on 21.1.1. On 21.1.2+ Free resolve_pilot_status and "
-                 "setup_bridge say the bridge cannot start and point to Resolve 20.3.x Free.",
-        source="reported",
-        measured_on="",
+                 "setup_bridge say the bridge cannot start and point to Resolve 20.3.x Free. "
+                 "Lua pasted into the Console still runs with the full Resolve API there "
+                 "(a multi-line snippet from this server, measured on 21.2.0 Free), so the "
+                 "manual channel works: give the user lua_code and the instructions.",
+        source="measured",
+        measured_on="21.2.0 Free, macOS (21.1.x: reported)",
         tools=("setup_bridge", "run_lua", "resolve_pilot_status"),
     ),
     Trap(

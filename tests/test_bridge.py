@@ -809,3 +809,49 @@ def test_a_request_that_waited_its_turn_still_gets_its_full_timeout(live_bridge)
     r = bridge.exec_lua('os.execute("sleep 2") return 2', timeout=4)
     t.join()
     assert r.result == 2 and first["r"].result == 1
+
+
+
+@needs_luajit
+@pytest.mark.parametrize("gone", [
+    "resolve.GetProjectManager = nil",                                             # as measured on 20.3
+    'resolve.GetProjectManager = nil setmetatable(resolve, {__index = function() error("dead object") end})',
+])
+def test_the_bridge_stops_when_resolve_is_gone(live_bridge, gone):
+    # What a bridge sees after Resolve quits (measured on 20.3): the object is still there,
+    # its methods are not. It used to go on beating, and the server called it running.
+    assert bridge.status().running is True
+    bridge.exec_lua(gone)
+    out = live_bridge.communicate(timeout=20)[0]
+    assert "[bridge] stopped (Resolve quit)." in out
+    status = bridge.status()
+    assert status.running is False and status.heartbeat_age_seconds is None    # the heartbeat is taken away
+
+
+@needs_luajit
+def test_a_bridge_started_without_a_working_resolve_keeps_waiting(tmp_path):
+    # Started from the Project Manager the object can be useless at first (measured on 20.3);
+    # that is a bridge waiting for a project, not one whose Resolve quit.
+    from tests.conftest import MOCK_RESOLVE
+    script, runner = tmp_path / "bridge.lua", tmp_path / "runner.lua"
+    script.write_text(bridge.render_script(idle_minutes=1), encoding="utf-8")
+    runner.write_text(f"dofile({lua.lua_string(str(MOCK_RESOLVE))})\nresolve.GetProjectManager = nil\n"
+                      f"local chunk = assert(loadfile({lua.lua_string(str(script))}))\n"
+                      "setfenv(chunk, setmetatable({}, {__index = _G}))\nchunk()\n", encoding="utf-8")
+    proc = subprocess.Popen([LUAJIT, str(runner)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        deadline = time.monotonic() + 30
+        while not bridge.status().running and time.monotonic() < deadline:
+            time.sleep(0.05)
+        # The check runs with every heartbeat: wait for two more beats (or the bridge's end).
+        beat, seen = bridge.bridge_dir() / "heartbeat", set()
+        while len(seen) < 3 and proc.poll() is None and time.monotonic() < deadline:
+            try:
+                seen.add(beat.read_text())
+            except OSError:
+                pass
+            time.sleep(0.1)
+        assert len(seen) == 3 and proc.poll() is None and bridge.status().running is True
+    finally:
+        out = stop_bridge(proc)
+    assert "stopped (stop requested)" in out and "Resolve quit" not in out

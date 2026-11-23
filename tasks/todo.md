@@ -527,3 +527,46 @@ In Resolve 20.3 Free, project resolve-pilot-test, through the tools:
   end-to-end test no longer depends on which Resolve is installed.
 - Left in Resolve: the project "resolve-pilot-scratch" (empty) and two more timelines in the
   test project. Nothing was deleted.
+
+# Resolve 21.2 Free: measured, and a bridge that outlived Resolve
+
+Emir updated to 21.2 and asked to go on there ("Kapatıp aç bridge sorununu da çöz"). Until now
+every 21.x statement was a user report (issue #4).
+
+- [x] Quit 20.3 (project saved first), start 21.2 with `setup_bridge(action="start")`
+- [x] Measure: does the Scripts-menu bridge start; what the Console's Lua still has
+- [x] The bridge stops when its Resolve is gone (found on the way)
+- [x] Status, setup_bridge, the trap, README, paste instructions say what was measured
+- [x] Tests red without the bridge fix; full pytest + ruff; commit
+
+## Review
+
+460 passed (457 before), ruff clean. Three mutations of the bridge fix red (one test first depended on timing
+and stayed green once under load; it now waits for two more heartbeats instead of three seconds).
+
+Measured on Resolve 21.2.0 Free, macOS, a new empty project "resolve-pilot-21":
+
+- Clicking Workspace > Scripts > ResolvePilotBridge starts no `fuscript` process and no heartbeat.
+- Console: `print(12345)` runs. nil there: io, ffi, dofile, require, package, os.execute,
+  os.remove, os.rename, bmd.readfile, writefile, readdir, createdir, getclipboard, setclipboard,
+  executebg. Still there: resolve, fusion, loadstring, os.getenv, bmd.wait, bmd.fileexists,
+  bmd.readstring, bmd.writestring.
+- The server's own 15-line `dump_project_info` snippet, pasted and entered once, ran as one
+  chunk and printed the project's name, frame rate and size: the manual channel works.
+- The file, clipboard and process functions were taken out together, which is a decision by
+  Blackmagic, not an accident. A channel built from what is left (file-exists probes for input,
+  exports for output) would be a way around that decision; it was not built.
+
+Found on the way, on 20.3: the bridge is a separate `fuscript` process. After `resolve:Quit()`
+it went on refreshing its heartbeat for minutes with a dead Resolve object, so status said
+running and `setup_bridge(start)` answered "already running" with Resolve closed.
+
+- `setup_bridge(start)` for real: started Resolve 21.2 (process up in 0.8 s), then stopped with
+  the "cannot start here" explanation. The menu click by the tool is still tests only.
+- Opening the 20.3 test project in 21.2 asks to upgrade it for good ("can only be opened using
+  DaVinci Resolve 21 or newer"); cancelled. The 20.3 projects are untouched.
+- The probing was done by typing into the Console through another app's Accessibility access
+  and reading screenshots; twice the user's clipboard text was replaced and put back.
+- Not done: a way to run a tool's `lua_code` in the Console for the user (paste, Enter, read
+  the Console from a screenshot). It would need Accessibility and Screen Recording for the
+  server's Python, takes the keyboard focus, and cannot read results back as data.

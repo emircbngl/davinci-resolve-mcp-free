@@ -355,18 +355,20 @@ def _version_at_least(text: str | None, major: int, minor: int, patch: int = 0) 
 def _bridge_on_this_resolve(resolve_version: str | None, studio: bool) -> tuple[bool, str | None]:
     """(whether the bridge can start, what to tell the user) for the installed Resolve.
 
-    Free 21.1 restricts Console Lua, and each patch release so far took more away. These
-    are user reports, not maintainer measurements (resolve://traps).
+    Free 21.1 restricts Console Lua, and each patch release so far took more away. 21.1.x
+    is from user reports; 21.2.0 Free was measured by the maintainer (resolve://traps).
     """
     if studio or not _version_at_least(resolve_version, 21, 1):
         return True, None
     if _version_at_least(resolve_version, 21, 1, 2):
         return False, (
-            f"Resolve {resolve_version} Free: the bridge cannot start. From 21.1.2 the Free "
-            "Console's Lua has no dofile, io or ffi, so nothing run there can reach the bridge's "
-            "folder (reported on 21.1.2). For live control use Resolve 20.3.x Free, where the "
-            "bridge is verified. On this version export_fcpxml still builds timelines to import "
-            "with File > Import > Timeline, and the analysis and frame tools work.")
+            f"Resolve {resolve_version} Free: the bridge cannot start. Workspace > Scripts entries "
+            "start nothing, and the Console's Lua cannot reach files: io, ffi, dofile, require and "
+            "the bmd file, clipboard and process functions are gone (measured on 21.2.0 Free; "
+            "reported on 21.1.2). What works there: pasting a tool's lua_code into Workspace > "
+            "Console (measured on 21.2.0), export_fcpxml with File > Import > Timeline, and the "
+            "analysis, preview and frame tools. For live control use Resolve 20.3.x Free, where "
+            "the bridge is verified.")
     return True, (
         f"Resolve {resolve_version} Free: Workspace > Scripts entries do nothing from 21.1. Have "
         "the user paste setup_bridge's console_command into Workspace > Console and press Enter "

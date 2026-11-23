@@ -21,8 +21,9 @@ from resolve_pilot.bridge import BridgeError
 CHANNELS = ("auto", "studio", "bridge", "manual")
 
 PASTE_INSTRUCTIONS = (
-    "In DaVinci Resolve open Workspace > Console, choose the Lua tab, paste the code "
-    "and press Enter. The Console prints a [resolve-pilot] line when it is done."
+    "In DaVinci Resolve open Workspace > Console, choose the Lua tab (Resolve 21 has no tabs: "
+    "it opens at a Lua> prompt), paste the code and press Enter. The Console prints a "
+    "[resolve-pilot] line when it is done."
 )
 
 

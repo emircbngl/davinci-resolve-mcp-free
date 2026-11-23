@@ -34,7 +34,7 @@ def _r20(channel: str, scope: str = "") -> LiveCheck:
 LIVE: dict[str, LiveCheck] = {
     "resolve_pilot_status": _r20("bridge", "channel switches from manual to bridge"),
     "setup_bridge": _r20("bridge", "install into Workspace › Scripts, status; start with the bridge "
-                                   "already running (starting Resolve and clicking the menu: tests only)"),
+                                   "already running and from a closed Resolve (the menu click: tests only)"),
     "run_lua": _r20("bridge", "results and errors; `return _G` does not hang. print capture and "
                               "request globals were reworked since, not re-run yet"),
     "get_resolve_state": _r20("bridge"),
@@ -87,10 +87,12 @@ NOT_YET: dict[str, str] = {
 }
 
 UNTESTED = ("No tool has been run by the maintainers through Resolve Studio's Python API (the "
-            "studio channel), on Windows or Linux, or on Resolve 21.x yet (some API behaviour in "
-            "resolve://traps was measured with Python on 21.0.4). Users report the bridge "
-            "starting from the Console on 21.1.1 Free and not starting at all on 21.1.2 Free, "
-            "whose Lua has no dofile, io or ffi: use Resolve 20.3.x Free for live control.")
+            "studio channel) or on Windows or Linux (some API behaviour in resolve://traps was "
+            "measured with Python on 21.0.4). On Resolve 21.2.0 Free (macOS) the maintainers "
+            "measured that the bridge cannot start (the Scripts menu starts nothing; the "
+            "Console's Lua has no file access) and that Lua pasted into the Console runs; users "
+            "report the bridge starting from the Console on 21.1.1 Free and not on 21.1.2 Free. "
+            "Use Resolve 20.3.x Free for live control.")
 
 
 def entry(name: str) -> dict[str, Any] | None:

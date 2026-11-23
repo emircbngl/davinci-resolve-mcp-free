@@ -477,6 +477,19 @@ end
 log(format("[bridge] Leave Resolve open and talk to Claude. Stops after %d min without requests.",
   floor(IDLE_LIMIT / 60)))
 
+-- The bridge runs in a process of its own (fuscript), which outlives Resolve: after Resolve
+-- quit, a bridge on 20.3 kept beating with a Resolve object whose methods were all gone, so
+-- the server called it running. Once Resolve has worked and no longer does, there is nothing
+-- left to serve.
+local function resolve_works()
+  local _, works = pcall(function()   -- a dead object may also raise when it is touched
+    local r = get_resolve()
+    return r ~= nil and type(r.GetProjectManager) == "function"
+  end)
+  return works == true
+end
+local had_resolve = resolve_works()
+
 local last_activity = os_time()
 local tick = 0
 local reason = "idle timeout"
@@ -499,6 +512,12 @@ while true do
       break
     end
     if superseded() then reason = "another bridge started"; break end
+    if resolve_works() then
+      had_resolve = true
+    elseif had_resolve then
+      reason = "Resolve quit"
+      break
+    end
     heartbeat()
   end
   if os_time() - last_activity > IDLE_LIMIT then break end
