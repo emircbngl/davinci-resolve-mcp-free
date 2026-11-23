@@ -289,6 +289,12 @@ def test_return_is_pressed_only_with_the_focus_in_the_console():
     assert script.count("key code 36") == 1 and guard < script.index("key code 36")
     assert script.index("if not frontmost then return") < script.index("set value of input")
     assert "keystroke" not in script and "clipboard" not in script
+    # Raising the Console renumbers Resolve's windows: it is looked up again before use,
+    # and a lookup that fails is tried again instead of ending the request.
+    raised = script.index('perform action "AXRaise"')
+    assert raised < script.index("set w to my consoleWindow()", raised) < script.index("set input to")
+    assert script.index("repeat 10 times") < script.index("set state to my typeIt(") < script.index("on typeIt(")
+    assert script.rindex("key code 36") > script.rindex("set focused of input to true")
 
 
 # ── whether the channel is there ─────────────────────────────────────────────

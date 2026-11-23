@@ -98,6 +98,12 @@ end tell
 # Return is pressed only while Resolve is the front app and the Console's input has the
 # keyboard focus; otherwise it would go to whatever else is focused (a dialog's default
 # button, another app).
+# System Events knows windows by their position in the stack, so a number found a moment
+# ago can mean another window by now: raising the Console renumbers them, and so does any
+# window that comes or goes (seen once on 21.2.0 Free: "Can't get text area 1 of window 1").
+# typeIt therefore looks the Console up again after raising it, and the whole step is
+# tried again when a lookup fails. Nothing has been typed at that point: Return is the
+# last thing typeIt does.
 _TYPE = _FIND + '''
 on run
 	tell application "DaVinci Resolve" to activate
@@ -107,8 +113,7 @@ on run
 			delay 0.05
 		end repeat
 		if not frontmost then return "NOTFRONT"
-		set w to my consoleWindow()
-		if w is 0 then
+		if (my consoleWindow()) is 0 then
 			try
 				click menu item "Console" of menu 1 of menu bar item "Workspace" of menu bar 1
 			on error msg number n
@@ -118,21 +123,36 @@ on run
 			end try
 			repeat 30 times
 				delay 0.1
-				set w to my consoleWindow()
-				if w is not 0 then exit repeat
+				if (my consoleWindow()) is not 0 then exit repeat
 			end repeat
-			if w is 0 then return "NOCONSOLE"
 		end if
-		set input to item 1 of my consoleAreas(w)
-		set value of input to __TEXT__
+	end tell
+	set state to "NOCONSOLE"
+	repeat 10 times
+		try
+			set state to my typeIt(__TEXT__)
+		on error msg number n
+			if msg contains "assistive access" or n is -25211 then error msg number n
+			set state to "NOFOCUS"
+		end try
+		if state is "SENT" then exit repeat
+		delay 0.1
+	end repeat
+	return state
+end run
+
+on typeIt(theText)
+	tell application "System Events" to tell process "Resolve"
+		set w to my consoleWindow()
+		if w is 0 then return "NOCONSOLE"
 		-- After Resolve changed page or opened a timeline the Console is no longer the
 		-- window that takes keys, and its input refuses the focus until it is raised.
-		repeat 10 times
-			perform action "AXRaise" of window w
-			set focused of input to true
-			if focused of input then exit repeat
-			delay 0.1
-		end repeat
+		perform action "AXRaise" of window w
+		set w to my consoleWindow()
+		if w is 0 then return "NOCONSOLE"
+		set input to item 1 of my consoleAreas(w)
+		set value of input to theText
+		set focused of input to true
 		if not ((focused of input) and frontmost) then
 			set value of input to ""
 			return "NOFOCUS"
@@ -140,7 +160,7 @@ on run
 		key code 36
 		return "SENT"
 	end tell
-end run
+end typeIt
 '''
 
 _READ = _FIND + '''

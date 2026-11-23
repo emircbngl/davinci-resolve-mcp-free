@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1
+
+### Fixed
+- Console channel: a request could end with "Can't get text area 1 of window 1" before anything was typed. System Events numbers Resolve's windows by their place in the stack, and the number found for the Console meant another window a moment later (raising the Console renumbers them; so does any window that comes or goes). Seen once on Resolve 21.2.0 Free, on the third call of a fresh server. The Console is now looked up again after it is raised, and a lookup that fails is tried again, up to ten times; Return is still the last step, so nothing is typed twice. Afterwards 40 of 40 real requests with page changes in between went through.
+
 ## 0.3.0
 
 Focus: one request, a finished rough cut. The agent can *look* — at footage, and at Resolve itself — find problem stretches, cut talking footage by the word, preview and check the cut without Resolve, and control Resolve Free 21.2 again (macOS).
