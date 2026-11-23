@@ -169,7 +169,7 @@ def test_every_tool_that_needs_resolve_is_in_the_live_ledger():
     assert set(verified.LIVE_CONSOLE) <= set(verified.LIVE)
     also = tools["run_lua"]["verified_live"]["also"]
     assert [(a["resolve"], a["channel"]) for a in also] == [("21.2.0 Free", "console")]
-    assert "also" not in tools["add_title"]["verified_live"]
+    assert "also" not in tools["screenshot_resolve"]["verified_live"]
     assert tools["send_keystroke"]["verified_live"] is None
     assert tools["probe_media"]["verified_live"] is None
 

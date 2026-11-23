@@ -648,10 +648,24 @@ Tests: 29 for the Console (the real script under LuaJIT without io, ffi, debug, 
 window that keeps 131,072 characters and shows output one look late), 4 for `start`; 24
 guards removed one at a time, 24 red.
 
+Second pass (Emir: push only when nothing is left). Every other tool that needs Resolve was
+run on 21.2.0 Free through the Console, on a small timeline of two generated clips: 24 of 24
+steps ok (media import, a timeline from source ranges, clip colour, zoom and opacity read
+back, tracks, a title with Turkish letters, a grade, marker list / update / delete, quality
+markers, FCPXML and EDL export, a 9:16 copy, ripple delete, checkpoint save / list / restore,
+a .drp backup, a 2 s render to 100%, creating a project and opening the first one again).
+Looked at: the zoomed and dimmed clip with its title, the desaturated bars, the untouched
+clip. Then the server as a process, driven by a real MCP client over stdio: 52 tools, the
+channel list with `console`, status, state, `run_lua`, a marker, two frames as images, a
+timeline switch, and `resolve://state` answering without touching the Console.
+
 Not done, not verified:
-- The connected MCP server still runs the old code until it is restarted; everything above
-  was run with the new code from a shell (which types through the Claude app's permission).
-  The server's own Python does have Accessibility on this Mac (its `menu_pick` clicked).
+- The Claude app on the maintainer's Mac starts resolve-pilot from a separate install (a
+  copy made on 2026-10-15), not from this repository, so the app's own sessions keep the
+  old tools until that install is updated. It was left as
+  it is: replacing it changes the tools of every open session, which is Emir's call.
+- Starting from a closed Resolve on 21.2 (`setup_bridge(start)` launching it and waiting
+  for the Console): simulated machine only; Resolve was open and was not closed for it.
 - Windows and Linux: no console channel. Another interface language with the Console closed.
 - 20.x and Studio: `channel="console"` can be asked for but was never tried there.
 - Typing while a tool runs: a key the user presses in Resolve in that second could land in

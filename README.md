@@ -151,31 +151,31 @@ The test suite runs against a mock of Resolve's API, so this table records what 
 | `export_srt` | a file you import | ✅ 20.3 Free, macOS (file import) | non-ASCII captions |
 | `get_resolve_state` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | <br>21.2.0: 198 clips with their sources; markers |
 | `import_timeline` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | FCPXML from export_fcpxml; paths with spaces, # and non-ASCII; with plan_id a 198-clip cut passes, a wrong frame rate is named<br>21.2.0: the 198-clip cut with plan_id: every clip on the plan's frames |
-| `import_media` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) | bins, files already in the bin reused |
-| `append_clips` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) | new timeline, exact source ranges, 23.976 into 24, audio on A2 at a record time |
-| `remove_clips` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) | ripple delete |
+| `import_media` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | bins, files already in the bin reused<br>21.2.0: two files into a new bin |
+| `append_clips` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | new timeline, exact source ranges, 23.976 into 24, audio on A2 at a record time<br>21.2.0: a new timeline from three source ranges |
+| `remove_clips` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | ripple delete<br>21.2.0: ripple delete of one clip |
 | `add_markers` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | seconds and frames on a 24 fps timeline; a second marker on the same frame is skipped. 23.976 / 29.97 DF not yet<br>21.2.0: seconds; a note with Turkish letters read back |
-| `add_quality_markers` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) | re-runs replace only their own markers |
-| `set_clip_color` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) | that run found transitions being colored too; fixed since, not re-run yet |
-| `set_clip_properties` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) | zoom, pan, opacity, flip, scaling, clip enable; read back and checked with timeline_frames |
-| `set_tracks` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) | rename, lock, add |
-| `export_timeline` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) | FCPXML, EDL, OTIO, DRT, AAF, CSV |
+| `add_quality_markers` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | re-runs replace only their own markers<br>21.2.0: markers from a file's silent stretch |
+| `set_clip_color` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | that run found transitions being colored too; fixed since, not re-run yet<br>21.2.0: three clips |
+| `set_clip_properties` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | zoom, pan, opacity, flip, scaling, clip enable; read back and checked with timeline_frames<br>21.2.0: zoom and opacity, read back and seen in a frame |
+| `set_tracks` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | rename, lock, add<br>21.2.0: rename, add a video track |
+| `export_timeline` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | FCPXML, EDL, OTIO, DRT, AAF, CSV<br>21.2.0: FCPXML, EDL |
 | `apply_lut` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | a LUT from outside Resolve's LUT folder, copied in; the built-in hlg-to-rec709 on 198 phone HDR clips (37-41 dB against Apple's own conversion), an SDR timeline left alone<br>21.2.0: the built-in hlg-to-rec709 on 198 clips, looked at with timeline_frames |
-| `queue_render` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) | known preset queued, an unknown one lists the presets; format / codec / size / range: a 3 s 1080×1920 H.264 MP4 |
+| `queue_render` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | known preset queued, an unknown one lists the presets; format / codec / size / range: a 3 s 1080×1920 H.264 MP4<br>21.2.0: a 2 s H.264 MP4, rendered and probed |
 | `open_page` | Studio API · bridge · Console window · paste Lua · macOS UI | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | all seven pages<br>21.2.0: color, edit, deliver, media |
 | `run_lua` | bridge · Console window | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | results and errors; `return _G` does not hang. print capture and request globals were reworked since, not re-run yet<br>21.2.0: values, print output, Lua errors; a 370 KB answer in seven parts |
 | `send_keystroke` | macOS UI | not yet | keystrokes reach Resolve only when it is frontmost |
 | `menu_pick` | macOS UI | ✅ 20.3 Free, macOS (macOS UI) | Workspace › Scripts › ResolvePilotBridge |
 | `add_subtitles` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | timelines starting at 0 and at 01:00:00:00; a plan's 176 captions, each within a frame of the file<br>21.2.0: a plan's 176 captions, then replaced |
-| `add_title` | bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) | overlay above V1, the edit left alone |
-| `checkpoint` | bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | save, list, restore, .drp backup<br>21.2.0: save |
-| `grade_clips` | bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) | CDL grade, copy, reset; change measured on exported frames |
-| `make_format_version` | bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) | 9:16 copy of a 16:9 edit, rendered filled edge to edge |
-| `manage_projects` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | list; create a scratch project (listed once saved); open the test project again with its current timeline; wrong names<br>21.2.0: list |
-| `manage_timelines` | bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | <br>21.2.0: list |
-| `edit_markers` | bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge) |  |
+| `add_title` | bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | overlay above V1, the edit left alone<br>21.2.0: Turkish letters, seen in a frame |
+| `checkpoint` | bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | save, list, restore, .drp backup<br>21.2.0: save, list, restore, .drp backup |
+| `grade_clips` | bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | CDL grade, copy, reset; change measured on exported frames<br>21.2.0: saturation 0, measured on exported frames and seen |
+| `make_format_version` | bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | 9:16 copy of a 16:9 edit, rendered filled edge to edge<br>21.2.0: 9:16 copy |
+| `manage_projects` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | list; create a scratch project (listed once saved); open the test project again with its current timeline; wrong names<br>21.2.0: list; create an empty project; open the first one again; a wrong name |
+| `manage_timelines` | bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | <br>21.2.0: list, open |
+| `edit_markers` | bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | <br>21.2.0: list, update, delete |
 | `timeline_frames` | Studio API · bridge · Console window | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | playhead and page put back<br>21.2.0: three positions from four pages; from Deliver the stills are taken on Edit |
-| `render_status` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | <br>21.2.0: an empty queue |
+| `render_status` | Studio API · bridge · Console window · paste Lua | ✅ 20.3 Free, macOS (bridge)<br>✅ 21.2.0 Free, macOS (Console window) | <br>21.2.0: an empty queue; a job until it is complete |
 | `screenshot_resolve` | macOS UI | ✅ 20.3 Free, macOS (macOS UI) |  |
 | `open_ai_feature` | macOS UI | not yet | Studio-only features in Free answer ok: false and leave no dialog open |
 
