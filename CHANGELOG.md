@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
-Focus: the agent can *look* — at footage, and at Resolve itself — and find problem stretches.
+Focus: one request, a finished rough cut. The agent can *look* — at footage, and at Resolve itself — find problem stretches, cut talking footage by the word, preview and check the cut without Resolve, and control Resolve Free 21.2 again (macOS).
 
 Verified live on Resolve 20.3 (Free, macOS): screenshot_resolve, grab_frames, scene_frames, read_video, analyze_quality and add_quality_markers (including re-runs replacing only their own markers).
 
