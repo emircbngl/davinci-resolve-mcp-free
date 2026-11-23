@@ -272,7 +272,7 @@ def test_when_the_user_leaves_resolve_while_it_answers_it_is_brought_back(con):
 
 
 @pytest.mark.parametrize("state, says", [
-    ("comes_forward", "did not come to the front"),
+    ("comes_forward", "did not stay in front"),
     ("window", "Console window could not be opened"),
     ("takes_focus", "Return was not pressed"),
 ])
@@ -295,7 +295,7 @@ def test_return_is_pressed_only_with_the_focus_in_the_console():
     assert script.rindex("key code 36") > script.rindex("set focused of input to true")
     # An attempt that loses its footing starts over, bringing Resolve forward again, and
     # Resolve has to stay in front before anything is looked up.
-    assert script.index("repeat 6 times") < script.index("set state to my attempt(") < script.index("on attempt(")
+    assert script.index("repeat 4 times") < script.index("set state to my attempt(") < script.index("on attempt(")
     start = script.index("on attempt(")
     assert start < script.index('tell application "DaVinci Resolve" to activate') < script.index("if steady is 3")
     assert script.index("if steady < 3 then return") < script.index("my consoleWindow()", start)
@@ -310,6 +310,18 @@ def test_giving_the_front_back_waits_until_the_app_is_there(monkeypatch):
     # An app that never comes forward does not hold the request up for long.
     monkeypatch.setattr(console, "_frontmost", lambda: RESOLVE_BUNDLE_ID)
     console._activate(OTHER_APP, settle_seconds=0.2)
+
+
+def test_a_resolve_that_does_not_react_is_said_in_plain_words(monkeypatch):
+    _a_mac_with_resolve(monkeypatch)
+
+    def hangs(text):
+        raise UIAutomationError("osascript timed out after 30.0s")
+    monkeypatch.setattr(console, "_type", hangs)
+    monkeypatch.setattr(console, "_frontmost", lambda: OTHER_APP)
+    monkeypatch.setattr(console, "_activate", lambda bundle: None)
+    with pytest.raises(console.ConsoleError, match="did not stay in front.*did not react for 30 seconds"):
+        console.exec_lua("return 1")
 
 
 def test_an_app_that_quit_is_not_waited_for(monkeypatch):

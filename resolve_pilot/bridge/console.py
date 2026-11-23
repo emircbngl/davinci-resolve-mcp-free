@@ -111,7 +111,7 @@ end tell
 _TYPE = _FIND + '''
 on run
 	set state to "NOTFRONT"
-	repeat 6 times
+	repeat 4 times
 		try
 			set state to my attempt(__TEXT__)
 		on error msg number n
@@ -129,7 +129,7 @@ on attempt(theText)
 	-- Asked again every few looks: an activation of another app that was still on its
 	-- way takes the front back once, not every time.
 	set steady to 0
-	repeat 8 times
+	repeat 5 times
 		tell application "DaVinci Resolve" to activate
 		tell application "System Events" to tell process "Resolve"
 			repeat 8 times
@@ -308,8 +308,9 @@ def _parse(output: str, rid: str) -> _Reply | None:
 
 
 _TYPE_ERRORS = {
-    "NOTFRONT": "DaVinci Resolve did not come to the front, so nothing was typed. Is it running, "
-                "and not hidden behind a full-screen app?",
+    "NOTFRONT": "DaVinci Resolve did not stay in front, so nothing was typed. This channel needs "
+                "Resolve in front for about a second: if the user is working in another app, ask "
+                "them to pause, then try again. (Or Resolve is hidden behind a full-screen app.)",
     "NOCONSOLE": "Resolve's Console window could not be opened (Workspace > Console). Open a "
                  "project in Resolve first; with Resolve in another language than English, open "
                  "the Console by hand once.",
@@ -328,6 +329,8 @@ def _send(rid: str, text: str, timeout: float, want_part: int = 1, ignore: str =
         if _no_permission(str(e)):
             raise ConsoleUnavailable("This server may not use other apps' windows. "
                                      + permission_hint("Accessibility")) from None
+        if "timed out" in str(e):
+            raise ConsoleError(_TYPE_ERRORS["NOTFRONT"] + " (Resolve did not react for 30 seconds.)") from None
         raise ConsoleError(f"Resolve's Console could not be typed into: {e}") from None
     if state != "SENT":
         raise ConsoleError(_TYPE_ERRORS.get(state, f"Resolve's Console could not be typed into ({state})."))
