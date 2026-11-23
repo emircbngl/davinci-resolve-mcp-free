@@ -308,3 +308,18 @@ def test_edits_from_two_processes_are_not_lost(tmp_path):
              for k in (0, 1)]
     assert [p.wait(timeout=60) for p in procs] == [0, 0]
     assert [c.duration_seconds for c in store.load_plan(pid).clips] == [1.5] * 20
+
+
+@pytest.mark.parametrize("fps, usual", [(23.9988630621526, "24"), (29.755, "29.97"), (23.98, "23.976")])
+def test_a_frame_rate_resolve_would_round_is_flagged_with_the_one_to_set(fps, usual):
+    plan = _plan()
+    plan.fps = fps
+    warnings = [w for w in roughcut.validate_plan(plan)["warnings"] if "not a rate" in w]
+    assert len(warnings) == 1 and warnings[0].endswith('edit_plan [{"op": "set", "fps": %s}]' % usual)
+
+
+@pytest.mark.parametrize("fps", [23.976, 24.0, 25.0, 29.97, 30.0, 59.94, 60.0, 12.0])
+def test_usual_frame_rates_are_not_flagged(fps):
+    plan = _plan()
+    plan.fps = fps
+    assert not [w for w in roughcut.validate_plan(plan)["warnings"] if "not a rate" in w]

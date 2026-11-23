@@ -30,6 +30,7 @@ class Clip:
     lane: int = 0
     notes: str | None = None
     transition_out_seconds: float | None = None  # None = timeline default; 0 = hard cut
+    turn_degrees: int = 0  # clockwise quarter turns for a picture that plays on its side
 
 
 @dataclass
@@ -89,6 +90,17 @@ def _fps_rational(fps: float) -> tuple[int, int]:
     return f.numerator, f.denominator
 
 
+_TIMELINE_RATES = (23.976, 24, 25, 29.97, 30, 47.952, 48, 50, 59.94, 60, 119.88, 120)
+
+
+def nearest_timeline_rate(fps: float) -> float | None:
+    """None when ``fps`` is a rate the exporter writes exactly (a whole number or an NTSC
+    one); else the usual rate nearest to it, for telling the user what to set."""
+    if abs(fps - round(fps)) < 1e-6 or any(abs(fps - c) < 1e-3 for c in _NTSC_RATIONALS):
+        return None
+    return min(_TIMELINE_RATES, key=lambda r: abs(r - fps))
+
+
 def _frames(seconds: float, fps: float) -> int:
     return round(seconds * fps)
 
@@ -115,6 +127,46 @@ def _transition_duration_for(clip: Clip, default: float) -> float:
     if clip.transition_out_seconds is None:
         return max(0.0, default)
     return clip.transition_out_seconds
+
+
+# FCPXML turns counter-clockwise. Resolve 20.3 reads <adjust-transform rotation scale> into
+# the clip's RotationAngle and ZoomX / ZoomY as written (135 of 135 clips, read back).
+_FCPXML_ROTATION = {90: -90, 180: 180, 270: 90}
+
+
+def turn_scale(shown: tuple[int, int] | None, frame: tuple[int, int], degrees: int) -> float:
+    """How much a turned clip has to grow to fit the frame again.
+
+    Resolve first fits the picture as its file is tagged (``shown``: width, height after
+    the rotation tag) into the timeline, and the transform then turns that: a sideways 16:9
+    shot fitted into a 16:9 timeline is a narrow upright strip, which a quarter turn lays
+    flat at 9/16 of the width. A picture of unknown size is taken to have the frame's shape
+    once it is turned.
+    """
+    if degrees % 180 == 0:
+        return 1.0
+    width, height = frame
+    w, h = shown if shown and shown[0] > 0 and shown[1] > 0 else (height, width)
+    fit = min(width / w, height / h)
+    return min(width / (h * fit), height / (w * fit))
+
+
+def _shown_size(src: Path) -> tuple[int, int] | None:
+    """(width, height) as a player shows the file: the stored size, swapped by a quarter-turn tag."""
+    from resolve_pilot.analyzers.media import probe_media_cached
+
+    info = probe_media_cached(src)
+    if info is None or not info.width or not info.height:
+        return None
+    return (info.height, info.width) if info.rotation % 180 else (info.width, info.height)
+
+
+def _transform_xml(clip: Clip, frame: tuple[int, int]) -> str:
+    rotation = _FCPXML_ROTATION.get(clip.turn_degrees % 360)
+    if rotation is None:
+        return ""
+    scale = turn_scale(_shown_size(Path(clip.source_path).expanduser()), frame, clip.turn_degrees)
+    return f'<adjust-transform rotation="{rotation}" scale="{scale:.4f} {scale:.4f}"/>'
 
 
 def _media_flags(src: Path) -> tuple[bool, bool, float | None]:
@@ -273,10 +325,8 @@ def build_fcpxml(spec: TimelineSpec) -> str:
             f'duration="{_rt(bounds[i + 1] - bounds[i], fps)}" '
             f'lane="{clip.lane}"'
         )
-        if i == 0 and bed_xml:
-            spine_elements.append(f"{attrs}>{bed_xml}</asset-clip>")
-        else:
-            spine_elements.append(f"{attrs}/>")
+        inner = _transform_xml(clip, (spec.width, spec.height)) + (bed_xml if i == 0 else "")
+        spine_elements.append(f"{attrs}>{inner}</asset-clip>" if inner else f"{attrs}/>")
         if i < last_index and lay.edges[i + 1] > 0:
             spine_elements.append(transition(bounds[i + 1], lay.edges[i + 1]))
 

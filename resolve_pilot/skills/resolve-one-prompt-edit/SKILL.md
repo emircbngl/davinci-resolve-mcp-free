@@ -44,7 +44,7 @@ Read the request for what it fixes: target length, what must be in or out, langu
 8. **Captions** when asked: they are already in the preview as a subtitle track (the plan knows its transcripts). `export_srt(plan_id=...)` writes the file.
 9. **Deliver**
    - Always: the preview `path` for the user to watch, before anything touches Resolve.
-   - Into Resolve when it is live (studio / bridge) and the user wants it: `checkpoint(action="save")` if a timeline is open, `export_fcpxml(plan_id)`, `import_timeline(path)`, verify with `get_resolve_state(include_clips=true)`, then `add_subtitles(plan_id=...)`. Read `export_fcpxml`'s `warnings`: turned sources have to be turned in Resolve too (`set_clip_properties`), check with `timeline_frames`.
+   - Into Resolve when it is live (studio / bridge) and the user wants it: `checkpoint(action="save")` if a timeline is open, `export_fcpxml(plan_id)`, `import_timeline(path)`, verify with `get_resolve_state(include_clips=true)`, then `add_subtitles(plan_id=...)`. Turned sources arrive turned and zoomed to fit (the file carries it); look at a few with `timeline_frames`, which shows the picture but does not draw the captions.
    - Not live: give the `.fcpxml` path and "File › Import › Timeline".
 10. **Reply** short: what the video is now (length, how many clips from how many files), what you cut and why in one or two lines, what you left out, the issues that remain, and what you did not verify (nobody listened to the cuts; Resolve import not done). Then the preview path.
 

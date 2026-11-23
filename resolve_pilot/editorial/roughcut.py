@@ -18,7 +18,9 @@ from pathlib import Path
 
 from resolve_pilot.analyzers import MediaInfo, SceneCut, probe_media, probe_media_cached
 from resolve_pilot.editorial import wordcut
-from resolve_pilot.exporters.fcpxml import AudioBed, Clip, Layout, TimelineSpec, _frames, layout
+from resolve_pilot.exporters.fcpxml import (
+    AudioBed, Clip, Layout, TimelineSpec, _frames, layout, nearest_timeline_rate,
+)
 from resolve_pilot.transcribe import Segment
 
 
@@ -253,6 +255,11 @@ def validate_plan(plan: RoughCutPlan) -> dict[str, list[str]]:
     warnings: list[str] = []
     if plan.fps <= 0:
         errors.append(f"fps must be > 0 (got {plan.fps})")
+    elif (usual := nearest_timeline_rate(plan.fps)) is not None:
+        warnings.append(
+            f"fps {plan.fps:.6g} is not a rate a Resolve timeline has (a phone's average rate?): "
+            "Resolve rounds it, puts the audio on two alternating tracks and can leave a "
+            f'one-frame hole. Set the real one: edit_plan [{{"op": "set", "fps": {usual:g}}}]')
     if not plan.clips:
         errors.append("the plan has no clips")
     tol = 1.0 / plan.fps if plan.fps > 0 else 0.05
@@ -411,6 +418,7 @@ def plan_to_timeline_spec(plan: RoughCutPlan) -> TimelineSpec:
                 name=c.name,
                 notes=c.rationale,
                 transition_out_seconds=c.transition_out_seconds,
+                turn_degrees=plan.source_turns.get(c.source_path, 0),
             )
             for c in plan.clips
         ],

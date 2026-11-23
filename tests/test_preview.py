@@ -214,13 +214,15 @@ def test_turning_a_source_is_kept_shown_and_not_silently_lost_on_export(media, t
     after = mcp_server.render_preview(pid, wait_seconds=120)
     assert after["cached"] is False and after["frames"] == before["frames"]
     exported = mcp_server.export_fcpxml(pid, out_path=str(tmp_path / "cut.fcpxml"))
-    assert exported["turned_sources"] == [{"source": clip, "degrees": 270, "clips": [0, 1, 2]}]
-    assert "FCPXML does not carry that" in exported["warnings"][-1]
+    assert exported["turned_clips"] == 3
+    # 320x240 turned on a 320x240 timeline: counter-clockwise in the file, shrunk to fit.
+    assert (tmp_path / "cut.fcpxml").read_text().count('<adjust-transform rotation="90" scale="0.7500 0.7500"/>') == 3
     with pytest.raises(ValueError, match="source 3 does not exist; the plan has 1 source"):
         mcp_server.edit_plan(pid, [ops.TurnOp(op="turn", source=3, degrees=90)])
     cleared = mcp_server.edit_plan(pid, [ops.TurnOp(op="turn", source=0, degrees=0)])
     assert "source_turns" not in cleared
-    assert "turned_sources" not in mcp_server.export_fcpxml(pid, out_path=str(tmp_path / "plain.fcpxml"))
+    assert "turned_clips" not in mcp_server.export_fcpxml(pid, out_path=str(tmp_path / "plain.fcpxml"))
+    assert "adjust-transform" not in (tmp_path / "plain.fcpxml").read_text()
 
 
 def test_render_preview_refuses_a_plan_with_errors(media):

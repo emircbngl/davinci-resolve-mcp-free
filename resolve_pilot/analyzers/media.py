@@ -33,6 +33,36 @@ class MediaInfo:
         return asdict(self)
 
 
+# The rates cameras and timelines use.
+_STANDARD_RATES = frozenset(Fraction(n, d) for n, d in (
+    (24000, 1001), (24, 1), (25, 1), (30000, 1001), (30, 1), (48000, 1001), (48, 1), (50, 1),
+    (60000, 1001), (60, 1), (100, 1), (120000, 1001), (120, 1), (240, 1)))
+
+
+def _frame_rate(average: str | None, nominal: str | None) -> float | None:
+    """A video stream's frame rate from ffprobe's avg_frame_rate and r_frame_rate.
+
+    A phone records a variable rate: frames arrive a little early or late and some are
+    dropped, so the average comes out as 23.9989 or 29.755 while the file is a 24 or 30 fps
+    one. The nominal rate says which, and it is what Resolve conforms the clip to. A
+    timeline made at the average rate imported into Resolve 20.3 as a 24 fps one with its
+    audio on two alternating tracks and a one-frame hole.
+    """
+    def parse(text: str | None) -> Fraction | None:
+        try:
+            rate = Fraction(text) if text else None
+        except (ValueError, ZeroDivisionError):
+            return None
+        return rate if rate and rate > 0 else None
+
+    avg, nom = parse(average), parse(nominal)
+    if avg is None:
+        return None
+    if nom in _STANDARD_RATES and avg not in _STANDARD_RATES and abs(avg - nom) <= nom / 20:
+        return float(nom)
+    return float(avg)
+
+
 def _ffprobe_bin() -> str:
     path = shutil.which("ffprobe")
     if not path:
@@ -72,9 +102,7 @@ def probe_media(path: str | Path) -> MediaInfo:
         except (StopIteration, ValueError):
             rotation = 0
 
-    fps: float | None = None
-    if v and v.get("avg_frame_rate") and v["avg_frame_rate"] != "0/0":
-        fps = float(Fraction(v["avg_frame_rate"]))
+    fps = _frame_rate(v.get("avg_frame_rate"), v.get("r_frame_rate")) if v else None
 
     return MediaInfo(
         path=str(p),

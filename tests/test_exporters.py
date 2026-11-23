@@ -1,6 +1,8 @@
 """Unit tests for the exporter primitives."""
 from __future__ import annotations
 
+import pytest
+
 from resolve_pilot.editorial.roughcut import RoughCutPlan
 from resolve_pilot.exporters.fcpxml import (
     Clip,
@@ -208,7 +210,7 @@ def test_roughcut_plan_roundtrips_transition_fields():
 
 import xml.etree.ElementTree as ET  # noqa: E402
 
-from resolve_pilot.exporters.fcpxml import AudioBed  # noqa: E402
+from resolve_pilot.exporters.fcpxml import AudioBed, turn_scale  # noqa: E402
 from resolve_pilot.exporters.srt import wrap_cues  # noqa: E402
 
 
@@ -287,3 +289,59 @@ def test_audio_bed_is_audio_only_and_zero_length_elements_are_skipped():
     assert "<gap" not in xml  # 0.01 s fade rounds to 0 frames at 24 fps
     late = _two_clip_spec(audio_bed=AudioBed(source_path="/tmp/song.wav", offset_seconds=10))
     assert 'lane="-1"' not in build_fcpxml(late)
+
+
+# ── Turned sources ride in the file (tried on Resolve 20.3 Free: rotation and scale
+#    arrive as the clip's RotationAngle and ZoomX / ZoomY) ───────────────────────
+
+@pytest.mark.parametrize("shown, frame, degrees, scale", [
+    ((2160, 3840), (3840, 2160), 270, 16 / 9),   # sideways 4K phone shot, tagged upright
+    ((1080, 1920), (3840, 2160), 90, 16 / 9),    # the same shape at another size
+    (None, (3840, 2160), 90, 16 / 9),            # size unknown: taken to have the frame's shape
+    ((3840, 2160), (3840, 2160), 180, 1.0),      # upside down: nothing to refit
+    ((1920, 1080), (1920, 1080), 90, 9 / 16),    # a landscape picture stood on end shrinks to fit
+    ((1080, 1920), (1080, 1920), 270, 9 / 16),
+    ((1080, 1080), (1920, 1080), 90, 1.0),       # a square stays as it is
+])
+def test_turn_scale_refits_the_turned_picture(shown, frame, degrees, scale):
+    assert turn_scale(shown, frame, degrees) == pytest.approx(scale)
+
+
+def test_turned_clips_carry_a_transform_and_others_none():
+    spec = TimelineSpec(name="t", fps=24, width=3840, height=2160, clips=[
+        Clip("/tmp/a.mov", 0.0, 2.0, turn_degrees=270),
+        Clip("/tmp/b.mov", 0.0, 2.0, turn_degrees=90),
+        Clip("/tmp/c.mov", 0.0, 2.0, turn_degrees=180),
+        Clip("/tmp/d.mov", 0.0, 2.0),
+    ])
+    a, b, c, d = _spine(build_fcpxml(spec))
+    # FCPXML turns counter-clockwise, the plan clockwise.
+    assert a.find("adjust-transform").attrib == {"rotation": "90", "scale": "1.7778 1.7778"}
+    assert b.find("adjust-transform").attrib == {"rotation": "-90", "scale": "1.7778 1.7778"}
+    assert c.find("adjust-transform").attrib == {"rotation": "180", "scale": "1.0000 1.0000"}
+    assert d.find("adjust-transform") is None and len(d) == 0
+
+
+def test_a_turned_first_clip_keeps_its_audio_bed_after_the_transform():
+    spec = _two_clip_spec(audio_bed=AudioBed(source_path="/tmp/song.wav"))
+    spec.clips[0].turn_degrees = 270
+    first = _spine(build_fcpxml(spec))[0]
+    # The order the FCPXML DTD wants: adjustments, then connected clips.
+    assert [child.tag for child in first] == ["adjust-transform", "asset-clip"]
+    assert first.find("asset-clip").get("lane") == "-1"
+
+
+def test_the_zoom_goes_by_the_picture_as_the_file_is_tagged(media, tmp_path):
+    import subprocess
+
+    from tests.conftest import FFMPEG
+    tagged = tmp_path / "tagged.mp4"   # 320x240 stored, tagged a quarter turn: players show 240x320
+    subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-display_rotation", "90",
+                    "-i", str(media["clip"]), "-c", "copy", str(tagged)], check=True)
+    spec = TimelineSpec(name="t", fps=24, width=320, height=240, clips=[
+        Clip(str(tagged), 0.0, 1.0, turn_degrees=270), Clip(str(media["clip"]), 0.0, 1.0, turn_degrees=270)])
+    a, b = _spine(build_fcpxml(spec))
+    # Fitted upright it is 180x240; laid flat 240x180, which grows by 4/3 to fill 320x240.
+    assert a.find("adjust-transform").get("scale") == "1.3333 1.3333"
+    # The untagged one is shown as stored: stood on end it has to shrink.
+    assert b.find("adjust-transform").get("scale") == "0.7500 0.7500"

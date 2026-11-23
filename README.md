@@ -147,7 +147,7 @@ The test suite runs against a mock of Resolve's API, so this table records what 
 |---|---|---|---|
 | `resolve_pilot_status` | bridge heartbeat, Resolve's process | ✅ 20.3 Free, macOS (bridge) | channel switches from manual to bridge |
 | `setup_bridge` | Resolve's Scripts folder | ✅ 20.3 Free, macOS (bridge) | install into Workspace › Scripts, status |
-| `export_fcpxml` | a file you import | ✅ 20.3 Free, macOS (file import) | imported with import_timeline: clips, dissolves, the music bed on its own audio track |
+| `export_fcpxml` | a file you import | ✅ 20.3 Free, macOS (file import) | imported with import_timeline: clips, dissolves, the music bed on its own audio track; a 198-clip cut of 10 phone clips frame for frame, turned sources arriving turned and zoomed to fit |
 | `export_srt` | a file you import | ✅ 20.3 Free, macOS (file import) | non-ASCII captions |
 | `get_resolve_state` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) |  |
 | `import_timeline` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | FCPXML from export_fcpxml; paths with spaces, # and non-ASCII |
@@ -166,7 +166,7 @@ The test suite runs against a mock of Resolve's API, so this table records what 
 | `run_lua` | bridge | ✅ 20.3 Free, macOS (bridge) | results and errors; `return _G` does not hang. print capture and request globals were reworked since, not re-run yet |
 | `send_keystroke` | macOS UI | not yet | keystrokes reach Resolve only when it is frontmost |
 | `menu_pick` | macOS UI | ✅ 20.3 Free, macOS (macOS UI) | Workspace › Scripts › ResolvePilotBridge |
-| `add_subtitles` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | timelines starting at 0 and at 01:00:00:00 |
+| `add_subtitles` | Studio API · bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | timelines starting at 0 and at 01:00:00:00; a plan's 176 captions, each within a frame of the file |
 | `add_title` | bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | overlay above V1, the edit left alone |
 | `checkpoint` | bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | save, list, restore, .drp backup |
 | `grade_clips` | bridge · paste Lua | ✅ 20.3 Free, macOS (bridge) | CDL grade, copy, reset; change measured on exported frames |

@@ -380,3 +380,54 @@ yet tried" now says what was reported, per patch release, and points at 20.3.x.
 install suggestion comes back on 21.1.2 Free). Every 21.1 statement is a user report, not a
 maintainer measurement: nobody here has a 21.1 install. Whether pasted Lua (the manual
 channel) still works on 21.1.2 Free is unknown, so the notes do not claim it.
+
+# Tried in Resolve: the one-request cut on a real timeline (20.3 Free, project resolve-pilot-test)
+
+The vlog plan (198 clips, 10 phone sources, 6 of them turned) was exported, imported and read
+back. What Resolve did, and what follows from it:
+
+- The plan's fps was the first source's *average* rate, 23.9989 (phones record a variable rate).
+  Resolve made a 24 fps timeline of it, put the audio on two alternating tracks (99 + 99) and
+  left a one-frame hole after clip 137. The same plan at exactly 24: one audio track, 198 of 198
+  clips where the plan puts them.
+- Resolve shows rotation-tagged clips as players do (the six sideways ones on their side).
+- `<adjust-transform rotation scale>` inside an FCPXML clip arrives as RotationAngle / ZoomX /
+  ZoomY (135 of 135 clips, values read back), so the file itself can carry a plan's turns.
+  Rotation is counter-clockwise; a quarter turn of 16:9 footage on a 16:9 timeline needs 16/9 zoom.
+- The plan's captions: 176 of 176 cues landed, none more than a frame (worst 0.020 s) from the file.
+
+- [x] `probe_media`: `fps` is the file's nominal rate when the average is within 5% of it
+- [x] `validate_plan`: warn about a frame rate Resolve timelines do not have (older plans)
+- [x] FCPXML carries the turns: `Clip.turn_degrees`, `<adjust-transform>`, zoom from the source's
+      shown size and the timeline's; `export_fcpxml` no longer asks for a manual step
+- [x] `timeline_frames`: the positions' shape in the description (a client dropped the item schema)
+- [x] Tests for each, red without the change; a 180° turn and a turned first clip with a music
+      bed and fade-in tried in Resolve
+- [x] Guides, README, CHANGELOG, the verified matrix; full pytest + ruff; commit
+
+## Review
+
+411 passed (379 before), ruff clean. 15 mutations (the average rate used again, the tolerance, a real
+average overruled, a broken rate, the plan warning, usual rates flagged, the turn's direction,
+the refit, a half turn, an unknown size, the rotation tag, the bed's place and its loss, the
+plan's turns not reaching the exporter): the tests went red each time; one stayed green at
+first (no case had a real average next to a different nominal rate) and got its case.
+
+In Resolve 20.3 Free, project resolve-pilot-test, through the product code after the change
+(timeline "vlog otomatik 4"): 198 of 198 clips on the plan's frames and source ranges, one
+audio track, 135 turned clips with the rotation and zoom read back (97 at 90 / 1.7778, 38 at
+-90 / 1.7778), 176 of 176 captions within a frame. Two small timelines ("turn test 1 / 2"):
+a 180° turn, dissolves, a fade-in, and a music bed on a turned first clip all arrive.
+
+- The zoom assumes the project fits mismatched clips into the frame (`scaleToFit`, Resolve's
+  default and this project's setting); a project set to centre-crop was not tried.
+- Looked at one frame of each source in Resolve; nobody watched the timeline play, and
+  nobody listened to the cuts there.
+- Noticed, not handled: the phone clips are HDR (Rec.2100 HLG) and the project is not colour
+  managed, so the picture is pale in Resolve. The preview does not tone-map either.
+- `timeline_frames` does not draw the subtitle track.
+- Left in the test project: "vlog otomatik 1" (the 23.9989 import with the split audio and
+  the hole), "vlog otomatik 2 (24 fps)" (one clip turned by hand), "vlog otomatik 3 (donuk)"
+  (the hand-edited FCPXML), "vlog otomatik 4", "turn test 1 / 2". Nothing was deleted.
+- The connected MCP server still runs the old code; the new tools were driven from Python
+  against the same bridge.

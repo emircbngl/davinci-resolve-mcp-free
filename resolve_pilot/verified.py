@@ -54,7 +54,8 @@ LIVE: dict[str, LiveCheck] = {
     "render_status": _r20("bridge"),
     "open_page": _r20("bridge", "all seven pages"),
     "timeline_frames": _r20("bridge", "playhead and page put back"),
-    "add_subtitles": _r20("bridge", "timelines starting at 0 and at 01:00:00:00"),
+    "add_subtitles": _r20("bridge", "timelines starting at 0 and at 01:00:00:00; a plan's 176 "
+                                    "captions, each within a frame of the file"),
     "add_title": _r20("bridge", "overlay above V1, the edit left alone"),
     "checkpoint": _r20("bridge", "save, list, restore, .drp backup"),
     "import_media": _r20("bridge", "bins, files already in the bin reused"),
@@ -68,7 +69,9 @@ LIVE: dict[str, LiveCheck] = {
     "screenshot_resolve": _r20("macos_ui"),
     "menu_pick": _r20("macos_ui", "Workspace › Scripts › ResolvePilotBridge"),
     "export_fcpxml": _r20("file import", "imported with import_timeline: clips, dissolves, the "
-                                         "music bed on its own audio track"),
+                                         "music bed on its own audio track; a 198-clip cut of 10 "
+                                         "phone clips frame for frame, turned sources arriving "
+                                         "turned and zoomed to fit"),
     "export_srt": _r20("file import", "non-ASCII captions"),
 }
 

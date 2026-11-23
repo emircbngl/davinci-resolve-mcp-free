@@ -67,3 +67,31 @@ def test_cover_art_is_not_treated_as_video(media, tmp_path):
     assert info.video_codec is None and info.width is None
     assert info.audio_codec == "aac"
     assert probe_media(media["clip"]).video_codec == "h264"
+
+
+# ── Frame rate: what the file is, not the average of a phone's uneven frames ─
+
+@pytest.mark.parametrize("average, nominal, fps", [
+    ("189975/7916", "24/1", 24.0),             # a real iPhone clip: 23.9989 on average
+    ("412200/13853", "30/1", 30.0),            # another, with dropped frames: 29.755
+    ("2997/125", "24000/1001", 24000 / 1001),  # 23.976 written as a decimal fraction
+    ("24000/1001", "24000/1001", 24000 / 1001),
+    ("24000/1001", "24/1", 24000 / 1001),      # the average is a real rate: keep it
+    ("30/1", "60/1", 30.0),
+    ("17/1", "60/1", 17.0),                    # nowhere near the nominal rate: keep it
+    ("25/1", None, 25.0),
+    ("0/0", "24/1", None),
+    (None, "24/1", None),
+])
+def test_frame_rate_is_the_nominal_one_when_the_average_is_a_phones(average, nominal, fps):
+    from resolve_pilot.analyzers.media import _frame_rate
+    assert _frame_rate(average, nominal) == fps
+
+
+@needs_ffmpeg
+def test_a_clip_with_a_dropped_frame_is_still_a_30_fps_clip(tmp_path):
+    clip = tmp_path / "phone.mp4"   # 59 frames in 2 s: 29.5 on average, 30 fps by its timestamps
+    subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "testsrc=size=160x120:rate=30:duration=2", "-vf", r"select='not(eq(n\,7))'",
+                    "-fps_mode", "vfr", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(clip)], check=True)
+    assert probe_media(clip).fps == 30.0

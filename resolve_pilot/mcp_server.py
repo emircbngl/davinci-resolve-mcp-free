@@ -1150,7 +1150,7 @@ def edit_plan(
     - insert {clip, index?}: index omitted = append
     - turn {source, degrees}: turn every clip of one source (index into `sources`) by 90 /
       180 / 270 degrees clockwise, for footage that plays on its side (a phone held
-      sideways but tagged upright). render_preview shows it; FCPXML cannot carry it
+      sideways but tagged upright). render_preview shows it and export_fcpxml carries it
     - set {title?, fps?, width?, height?, default_transition_seconds?, fade_in_seconds?,
       fade_out_seconds?, audio_bed?, notes?}: audio_bed=null removes the music bed
     """
@@ -1221,7 +1221,8 @@ def export_fcpxml(plan_id: str, out_path: OutPath = None, overwrite: Overwrite =
     """Write a stored plan as FCPXML 1.10 (Resolve Free & Studio: File > Import > Timeline).
 
     Refuses plans with errors. Afterwards call import_timeline(path) to load it into Resolve
-    directly when the bridge or Studio API is available.
+    directly when the bridge or Studio API is available. Sources turned in the plan arrive
+    turned and zoomed to fit (`turned_clips`).
     """
     plan = store.load_plan(plan_id)
     report = roughcut.validate_plan(plan)
@@ -1234,23 +1235,13 @@ def export_fcpxml(plan_id: str, out_path: OutPath = None, overwrite: Overwrite =
         target, reserved = _default_output(plan.clips[0].source_path, plan.title, ".fcpxml"), True
     final = _write_reserved(target, reserved, lambda t: fcpxml_export.write_fcpxml(spec, t))
     warnings = list(report["warnings"])
-    turned = []
-    for path, degrees in plan.source_turns.items():
-        clips = [i for i, c in enumerate(plan.clips) if c.source_path == path]
-        if clips and degrees:
-            turned.append({"source": path, "degrees": degrees, "clips": clips})
-    if turned:
-        warnings.append(
-            f"{len(turned)} source(s) are turned in the plan (see `turned_sources`); FCPXML does not "
-            "carry that, so the imported clips still play as their files are tagged. After "
-            "import_timeline turn those clips with set_clip_properties (RotationAngle, then "
-            "ZoomX / ZoomY to fill the frame) and look with timeline_frames. Not tried in Resolve yet.")
+    turned = sum(1 for c in plan.clips if plan.source_turns.get(c.source_path))
     return {
         "path": str(final),
         "clip_count": len(plan.clips),
         "total_seconds": _r(plan.total_seconds),
         "warnings": warnings,
-        **({"turned_sources": turned} if turned else {}),
+        **({"turned_clips": turned} if turned else {}),
         "next_step": f"import_timeline(path={str(final)!r}) or, without a live channel, "
                      "tell the user: File > Import > Timeline.",
     }
@@ -2442,7 +2433,7 @@ class TimelinePosition(BaseModel):
 @tool(_hints(read_only=False, idempotent=True), title="Timeline frames")
 def timeline_frames(
     positions: Annotated[list[TimelinePosition], Field(min_length=1, max_length=24, description=(
-        "Where to look, as offsets from the timeline start (seconds or frame)."))],
+        'Where to look, from the timeline start: [{"seconds": 12.5}, {"frame": 300}].'))],
     layout: Layout = "separate",
     width: FrameWidth = 640,
     channel: Channel = "auto",
