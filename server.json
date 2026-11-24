@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.emircbngl/davinci-resolve-mcp-free",
+  "title": "DaVinci Resolve MCP (works in Resolve Free)",
+  "description": "Edit video in DaVinci Resolve Free: rough cuts, timelines, markers, subtitles, grades, renders.",
+  "repository": {
+    "url": "https://github.com/emircbngl/davinci-resolve-mcp-free",
+    "source": "github"
+  },
+  "version": "0.3.2",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "davinci-resolve-mcp-free",
+      "version": "0.3.2",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

@@ -1,5 +1,7 @@
 # DaVinci Resolve MCP — Works in DaVinci Resolve Free
 
+<!-- mcp-name: io.github.emircbngl/davinci-resolve-mcp-free -->
+
 **Claude-driven video editing that runs in [DaVinci Resolve Free](https://www.blackmagicdesign.com/products/davinciresolve) — the no-cost edition that Blackmagic ships at $0.** No Studio license required, no API key required.
 
 > ℹ️ **What "free" means here:** DaVinci Resolve ships in two editions — **Free** (no cost) and **Studio** (~$295 one-time license). Studio exposes a Python scripting API for automation; Free does not — and since **Resolve 21.1, Python scripting (and Resolve's own MCP server) are Studio-only**, so MCP servers that drive Free through Python stop working there. This project gets Claude-driven editing working in **Resolve Free too**, through a Lua bridge that runs inside Resolve (verified on 20.3 Free; reported working from the Console on 21.1.1 Free). **On 21.1.2+ Free the bridge cannot start**: its Console Lua has no file access any more (measured on 21.2.0 Free). There, on macOS, the server uses Resolve's own Console window instead: it types each tool's Lua at the prompt and reads the printed answer (the `console` channel, measured on 21.2.0 Free; needs Accessibility permission; Resolve stays in the background while tools run, and comes to the front only when its Console cannot be reached otherwise). Plus FCPXML and UI automation:

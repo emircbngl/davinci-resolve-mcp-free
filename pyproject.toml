@@ -10,6 +10,15 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "resolve-pilot" }]
+keywords = ["mcp", "davinci-resolve", "video-editing", "claude", "fcpxml"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Multimedia :: Video :: Non-Linear Editor",
+]
 dependencies = [
     # 1.x (FastMCP) and 2.x (MCPServer) are both supported, see mcp_server.py.
     "mcp>=1.27.0,<3",
@@ -42,9 +51,21 @@ dev = [
 
 [project.scripts]
 resolve-pilot = "resolve_pilot.mcp_server:main"
+# The package's own name, so that `uvx davinci-resolve-mcp-free` starts the server.
+davinci-resolve-mcp-free = "resolve_pilot.mcp_server:main"
+
+[project.urls]
+Repository = "https://github.com/emircbngl/davinci-resolve-mcp-free"
+Changelog = "https://github.com/emircbngl/davinci-resolve-mcp-free/blob/main/CHANGELOG.md"
+Issues = "https://github.com/emircbngl/davinci-resolve-mcp-free/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["resolve_pilot"]
+
+[tool.hatch.build.targets.sdist]
+# The package, its tests and what they read; not the working notes of the repository.
+include = ["/resolve_pilot", "/tests", "/assets", "/examples", "/README.md", "/CHANGELOG.md",
+           "/LICENSE", "/server.json"]
 
 [tool.ruff]
 line-length = 100

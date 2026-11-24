@@ -1,0 +1,110 @@
+name: Publish
+
+# Puts a released version on PyPI and in the MCP Registry. Started by hand on a version
+# tag (Actions > Publish > Run workflow > the tag). No token is stored anywhere: PyPI
+# trusts this workflow in this repository (Trusted Publishing), and the MCP Registry
+# takes GitHub's own proof of which repository is running.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PACKAGE: davinci-resolve-mcp-free
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: The tag, the package and server.json name the same version
+        id: version
+        run: |
+          python - <<'PY'
+          import json, os, sys, tomllib
+          ref = os.environ["GITHUB_REF"]
+          if not ref.startswith("refs/tags/v"):
+              sys.exit(f"Run this on a version tag (v1.2.3), not on {ref}.")
+          tag = ref.removeprefix("refs/tags/v")
+          project = tomllib.load(open("pyproject.toml", "rb"))["project"]
+          server = json.load(open("server.json"))
+          found = {"pyproject.toml": project["version"], "server.json": server["version"],
+                   "server.json package": server["packages"][0]["version"]}
+          wrong = {where: v for where, v in found.items() if v != tag}
+          if wrong or project["name"] != os.environ["PACKAGE"]:
+              sys.exit(f"Tag v{tag} does not match: {wrong or project['name']}")
+          open(os.environ["GITHUB_OUTPUT"], "a").write(f"version={tag}\n")
+          PY
+      - run: python -m pip install build twine
+      - run: python -m build
+      - run: twine check --strict dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  pypi:
+    name: PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # Trusted Publishing: PyPI checks who is running, no token
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true   # so a run that stopped after this step can be started again
+
+  registry:
+    name: MCP Registry
+    needs: [build, pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # the registry checks which repository is publishing
+      contents: read
+    env:
+      MCP_PUBLISHER_VERSION: v1.8.1
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Wait until PyPI shows the new version
+        run: |
+          for _ in $(seq 1 30); do
+            if curl --fail --silent --output /dev/null "https://pypi.org/pypi/${PACKAGE}/${VERSION}/json"; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "PyPI does not show ${PACKAGE} ${VERSION} after five minutes." >&2
+          exit 1
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Download mcp-publisher and check who built it
+        run: |
+          set -euo pipefail
+          os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+          arch="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+          archive="mcp-publisher_${os}_${arch}.tar.gz"
+          base_url="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}"
+          curl --fail --location --silent --show-error --output "$archive" "$base_url/$archive"
+          curl --fail --location --silent --show-error --output "$archive.sigstore.json" "$base_url/$archive.sigstore.json"
+          cosign verify-blob \
+            --bundle "$archive.sigstore.json" \
+            --certificate-identity "https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/${MCP_PUBLISHER_VERSION}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "$archive"
+          tar xzf "$archive" mcp-publisher
+          rm -f "$archive" "$archive.sigstore.json"
+      - run: ./mcp-publisher login github-oidc
+      - run: ./mcp-publisher publish
