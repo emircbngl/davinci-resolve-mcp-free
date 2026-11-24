@@ -175,8 +175,12 @@ TRAPS: tuple[Trap, ...] = (
                  "Free: a 198-clip import checked against its plan, LUT, markers, subtitles, "
                  "stills). Nothing is written or read by Lua inside Resolve. The Console keeps "
                  "its last 131,072 characters and drops a longer line whole, so answers come in "
-                 "parts of 60,000; Resolve's windows are visible to Accessibility only while it "
-                 "is the front app, so each call brings it forward and gives the front back. On "
+                 "parts of 60,000. Resolve stays in the background: System Events does not list "
+                 "the Console then (the panel hides), but Accessibility hands it out as Resolve's "
+                 "focused window and a Return sent to Resolve's process runs the line. Resolve "
+                 "comes to the front only when the Console cannot be reached that way (closed, "
+                 "a dialog open; RESOLVE_PILOT_CONSOLE=front asks for it always) and then stays "
+                 "there for RESOLVE_PILOT_CONSOLE_HOLD seconds after a call (default 4). On "
                  "Windows and Linux the manual channel is left: give the user lua_code and the "
                  "instructions.",
         source="measured",

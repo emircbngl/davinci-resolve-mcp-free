@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.2
+
+### Changed
+- **Console channel: Resolve stays in the background.** Until now every call brought Resolve to the front, typed, and gave the front back: two app switches and about 1.5 s per call, during which the user could not use the machine. A call now leaves Resolve where it is. Measured on Resolve 21.2.0 Free with another app in front: 30 calls with a median of 0.026 s each (the first, which types the helper, 0.44 s), a 6,000-row answer in 0.17 s, and the app in front never changed.
+  - Why it needed the front before: System Events finds a window in the app's window list, and that list leaves out the Console while Resolve is in the background (the Console is a panel that hides then). Accessibility itself still hands the Console out as Resolve's focused window, an input or output found once keeps answering while its window is hidden, and a Return sent to Resolve's process runs the line. The server now talks to Accessibility directly (no new dependency) and keeps those parts.
+  - If the user last clicked somewhere else in Resolve, the Console is given the keyboard focus inside Resolve first; that changes nothing on screen while Resolve is in the background.
+  - Resolve still comes to the front when the Console cannot be reached that way: it is closed, a dialog in Resolve has the keyboard, or a Return sent to the process did not arrive (the line is then typed again the old way; after two in a row the old way is used from then on). `RESOLVE_PILOT_CONSOLE=front` asks for the old way always.
+  - Measured with Resolve on another desktop than the app in front. Not tried: Resolve visible behind another app's window on the same desktop.
+- Console channel, when Resolve does have to come forward: a run of such calls switches apps once. Resolve stays in front for 4 seconds after a call (`RESOLVE_PILOT_CONSOLE_HOLD`, 0 gives the front back after every call, at most 60) while the next call would need it there again; a call in that time starts at once, and the app that was in front comes back after the last one. Measured: back to back 1.5 s before, 0.82 s so. A user who went to a third app meanwhile is left there, the front is not given back under a call that is running or while another resolve-pilot session types, and a server that exits gives it back first. As soon as the next call can be made in the background, the front is given back at once instead.
+
+### Fixed
+- Console channel: Return can no longer land in another app. It used to be pressed through System Events, which gives a key to whichever app is in front at that instant; the front and the focus were checked just before, but an app taking the front in between would have received the Return. The key event now goes to Resolve's process id with no modifier keys. System Events presses it only where such a key cannot be sent.
+- Console channel: a line that was typed but not run is noticed. Seen once on 21.2.0 Free with the user at the keyboard: the request's line never appeared in the Console, and the call waited 30 seconds for "did not answer in time", which reads as if the code might have run. The Console empties its input before it runs a line, so a line still there (three looks in a row, 0.6 s after Return) has not run: it is typed again, once, and if Return still does not arrive the call ends within seconds, says that nothing ran, and takes the line out of the input. Measured with a Return that was deliberately not sent: answered in 2.3 s, run exactly once.
+- Console channel: a Resolve that is busy (a long import, the request before still running) is said so after ten seconds, with nothing typed, instead of after a 30-second wait in front.
+
 ## 0.3.1
 
 ### Fixed

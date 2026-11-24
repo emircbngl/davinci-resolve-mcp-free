@@ -672,3 +672,77 @@ Not done, not verified:
   the Console's input. The tool cannot prevent it; the guide tells the agent to say so.
 - Blackmagic has narrowed Free's scripting with every 21.x release. If a later release takes
   the Console away or closes it to Accessibility, this channel ends with it.
+
+# Console channel in the background, and publishing without tokens (0.3.2)
+
+Emir, after 0.3.1: "do those too" (keeping Resolve in front over a run of calls; PyPI and the
+MCP Registry). Then, seeing the hold at work: "it is not nice that it brings the Console to
+the front every time, I cannot use the computer meanwhile. Something that works from behind
+is enough."
+
+## Plan
+- [x] Keep Resolve in front for a few seconds after a call that needed it there; the next
+      call starts at once and the app that was in front comes back once
+      (`RESOLVE_PILOT_CONSOLE_HOLD`, default 4 s).
+- [x] Found while measuring: a Return that never reached the Console. Send Return to
+      Resolve's process alone; notice a line that was typed but not run.
+- [x] Emir's correction: no front at all. Measure what of the Console can be reached while
+      Resolve is in the background, then build on what was measured.
+- [x] Talk to Accessibility directly (ctypes, no dependency), keep the Console's input and
+      output once found, type and read with Resolve where it is. The old way stays as the
+      fallback, and the hold applies only to it.
+- [x] Tests, each guard removed once to see the tests go red. Tests can never reach a real
+      Resolve through the new way.
+- [x] `server.json`, a publish workflow (PyPI Trusted Publishing, MCP Registry through
+      GitHub's own proof of the repository), the registry's ownership line in the README, a
+      script named like the package, package metadata. Build and check the archives.
+- [ ] PyPI: the account owner adds this repository's workflow as a pending publisher (cannot
+      be done from here). Then run the workflow on the tag.
+
+## Review
+
+In the background. The summary of 0.3.0 said Resolve's windows are visible to Accessibility
+only while Resolve is in front. That was true of System Events' window list and wrong as a
+statement about Accessibility. Measured on 21.2.0 Free with another app in front:
+- the window list holds the main window only; the Console is a panel that hides while its
+  app is in the background;
+- Resolve's focused window is still handed out, and it is the Console when the Console was
+  used last; its input takes text and its output is read;
+- an input and output found once keep answering while the window is hidden;
+- when the user last clicked elsewhere in Resolve, raising the Console (an Accessibility
+  action on the kept window) gives its input the keyboard focus inside Resolve; setting the
+  focus alone does not. The window server lists no Resolve window on screen afterwards;
+- a Return sent to Resolve's process id runs the line; the app in front does not change.
+Built on that: 30 calls with a median of 0.026 s (first call 0.44 s with the helper), a
+6,000-row answer in 0.17 s, three seconds of Lua answered after 2.9 s, a Lua error reported,
+no activation and no System Events call, the app in front the same before and after.
+
+The hold (now only for calls that need Resolve in front). Measured before the background way
+existed, with the Claude app in front (medians of 8 calls): back to back 1.5 s without the
+hold, 0.82 s with it; 2.5 s apart 0.85 s; 6 s apart 1.1 s; 30 calls with mixed pauses 30 of
+30, the front changed 10 times instead of 60.
+
+The lost Return. In one of four measured runs of the old way a call waited 30 s and failed
+with "did not answer in time". The Console's own text showed why: that request's line was
+never run, though the script had reported Return as pressed. The user was at the keyboard
+at that moment. What took the key was not found; holding a modifier key was tried and is
+not it (Return with Shift, Command, Option or Control all run the line). Two things were
+changed instead of guessing further: Return is a key event for Resolve's process id, with no
+modifiers; and a line still in the input after three looks and 0.6 s has not run (the
+Console empties its input first: checked), so it is typed again once, then the call fails
+within seconds, says that nothing ran and takes the line out. Tried with a Return that was
+deliberately not sent: answered in 2.3 s, run once.
+
+Publishing. The wheel and the source archive build, pass `twine check --strict`, and the
+wheel installed into a clean environment starts under the package's own name (52 tools,
+0.3.2). `server.json` validates against the registry's schema (2025-12-11). The workflow has
+not run: it cannot before PyPI knows the publisher.
+
+Not done, not verified:
+- Nothing is on PyPI or in the MCP Registry yet. The workflow itself is untested.
+- The background way was measured on one Mac (macOS 26, Resolve 21.2.0 Free), with Resolve
+  on another desktop than the app in front. Not tried: Resolve visible behind another
+  window on the same desktop (whether raising the Console inside Resolve shows it there).
+- While a call runs the Console has Resolve's keyboard focus. A user editing in Resolve at
+  that moment types into the Console; the guide tells the agent to say so.
+- A server killed with a signal does not give the front back (only a normal exit does).

@@ -35,6 +35,10 @@ def isolated_home(tmp_path, monkeypatch):
     monkeypatch.setenv("RESOLVE_PILOT_CONSOLE", "off")
     from resolve_pilot.bridge import console
     monkeypatch.setattr(console, "_status_cache", None)
+    # Nor reach into it through Accessibility: tests that switch the Console on would
+    # otherwise put their Lua into the real one.
+    monkeypatch.setattr(console.ax, "available", lambda: False)
+    monkeypatch.setattr(console, "_quiet", console._Quiet())
     return home
 
 

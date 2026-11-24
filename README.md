@@ -2,7 +2,7 @@
 
 **Claude-driven video editing that runs in [DaVinci Resolve Free](https://www.blackmagicdesign.com/products/davinciresolve) — the no-cost edition that Blackmagic ships at $0.** No Studio license required, no API key required.
 
-> ℹ️ **What "free" means here:** DaVinci Resolve ships in two editions — **Free** (no cost) and **Studio** (~$295 one-time license). Studio exposes a Python scripting API for automation; Free does not — and since **Resolve 21.1, Python scripting (and Resolve's own MCP server) are Studio-only**, so MCP servers that drive Free through Python stop working there. This project gets Claude-driven editing working in **Resolve Free too**, through a Lua bridge that runs inside Resolve (verified on 20.3 Free; reported working from the Console on 21.1.1 Free). **On 21.1.2+ Free the bridge cannot start**: its Console Lua has no file access any more (measured on 21.2.0 Free). There, on macOS, the server uses Resolve's own Console window instead: it types each tool's Lua at the prompt and reads the printed answer (the `console` channel, measured on 21.2.0 Free; needs Accessibility permission and brings Resolve to the front for a moment on every call). Plus FCPXML and UI automation:
+> ℹ️ **What "free" means here:** DaVinci Resolve ships in two editions — **Free** (no cost) and **Studio** (~$295 one-time license). Studio exposes a Python scripting API for automation; Free does not — and since **Resolve 21.1, Python scripting (and Resolve's own MCP server) are Studio-only**, so MCP servers that drive Free through Python stop working there. This project gets Claude-driven editing working in **Resolve Free too**, through a Lua bridge that runs inside Resolve (verified on 20.3 Free; reported working from the Console on 21.1.1 Free). **On 21.1.2+ Free the bridge cannot start**: its Console Lua has no file access any more (measured on 21.2.0 Free). There, on macOS, the server uses Resolve's own Console window instead: it types each tool's Lua at the prompt and reads the printed answer (the `console` channel, measured on 21.2.0 Free; needs Accessibility permission; Resolve stays in the background while tools run, and comes to the front only when its Console cannot be reached otherwise). Plus FCPXML and UI automation:
 
 | Channel | What it does | Free | Studio |
 |---|---|:---:|:---:|
@@ -126,6 +126,8 @@ resolve_pilot/
 ├── skills/           workflow guides (served over MCP)
 └── mcp_server.py     MCP entry point (mcp SDK 1.x and 2.x)
 ```
+
+The `console` channel works with Resolve in the background. `RESOLVE_PILOT_CONSOLE=front` makes it bring Resolve forward for every call instead (it then stays in front for `RESOLVE_PILOT_CONSOLE_HOLD` seconds after a call, 4 by default, so that a run of calls switches apps once), and `RESOLVE_PILOT_CONSOLE=off` turns the channel off.
 
 State (plans, transcripts, bridge files) lives in `~/.resolve-pilot`; set `RESOLVE_PILOT_HOME` to move it, or `RESOLVE_PILOT_BRIDGE_DIR` to move only the bridge folder (re-run the bridge setup afterwards). On Windows, if your user folder has non-ASCII characters, the bridge reaches its folder through the folder's short (8.3) name, because Lua inside Resolve cannot open such paths; where short names are turned off, setup asks you to set `RESOLVE_PILOT_BRIDGE_DIR` to an ASCII folder of your own.
 

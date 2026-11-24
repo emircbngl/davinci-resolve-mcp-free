@@ -81,9 +81,9 @@ Start of session: call resolve_pilot_status once. Its `channel` says how Resolve
 it once per session; setup_bridge installs it into Workspace > Scripts.
 - console: Resolve Free 21.1.2+ cannot run the bridge. On macOS the server types each \
 action's Lua into Resolve's own Console window and reads the answer: live control as with the \
-bridge, but every call brings Resolve to the front for a moment (tell the user; they should \
-not type in Resolve meanwhile). Needs Accessibility permission; resolve_pilot_status says which \
-app to allow.
+bridge, with Resolve left in the background (it comes to the front only when its Console \
+cannot be reached otherwise, e.g. a dialog is open). Needs Accessibility permission; \
+resolve_pilot_status says which app to allow.
 - manual: nothing live. Resolve actions return `lua_code` + `instructions`; relay them to the \
 user verbatim and ask them to paste it into Workspace > Console. For hands-free control \
 setup_bridge(action='start') starts Resolve and the bridge as far as the machine allows and \
@@ -343,8 +343,8 @@ def _bridge_on_this_resolve(resolve_version: str | None, studio: bool) -> tuple[
             "the bmd file, clipboard and process functions are gone (measured on 21.2.0 Free; "
             "reported on 21.1.2). On macOS the tools reach Resolve through its Console window "
             "instead (channel 'console', measured on 21.2.0 Free): the server types the Lua into "
-            "Workspace > Console and reads the answer. That needs Accessibility permission and "
-            "brings Resolve to the front on every call. On Windows and Linux: paste a tool's "
+            "Workspace > Console and reads the answer, with Resolve left in the background. "
+            "That needs Accessibility permission. On Windows and Linux: paste a tool's "
             "lua_code into Workspace > Console, or use export_fcpxml with File > Import > "
             "Timeline. Resolve 20.3.x Free still runs the bridge.")
     return True, (
@@ -392,9 +392,10 @@ def resolve_pilot_status() -> dict[str, Any]:
     else:
         if channel == "console":
             next_steps.append(
-                "Resolve is reached through its Console window: every Resolve tool brings Resolve "
-                "to the front for a moment and types there. Tell the user, and ask them not to "
-                "type in Resolve while a tool runs.")
+                "Resolve is reached through its Console window, with Resolve left in the "
+                "background; it brings Resolve to the front only when the Console cannot be "
+                "reached otherwise. Tell the user the Console is in use, and not to type "
+                "into it.")
         next_steps.append("Call get_resolve_state to see the open project and timeline.")
     if not engines:
         next_steps.append("Transcription is not installed. In the resolve-pilot checkout run "
@@ -2835,8 +2836,8 @@ _CHANNEL_NOTES = {
               "starts it once per session (setup_bridge installs it into Workspace > Scripts).",
     "console": "The server types the tool's Lua into Resolve's own Console window and reads the "
                "printed answer (macOS, Accessibility permission). For Resolve Free 21.1.2+, where "
-               "the bridge cannot run; 'auto' picks it only there. Every call brings Resolve to "
-               "the front for a moment. Measured on 21.2.0 Free.",
+               "the bridge cannot run; 'auto' picks it only there. Resolve stays in the "
+               "background. Measured on 21.2.0 Free.",
     "manual": "Nothing live: the tool returns lua_code + instructions for the user to paste into "
               "Workspace > Console. Nothing changes until they do.",
     "macos_ui": "macOS Accessibility / screen capture of the Resolve window. macOS only; needs "
